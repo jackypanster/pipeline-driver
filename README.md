@@ -68,11 +68,13 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `parse-tail.awk` | journal-tail parser (ASCII-anchored; ignores the Unicode `·`/`→` separators) |
 | `settings.driver.json` | `--settings` for each driven run: merge `deny` rules + the PreToolUse hook |
 | `deny-merge.sh` | best-effort merge speed-bump (PreToolUse hook); parses the Bash command, denies direct/wrapped merge + trunk-clobber. NOT a boundary — see *Merge safety* |
+| `clobber-guard.sh` | trunk-clobber preflight: stdin = branch-rules JSON, exit 0 iff both `non_fast_forward` + `deletion` present |
 | `drive.config.example` | per-feature config (copy to `drive.config`) |
 | `stop-points.md` | the enumerated halt specification + hand-relay checklist |
 | `test/run.sh` | parser unit tests against a format-faithful sample journal |
 | `test/hook.sh` | merge-gate tests incl. the wrapper/refspec bypass cases |
 | `test/e2e.sh` | hermetic end-to-end loop tests (stub `claude`) + every safety halt |
+| `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
 
 ## Setup (one-time)
 
@@ -122,9 +124,9 @@ Observe progress any time with the read-only dashboard:
   journal tail from `origin/<BRANCH>` and resumes the live position.
 - **Mid-card kill** can strand a card `in-progress`; the driver detects this on the
   remote and HALTS, asking you to reset it to `todo` (not fully automatic).
-- **Blast radius:** the driver halts before review and never authorizes a merge; with
-  trunk branch protection enabled the driven impl cannot merge server-side; it also
-  cannot touch the frozen spec (review's freeze gate). The `deny-merge.sh` hook blocks
+- **Blast radius:** the driver halts before review and never authorizes a merge (the
+  merge is a human step in `pipeline-review`); the driven impl also cannot touch the
+  frozen spec (review's freeze gate). The `deny-merge.sh` hook blocks
   the standard forge routes (`gh`/`gitee-cli`/`gh api`/`curl`/graphql) and trunk
   force-/delete-pushes best-effort (a wrapped command can bypass string matching — see
   *Merge safety*). On the normal forge path the worst a runaway driver does is push code

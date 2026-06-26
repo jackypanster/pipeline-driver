@@ -42,8 +42,9 @@ CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  LIVE_SPEC_REV == CONFI
 1. **GATE 1 — before the loop.** The human reads the frozen red test and echoes its
    `spec-rev`. The driver cannot start without it, and re-fires it on any re-freeze.
 2. **GATE 2 — after the loop.** Only `pipeline-review` merges, and only after an
-   explicit human confirm. The driver HALTS before review and never runs the merge step.
-   The durable server-side gate is trunk **branch protection** (drive.sh warns if it is
-   absent); the `permissions.deny` rule + `deny-merge.sh` hook are a best-effort
-   client-side speed-bump (string matching — a wrapped command can bypass them), not a
-   security boundary.
+   explicit human confirm. The DURABLE merge gate is the driver HALTING before review
+   plus you running the merge — the feature-PR merge has no clean server-side gate for a
+   solo single-identity setup. Trunk **force-push/deletion** rules (drive.sh warns if
+   absent) and the `permissions.deny` + `deny-merge.sh` hook are SEPARATE hardening that
+   protect against trunk-clobber, not the merge; the hook is a best-effort client-side
+   speed-bump (string matching is bypassable), not a security boundary.

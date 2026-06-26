@@ -3,7 +3,8 @@
 # cases from code review (wrapped merge via python -c; trunk delete by full refspec).
 # NOTE: this hook is NOT a security boundary (see its header + README); these tests
 # cover the DIRECT and common WRAPPED forms it is meant to catch, not every possible
-# obfuscation. The durable gate is branch protection + the driver halting before review.
+# obfuscation. The durable gate is the driver halting before review + a human merging;
+# trunk rules only harden force-push/deletion (see README §Merge safety).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 HOOK="$HERE/../deny-merge.sh"

@@ -81,8 +81,8 @@ case "$remote_url" in
   *github.com*)
     if command -v gh >/dev/null 2>&1; then
       rules=$( ( cd "$WORKDIR" && gh api "repos/{owner}/{repo}/rules/branches/$BRANCH" 2>/dev/null ) || true )
-      # Require BOTH rules: a repo with only one still leaves a clobber path open.
-      if ! printf '%s' "$rules" | grep -q non_fast_forward || ! printf '%s' "$rules" | grep -q '"deletion"'; then
+      # clobber-guard.sh exits 0 only when BOTH non_fast_forward AND deletion are present.
+      if ! printf '%s' "$rules" | bash "$HERE/clobber-guard.sh"; then
         note "WARNING: trunk '$BRANCH' is not fully protected against force-push AND deletion server-side."
         note "         Add a ruleset with BOTH non_fast_forward + deletion — see README §Setup step 5."
         note "         (Unavailable on a free-plan private repo: rely on never-force-push discipline.)"
