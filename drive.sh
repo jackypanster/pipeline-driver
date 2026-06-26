@@ -81,9 +81,10 @@ case "$remote_url" in
   *github.com*)
     if command -v gh >/dev/null 2>&1; then
       rules=$( ( cd "$WORKDIR" && gh api "repos/{owner}/{repo}/rules/branches/$BRANCH" 2>/dev/null ) || true )
-      if ! printf '%s' "$rules" | grep -q non_fast_forward; then
-        note "WARNING: trunk '$BRANCH' is not protected against force-push/deletion server-side."
-        note "         Add a ruleset (non_fast_forward + deletion) — see README §Setup step 5."
+      # Require BOTH rules: a repo with only one still leaves a clobber path open.
+      if ! printf '%s' "$rules" | grep -q non_fast_forward || ! printf '%s' "$rules" | grep -q '"deletion"'; then
+        note "WARNING: trunk '$BRANCH' is not fully protected against force-push AND deletion server-side."
+        note "         Add a ruleset with BOTH non_fast_forward + deletion — see README §Setup step 5."
         note "         (Unavailable on a free-plan private repo: rely on never-force-push discipline.)"
         note "         The feature-PR MERGE gate remains: the driver halts before review + you merge."
       fi

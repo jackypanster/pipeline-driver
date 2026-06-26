@@ -7,12 +7,14 @@
 # it. It catches the DIRECT forms and common quoted/wrapped forms (so a confused or
 # lightly-wrapped cheap model does not accidentally merge), nothing more.
 #
-# The REAL merge safety is elsewhere and does not depend on this hook:
-#   1. control flow — the driver only ever runs `/pipeline-impl` and HALTS before the
-#      review/merge stage, so in normal operation a merge is never even attempted; and
-#   2. server-side — trunk BRANCH PROTECTION (require PR review / restrict who merges)
-#      rejects a merge from the driven child regardless of any client-side check.
-#      drive.sh pre-flights this and WARNS when it is absent.
+# The merge gate this hook cannot enforce lives elsewhere (see README §Merge safety):
+#   1. control flow (the REAL gate) — the driver only ever runs `/pipeline-impl` and
+#      HALTS before review, so the merge is a human step the autonomous loop never
+#      reaches in normal operation; and
+#   2. server-side trunk force-push/deletion rules HARDEN trunk-clobber ONLY — they do
+#      NOT gate the feature-PR merge (a `require-PR` rule is incompatible with this
+#      pipeline's metadata-on-trunk, and a solo agent shares the human's identity).
+#      drive.sh pre-flights force-push + deletion protection and warns when it is absent.
 #
 # Deny ⇒ print the decision JSON to stdout, exit 0. Allow ⇒ no output, exit 0.
 
