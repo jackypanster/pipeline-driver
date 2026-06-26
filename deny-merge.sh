@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# PreToolUse hook — the merge gate for the autonomous driver.
+# PreToolUse hook — a BEST-EFFORT merge speed-bump for the autonomous driver.
 #
-# Wired into the driven `claude` run via settings.driver.json. On every Bash tool
-# call it receives the PreToolUse JSON payload on stdin and DENIES the call when the
-# command would merge a PR/branch or force-/delete-push a TRUNK ref. Everything else
-# is allowed (the driver does NOT sandbox the coder — impl is trusted to write code
-# and run tests, exactly as in the hand-relayed pipeline; this re-adds the one thing
-# autonomy removes: a human at the merge gate). It blocks the standard forge merge
-# routes (gh / gitee-cli / gh api / curl / graphql); it is a gate, not a sandbox.
+# IMPORTANT: this is NOT a security boundary. It regexes the Bash command string, so
+# any indirection a determined child can reach — a wrapper that builds the command
+# from base64, a variable, a file, or a not-yet-enumerated interpreter — can bypass
+# it. It catches the DIRECT forms and common quoted/wrapped forms (so a confused or
+# lightly-wrapped cheap model does not accidentally merge), nothing more.
 #
-# It parses the actual command string (not a glob on a settings `if` field), so it
-# is robust regardless of permission-rule syntax. The settings.driver.json `deny`
-# rules are a second, independent layer. The real trunk branch is passed in via
-# DRIVER_TRUNK (exported by drive.sh) and added to the master|main|trunk safety net.
+# The REAL merge safety is elsewhere and does not depend on this hook:
+#   1. control flow — the driver only ever runs `/pipeline-impl` and HALTS before the
+#      review/merge stage, so in normal operation a merge is never even attempted; and
+#   2. server-side — trunk BRANCH PROTECTION (require PR review / restrict who merges)
+#      rejects a merge from the driven child regardless of any client-side check.
+#      drive.sh pre-flights this and WARNS when it is absent.
 #
 # Deny ⇒ print the decision JSON to stdout, exit 0. Allow ⇒ no output, exit 0.
 
@@ -39,25 +39,26 @@ c=$(printf '%s' "$cmd" | tr '\n\t\\' '   ')
 # trunk ref names: the real configured trunk plus the common safety net.
 TRUNKS="master|main|trunk"
 [ -n "${DRIVER_TRUNK:-}" ] && TRUNKS="${DRIVER_TRUNK}|${TRUNKS}"
-# a trunk name appearing as a complete ref token (preceded by start/space/:/+/=,
-# followed by space/:/end) — NOT a path segment like feat/main-refactor.
-TRUNK_REF="(^|[ :+=])(${TRUNKS})([ :]|\$)"
+# a trunk name as a complete ref token (optionally refs/heads/-prefixed), bounded by
+# start/space/:/+/= and space/:/end — NOT a path segment like feat/main-refactor.
+TRUNK_REF="(^|[ :+=])(refs/heads/)?(${TRUNKS})([ :]|\$)"
 
-# 1) PR / branch merges — every common route.
-printf '%s' "$c" | grep -Eq '(^|[;&|( ])gh +pr +merge( |$)'        && deny "gh pr merge"
-printf '%s' "$c" | grep -Eq '(^|[;&|( ])git +merge( |$)'          && deny "git merge"
-printf '%s' "$c" | grep -Eq 'gh +api[^|;&]*pulls/[0-9]+/merge'    && deny "gh api PR merge"
-printf '%s' "$c" | grep -Eq '(curl|wget)[^|;&]*pulls/[0-9]+/merge' && deny "curl/wget PR merge"
-printf '%s' "$c" | grep -Eq 'mergePullRequest'                    && deny "graphql mergePullRequest"
-printf '%s' "$c" | grep -Eq 'gitee-cli[^|;&]+merge'               && deny "gitee-cli merge"
+# 1) PR / branch merges — direct AND quoted/comma/space-wrapped forms. We tolerate
+#    non-lowercase separators between tokens (so gh","pr","merge from a python/bash -c
+#    wrapper is caught), but keep precise tails (merge, not merge-base/mergetool).
+printf '%s' "$c" | grep -Eq 'gh[^a-z]+pr[^a-z]+merge'   && deny "gh pr merge"
+printf '%s' "$c" | grep -Eq 'git[^a-z]+merge([^a-z-]|$)' && deny "git merge"
+printf '%s' "$c" | grep -Eq 'pulls/[0-9]+/merge'         && deny "PR merge REST endpoint (gh api/curl/wget)"
+printf '%s' "$c" | grep -Eq 'mergePullRequest'           && deny "graphql mergePullRequest"
+printf '%s' "$c" | grep -Eq 'gitee-cli[^|;&]+merge'      && deny "gitee-cli merge"
 
 # 2) force / delete pushes touching a TRUNK ref. Plain pushes to trunk (impl's
 #    metadata fast-forward) and feat/* --force-with-lease stay allowed.
-if printf '%s' "$c" | grep -Eq '(^|[;&|( ])git +push'; then
+if printf '%s' "$c" | grep -Eq '(^|[;&|( ])git[^a-z]+push'; then
   if printf '%s' "$c" | grep -Eq "$TRUNK_REF"; then
     printf '%s' "$c" | grep -Eq '(--force|--force-with-lease|--delete)( |=|$)|(^| )-[fd]( |$)' && deny "force/delete push touching trunk"
-    printf '%s' "$c" | grep -Eq "[ =]\\+[^ ]*(${TRUNKS})([ :]|\$)"                              && deny "force refspec (+) to trunk"
-    printf '%s' "$c" | grep -Eq "[ =]:(${TRUNKS})([ :]|\$)"                                      && deny "delete trunk ref (:refspec)"
+    printf '%s' "$c" | grep -Eq "[ =]\\+(refs/heads/)?[^ ]*(${TRUNKS})"        && deny "force refspec (+) to trunk"
+    printf '%s' "$c" | grep -Eq "[ =]:(refs/heads/)?(${TRUNKS})([ :]|\$)"       && deny "delete trunk ref (:refspec)"
   fi
   printf '%s' "$c" | grep -Eq '(--force( |$)|(^| )-f( |$))' && deny "raw --force push (use --force-with-lease on feat/*)"
 fi

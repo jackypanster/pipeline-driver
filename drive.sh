@@ -72,6 +72,22 @@ if [ "${impl_slot:-}" = "goal-driven-implementation" ]; then
   note "         else every driven pipeline-impl STOPs at 'skill not installed'. Continuing anyway."
 fi
 
+# The merge gate's REAL enforcement is server-side trunk BRANCH PROTECTION — the
+# deny-merge.sh hook is only a best-effort speed-bump (a wrapped command can bypass
+# string matching). Warn if protection is absent on a github trunk.
+remote_url=$(git_q remote get-url origin 2>/dev/null || true)
+case "$remote_url" in
+  *github.com*)
+    if command -v gh >/dev/null 2>&1; then
+      if ! ( cd "$WORKDIR" && gh api "repos/{owner}/{repo}/branches/$BRANCH/protection" >/dev/null 2>&1 ); then
+        note "WARNING: trunk '$BRANCH' has NO branch protection (or gh lacks the scope to see it)."
+        note "         Branch protection (require PR review / restrict who merges) is the REAL"
+        note "         merge gate; the deny-merge hook is best-effort only. Enable it so a driven"
+        note "         impl cannot merge trunk even via a command the hook does not match."
+      fi
+    fi ;;
+esac
+
 # ---- run ONE impl stage: a fresh `claude` cold node on the cheap tier ----------
 # The skill MUST be the first token of -p (leading prose stops slash expansion).
 # Gateway env (ANTHROPIC_BASE_URL/AUTH for a non-Anthropic Anthropic-compatible

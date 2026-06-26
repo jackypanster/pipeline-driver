@@ -18,10 +18,27 @@ the target repo's `.pipeline/<feature>/journal.md` on the remote is the only tru
 `pipeline-impl` card via `claude` on the configured tier → repeat. Pushes happen
 through the normal shim; the driver only reads `origin/<BRANCH>`.
 
-**Does not:** auto-run prd/arch/task/review/hunt; merge (a `permissions.deny` rule
-**and** the `deny-merge.sh` PreToolUse hook physically block it); auto-advance past a
-re-freeze (a changed `spec-rev` halts for a fresh human read); carry any cross-stage
-memory into a child; touch `CONTRACT.md` invariants. See [stop-points.md](stop-points.md).
+**Does not:** auto-run prd/arch/task/review/hunt; **reach the merge step at all** — it
+HALTS at `NEXT=review` and only ever runs `/pipeline-impl`, which by the contract never
+merges (see *Merge safety* below); auto-advance past a re-freeze (a changed `spec-rev`
+halts for a fresh human read); carry any cross-stage memory into a child; touch
+`CONTRACT.md` invariants. See [stop-points.md](stop-points.md).
+
+## Merge safety (read this before trusting it)
+
+The driver must never let the autonomous loop merge trunk. That safety comes, in order, from:
+
+1. **Control flow (primary).** The driver only ever runs `/pipeline-impl` and HALTS
+   before the review/merge stage, so a merge is never even attempted in normal operation.
+2. **Trunk branch protection (the durable, server-side gate).** Enable required-review
+   protection on trunk so a driven child **cannot** merge regardless of any client check.
+   `drive.sh` pre-flights this and WARNS when it is absent. **This is the real guarantee.**
+3. **`deny-merge.sh` hook + `permissions.deny` (best-effort speed-bump).** Denies the
+   direct and common wrapped merge/trunk-clobber commands. It regexes the command string,
+   so it is **NOT a security boundary** — a determined child can wrap the call (base64, a
+   file, an interpreter) past it. It catches accidents, not adversaries.
+
+Do not run the driver against a trunk without branch protection and call merge "blocked".
 
 ## The two human gates (never crossed)
 
@@ -37,10 +54,12 @@ memory into a child; touch `CONTRACT.md` invariants. See [stop-points.md](stop-p
 | `drive.sh` | the deterministic loop + the two-gate predicate |
 | `parse-tail.awk` | journal-tail parser (ASCII-anchored; ignores the Unicode `·`/`→` separators) |
 | `settings.driver.json` | `--settings` for each driven run: merge `deny` rules + the PreToolUse hook |
-| `deny-merge.sh` | the guaranteed merge gate — parses the real Bash command, denies merge / trunk-clobber |
+| `deny-merge.sh` | best-effort merge speed-bump (PreToolUse hook); parses the Bash command, denies direct/wrapped merge + trunk-clobber. NOT a boundary — see *Merge safety* |
 | `drive.config.example` | per-feature config (copy to `drive.config`) |
 | `stop-points.md` | the enumerated halt specification + hand-relay checklist |
-| `test/run.sh` | unit tests for the parser against a real vendored journal |
+| `test/run.sh` | parser unit tests against a format-faithful sample journal |
+| `test/hook.sh` | merge-gate tests incl. the wrapper/refspec bypass cases |
+| `test/e2e.sh` | hermetic end-to-end loop tests (stub `claude`) + every safety halt |
 
 ## Setup (one-time)
 
@@ -76,12 +95,13 @@ Observe progress any time with the read-only dashboard:
   journal tail from `origin/<BRANCH>` and resumes the live position.
 - **Mid-card kill** can strand a card `in-progress`; the driver detects this on the
   remote and HALTS, asking you to reset it to `todo` (not fully automatic).
-- **Blast radius:** the driven impl cannot merge (deny rule + hook + only-review-merges),
-  cannot touch the frozen spec (review's freeze gate), and the merge stays human-gated.
-  The merge gate blocks the standard forge routes (`gh`/`gitee-cli`/`gh api`/`curl`/
-  graphql) and trunk force-/delete-pushes; it is a gate, not a sandbox. On the normal
-  forge path the worst a runaway driver does is push code commits to `feat/<feature>` —
-  revertable.
+- **Blast radius:** the driver halts before review and never authorizes a merge; with
+  trunk branch protection enabled the driven impl cannot merge server-side; it also
+  cannot touch the frozen spec (review's freeze gate). The `deny-merge.sh` hook blocks
+  the standard forge routes (`gh`/`gitee-cli`/`gh api`/`curl`/graphql) and trunk
+  force-/delete-pushes best-effort (a wrapped command can bypass string matching — see
+  *Merge safety*). On the normal forge path the worst a runaway driver does is push code
+  commits to `feat/<feature>` — revertable.
 
 ## Relationship to the contract
 

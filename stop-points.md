@@ -42,5 +42,8 @@ CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  LIVE_SPEC_REV == CONFI
 1. **GATE 1 — before the loop.** The human reads the frozen red test and echoes its
    `spec-rev`. The driver cannot start without it, and re-fires it on any re-freeze.
 2. **GATE 2 — after the loop.** Only `pipeline-review` merges, and only after an
-   explicit human confirm. The driver halts before review; a `permissions.deny` rule
-   **and** the `deny-merge.sh` hook physically block any merge on a driven run.
+   explicit human confirm. The driver HALTS before review and never runs the merge step.
+   The durable server-side gate is trunk **branch protection** (drive.sh warns if it is
+   absent); the `permissions.deny` rule + `deny-merge.sh` hook are a best-effort
+   client-side speed-bump (string matching — a wrapped command can bypass them), not a
+   security boundary.
