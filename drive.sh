@@ -72,18 +72,20 @@ if [ "${impl_slot:-}" = "goal-driven-implementation" ]; then
   note "         else every driven pipeline-impl STOPs at 'skill not installed'. Continuing anyway."
 fi
 
-# The merge gate's REAL enforcement is server-side trunk BRANCH PROTECTION — the
-# deny-merge.sh hook is only a best-effort speed-bump (a wrapped command can bypass
-# string matching). Warn if protection is absent on a github trunk.
+# Trunk-clobber (force-push / deletion) is best closed SERVER-SIDE by a branch ruleset.
+# Warn if trunk is not protected. (The feature-PR MERGE gate is the driver halting before
+# review + a human merging — NOT a require-PR rule, which would break metadata-on-trunk;
+# the deny-merge hook is only a best-effort speed-bump. See README §Merge safety.)
 remote_url=$(git_q remote get-url origin 2>/dev/null || true)
 case "$remote_url" in
   *github.com*)
     if command -v gh >/dev/null 2>&1; then
-      if ! ( cd "$WORKDIR" && gh api "repos/{owner}/{repo}/branches/$BRANCH/protection" >/dev/null 2>&1 ); then
-        note "WARNING: trunk '$BRANCH' has NO branch protection (or gh lacks the scope to see it)."
-        note "         Branch protection (require PR review / restrict who merges) is the REAL"
-        note "         merge gate; the deny-merge hook is best-effort only. Enable it so a driven"
-        note "         impl cannot merge trunk even via a command the hook does not match."
+      rules=$( ( cd "$WORKDIR" && gh api "repos/{owner}/{repo}/rules/branches/$BRANCH" 2>/dev/null ) || true )
+      if ! printf '%s' "$rules" | grep -q non_fast_forward; then
+        note "WARNING: trunk '$BRANCH' is not protected against force-push/deletion server-side."
+        note "         Add a ruleset (non_fast_forward + deletion) — see README §Setup step 5."
+        note "         (Unavailable on a free-plan private repo: rely on never-force-push discipline.)"
+        note "         The feature-PR MERGE gate remains: the driver halts before review + you merge."
       fi
     fi ;;
 esac
