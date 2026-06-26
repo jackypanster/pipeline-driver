@@ -8,12 +8,14 @@ driver's halt specification and a checklist for a human relaying by hand.
 ## The halt predicate (the whole brain)
 
 ```
-CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  LIVE_SPEC_REV == CONFIRMED_SPEC_REV
+CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  FROM != review  AND  LIVE_SPEC_REV == CONFIRMED_SPEC_REV
 ```
 
 - `NEXT` — the stage named on the first non-empty line after the last `>>> NEXT`
   in the journal tail (`Run pipeline-<NEXT> ...`). Parsed by `parse-tail.awk`.
 - `STATUS` — the journal entry header's run status (`completed|failed|blocked`).
+- `FROM` — the journal entry header's from-stage. `FROM=review` with `NEXT=impl` is a
+  review *rejection* (a human semantic decision); the driver HALTS so you see it first.
 - `LIVE_SPEC_REV` — the shared `spec-rev` read from a task card on `origin/<BRANCH>`.
 - `CONFIRMED_SPEC_REV` — the spec-rev the human echoed at GATE 1.
 
@@ -32,6 +34,7 @@ CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  LIVE_SPEC_REV == CONFI
 | `NEXT=hunt` / `STATUS=blocked` | a card hit attempts≥3, or a cross-card integration incident | `pipeline-hunt` (root-cause) |
 | `NEXT=` empty | terminal / "Awaiting the operator's go" / "feature complete" | read the journal tail — likely your merge confirm, or done |
 | `NEXT=prd|arch|task` | a re-route to an interview/decomposition stage | that stage (frontier, human) |
+| `FROM=review`, `NEXT=impl` | review **rejected** a card and bounced it back to impl (spec unchanged) | read `reviews/*`, then re-run the driver to resume the fix |
 | `LIVE_SPEC_REV != CONFIRMED_SPEC_REV` | a re-freeze/append-card minted a **new** frozen spec | **GATE 1 again** — read the new test, re-confirm |
 | card `status: in-progress` on remote | a prior impl run died mid-card | reset that card to `todo`, re-run the driver |
 | impl child exits non-zero | a denied tool (e.g. attempted merge), a wall, or a crash | inspect output; manual `pipeline-impl` or `pipeline-hunt` |

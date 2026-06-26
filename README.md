@@ -3,7 +3,7 @@
 An **optional, external** driver for the [`pipeline`](https://github.com/jackypanster/pipeline)
 toolchain. It auto-advances the one repetitive span of the otherwise human-relayed
 pipeline — the `pipeline-impl` multi-card loop — on a cheap model, and **halts at
-every contract gate**. It is the write-side twin of the read-only `pipeline-dashboard`:
+every contract gate**. It is the **human-operated** write-side twin of the read-only `pipeline-dashboard`:
 a sibling that sits **above an unchanged `CONTRACT.md`**, reads the same
 `journal.md` state bus, and degrades to plain human-relay when absent.
 
@@ -11,9 +11,34 @@ It is **forbidden to be smart**. The scheduler is deterministic bash; all LLM wo
 happens inside the per-stage `claude` child. It holds **zero authoritative state** —
 the target repo's `.pipeline/<feature>/journal.md` on the remote is the only truth.
 
+## For agents (read this first)
+
+You are an agent in or around a `pipeline`-driven repo. When to reach for this driver, and when not:
+
+- **Use it for exactly one thing — the `impl` multi-card loop.** After `pipeline-task` freezes the spec,
+  a feature has N cards, each made green by a separate `pipeline-impl` run and hand-relayed
+  card→card→…→`pipeline-review`. That relay is the only repetitive span; this driver auto-advances it on
+  a cheap model and stops.
+- **Do NOT use it — or invent another scheduler — for anything else.** `prd`/`arch`/`task`/`review`/`hunt`
+  are interview/semantic stages that stay human-relayed by design. The pipeline deliberately has **no
+  scheduler** (see the pipeline `DESIGN.md` rationale); this driver is the single sanctioned exception,
+  scoped to `impl`. If you are tempted to orchestrate the whole pipeline, don't — that was evaluated and
+  rejected because semantic errors compound silently between auto-advanced stages with no human read.
+- **It is human-operated, not unattended.** `drive.sh` GATE 1 blocks on a human at a terminal to read the
+  frozen red test and echo its `spec-rev`. You (an agent) cannot run it fully headless. Your job is to
+  KNOW it exists and hand the `impl` loop to it (or to the operator), instead of hand-relaying every
+  `impl` card yourself.
+- **It never merges and cannot cross a gate.** It only ever runs `/pipeline-impl`; it HALTs at every
+  gate (e.g. `NEXT=review`, a `blocked` card, a re-freeze — and others); the merge stays a human step in
+  `pipeline-review`. See *Merge safety* and [stop-points.md](stop-points.md) for the exact halt list.
+
+If the journal tail says `Run pipeline-impl` and the spec is frozen + human-read, the operator runs the
+driver per *Setup* + *Per-feature flow* below. Otherwise, relay the stage by hand as usual.
+
 ## What it does / does not do
 
-**Does:** loop `git fetch` → parse the journal tail → if the tail is the steady-state
+**Does:** after GATE 1 (a human at a terminal echoes the frozen `spec-rev` to authorize),
+loop `git fetch` → parse the journal tail → if the tail is the steady-state
 `impl→impl` loop with an unchanged, human-confirmed frozen spec, run one
 `pipeline-impl` card via `claude` on the configured tier → repeat. Pushes happen
 through the normal shim; the driver only reads `origin/<BRANCH>`.
@@ -39,13 +64,14 @@ Be precise about what is actually enforced:
    deletion of trunk are blocked. See *Setup* for the one-command enable. NOTE: rulesets
    / branch protection require a **public** repo or **GitHub Pro/Org** — they are
    unavailable on a free-plan **private** repo.
-3. **The feature-PR merge itself has no clean server-side gate for a solo, single-identity
-   setup.** "Require a pull request before merging" would *break* this pipeline (it commits
-   metadata — including the frozen spec — straight to trunk), and with the agent running
-   under your own credentials it cannot tell "you merging" from "the agent merging." So for
-   solo use the merge gate IS (1) above plus you doing the merge in `pipeline-review`. In a
-   **team**, run impl under a distinct **bot identity** and require PR-merge approval with
-   the human on the ruleset bypass list — then the bot cannot merge but you can.
+3. **The feature-PR merge itself has no clean server-side gate — solo OR team.** "Require a
+   pull request before merging" would *break* this pipeline **regardless of identity**: it
+   commits metadata (incl. the frozen spec) straight to trunk, and require-PR blocks every
+   non-bypass identity's direct push — so a bot OFF the bypass list cannot even push its
+   metadata (the driver can't run), and a bot ON the bypass list can also merge. A distinct
+   **bot identity** for a team only reduces blast radius (you can tell who did what); it does
+   not buy a clean server-side merge gate. So the merge gate is always (1) above plus a human
+   performing the merge in `pipeline-review`.
 4. **`deny-merge.sh` hook + `permissions.deny` — best-effort speed-bump, NOT a boundary.**
    It regexes the command string, so a determined child can wrap the call (base64, a file,
    an interpreter) past it. It catches accidents and light wrappers, not adversaries.
@@ -134,8 +160,9 @@ Observe progress any time with the read-only dashboard:
 
 ## Relationship to the contract
 
-This driver changes **no** `CONTRACT.md` invariant. The contract already licenses a
-non-human orchestrator ("the journal makes the run … orchestratable by anyone — a
-human or another LLM reads the tail to take over"). The only contract-repo change is
-a one-line note that an optional external driver MAY auto-advance the impl loop and
-HALTS at every gate.
+This driver changes **no** `CONTRACT.md` invariant — `CONTRACT.md` itself is untouched.
+The contract already licenses a non-human orchestrator ("the journal makes the run …
+orchestratable by anyone — a human or another LLM reads the tail to take over"). The only
+change in the contract repo is a one-line note **in `DESIGN.md` §Constraints** (commit
+`ef4fa97`) that an optional external driver MAY auto-advance the impl loop and HALTS at
+every gate.
