@@ -1,0 +1,39 @@
+# drive.config — per-feature config for drive.sh. Copy to drive.config and edit.
+# Sourced by bash, so: VAR=value, no spaces around '='.
+
+# The local clone of the TARGET repo (the git+md state bus). The driver only ever
+# reads origin/<BRANCH> refs from here; the driven impl child shares this checkout.
+WORKDIR=/path/to/your/target-repo
+
+# Trunk branch (where .pipeline metadata + the frozen spec live). Often main/master.
+BRANCH=main
+
+# The .pipeline/<feature> directory name.
+FEATURE=my-feature
+
+# --- impl model tier (A1: drive impl on Claude) -------------------------------
+# Floor is haiku. May be any alias (haiku|sonnet|opus|fable) or a full model id.
+IMPL_MODEL=haiku
+
+# Optional: route impl to a non-Anthropic, Anthropic-compatible model via a gateway
+# (e.g. GLM 5.2 xhigh). Leave IMPL_BASE_URL empty to use the Anthropic default.
+# IMPL_AUTH_TOKEN_ENV names an EXISTING env var holding the gateway token (the token
+# itself is never written here or printed).
+#   IMPL_MODEL=glm-4.6
+#   IMPL_BASE_URL=https://your-anthropic-compatible-gateway/v1
+#   IMPL_AUTH_TOKEN_ENV=GLM_API_KEY
+IMPL_BASE_URL=
+IMPL_AUTH_TOKEN_ENV=
+
+# --- loop guards ---------------------------------------------------------------
+# HALT after this many CONSECUTIVE failed impl runs (in-run thrash guard; the
+# durable stop is the contract's attempts>=3 -> blocked -> hunt).
+MAX_CONSEC_FAIL=2
+
+# 1 = auto-continue informed retries (failed -> impl, attempts<3) on the cheap model.
+# 0 = HALT on every impl failure so a human inspects it.
+RETRY_ON_FAIL=1
+
+# Path to the settings template carrying the merge-deny hook (default: alongside
+# drive.sh). drive.sh renders the absolute hook path into a temp copy at runtime.
+# SETTINGS=/abs/path/to/settings.driver.json
