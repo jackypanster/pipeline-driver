@@ -114,12 +114,15 @@ Be precise about what is actually enforced:
 Bottom line: the merge gate you can rely on is the driver halting before review (1) and
 you performing the merge; the hook and trunk-clobber ruleset are hardening, not guarantees.
 
-## The two human gates (never crossed)
+## The two gates (never crossed)
 
-1. **GATE 1 — before the loop.** You read the frozen red test and **echo its
-   `spec-rev`** to start. Re-fires automatically on any re-freeze.
-2. **GATE 2 — after the loop.** You run `pipeline-review` — semantic review + the
-   explicit **merge confirm**. Only review merges.
+1. **GATE 1 — before the loop.** The frozen red test is read and its **`spec-rev`
+   echoed** to start; re-fires automatically on any re-freeze. Who performs the read
+   is the operator's risk-tier call (see *For agents*): default a human, delegable to
+   the coordinating agent only for explicitly low-risk drive-mode features.
+2. **GATE 2 — after the loop.** `pipeline-review` runs (any capable review bot) —
+   semantic review + the explicit **HUMAN merge confirm, never delegated**. Only
+   review merges.
 
 ## Files
 

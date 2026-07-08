@@ -41,10 +41,12 @@ CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  FROM != review  AND  L
 | no journal progress within `CARD_TIMEOUT` (orca transport) | the TUI stalled — permission prompt, crash, wedged run (the driver prints the terminal tail) | inspect the impl terminal in Orca; manual `pipeline-impl` or `pipeline-hunt` |
 | remote `seq` did not advance after a run | impl committed nothing, or did not push | inspect; the run made no pushed progress |
 
-## The two human gates the driver never crosses
+## The two gates the driver never crosses
 
-1. **GATE 1 — before the loop.** The human reads the frozen red test and echoes its
-   `spec-rev`. The driver cannot start without it, and re-fires it on any re-freeze.
+1. **GATE 1 — before the loop.** The frozen red test is read and its `spec-rev` echoed;
+   the driver cannot start without it, and re-fires it on any re-freeze. Who performs
+   the read is the operator's risk-tier policy (README §For agents): default a human,
+   delegable to the coordinating agent only for explicitly low-risk drive-mode features.
 2. **GATE 2 — after the loop.** Only `pipeline-review` merges, and only after an
    explicit human confirm. The DURABLE merge gate is the driver HALTING before review
    plus you running the merge — the feature-PR merge has no clean server-side gate for a

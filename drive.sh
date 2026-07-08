@@ -7,10 +7,12 @@
 # remote is the single source of truth. It is the write-side twin of the read-only
 # pipeline-dashboard: an OPTIONAL external driver above an UNCHANGED contract.
 #
-# THE TWO HUMAN GATES IT PRESERVES (never crosses):
-#   GATE 1 (before the loop): you read the frozen red test and echo its spec-rev.
-#   GATE 2 (after the loop):  you run pipeline-review — semantic review + the
-#                             explicit human merge confirm. The driver never merges.
+# THE TWO GATES IT PRESERVES (never crosses):
+#   GATE 1 (before the loop): the frozen red test is read + its spec-rev echoed.
+#     WHO reads is the operator's risk-tier policy (README §For agents) — this
+#     script only enforces the read-then-bind ritual on a TTY.
+#   GATE 2 (after the loop):  pipeline-review — semantic review + the explicit
+#     HUMAN merge confirm (never delegated). The driver never merges.
 #
 # HALT PREDICATE (the whole brain): CONTINUE iff
 #     NEXT == impl  AND  STATUS != blocked  AND  LIVE_SPEC_REV == CONFIRMED_SPEC_REV
@@ -125,15 +127,15 @@ sed "s#__DENY_MERGE_SH__#$HERE/deny-merge.sh#g" "$SETTINGS_TMPL" > "$RENDERED"
 chmod +x "$HERE/deny-merge.sh" 2>/dev/null || true
 trap 'rm -f "$RENDERED"' EXIT
 
-# A1 preflight: impl must resolve to a skill installed on THIS (Claude) runtime.
-# roles.yaml's default impl slot is the Hermes-only goal-driven-implementation,
-# which STOPs immediately under `claude`. Warn loudly if it was not repointed.
+# Preflight (claude transport): the roles.yaml impl slot must resolve to a skill
+# installed on the CLAUDE runtime, else every driven pipeline-impl STOPs at
+# 'skill not installed'. The driver cannot see another runtime's skill dir, so it
+# reminds the operator instead of asserting where any skill lives.
 roles=$(show_origin ".pipeline/roles.yaml" || true)
 impl_slot=$(printf '%s\n' "$roles" | awk -F'#' '{print $1}' | awk -F'[][, ]+' '/^impl:/{print $2}' | head -1)
-if [ "$IMPL_TRANSPORT" = "claude" ] && [ "${impl_slot:-}" = "goal-driven-implementation" ]; then
-  note "WARNING: roles.yaml impl slot = goal-driven-implementation (Hermes-only)."
-  note "         For A1 (driving impl on Claude) repoint it to a Claude-installed coder skill,"
-  note "         else every driven pipeline-impl STOPs at 'skill not installed'. Continuing anyway."
+if [ "$IMPL_TRANSPORT" = "claude" ] && [ -n "${impl_slot:-}" ]; then
+  note "NOTE: roles.yaml impl slot = '$impl_slot' — verify it is installed on the Claude runtime"
+  note "      (canonical layout: one shared skills dir, runtimes attached — pipeline README §Install)."
 fi
 
 # Trunk-clobber (force-push / deletion) is best closed SERVER-SIDE by a branch ruleset.
