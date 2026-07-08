@@ -15,6 +15,11 @@ the target repo's `.pipeline/<feature>/journal.md` on the remote is the only tru
 
 You are an agent in or around a `pipeline`-driven repo. When to reach for this driver, and when not:
 
+- **The drive paradigm is explicit-opt-in, never the default.** The operator's standing SOP
+  (recorded in the pipeline repo README §Operating modes): normal human-relayed mode is the
+  default for every feature; the driver is used only when the operator explicitly asks, for
+  read-only / low-risk features, and the run keeps exactly ONE human touchpoint — the merge
+  confirm (a CONTRACT frozen invariant, never delegated).
 - **Use it for exactly one thing — the `impl` multi-card loop.** After `pipeline-task` freezes the spec,
   a feature has N cards, each made green by a separate `pipeline-impl` run and hand-relayed
   card→card→…→`pipeline-review`. That relay is the only repetitive span; this driver auto-advances it on
@@ -24,10 +29,13 @@ You are an agent in or around a `pipeline`-driven repo. When to reach for this d
   scheduler** (see the pipeline `DESIGN.md` rationale); this driver is the single sanctioned exception,
   scoped to `impl`. If you are tempted to orchestrate the whole pipeline, don't — that was evaluated and
   rejected because semantic errors compound silently between auto-advanced stages with no human read.
-- **It is human-operated, not unattended.** `drive.sh` GATE 1 blocks on a human at a terminal to read the
-  frozen red test and echo its `spec-rev`. You (an agent) cannot run it fully headless. Your job is to
-  KNOW it exists and hand the `impl` loop to it (or to the operator), instead of hand-relaying every
-  `impl` card yourself.
+- **GATE 1 is a read-then-bind gate; who reads is the operator's risk-tier call.** Default: a human
+  at a terminal reads the frozen red test and echoes its `spec-rev`. Operator policy (2026-07-08):
+  choosing the drive paradigm for a LOW-RISK feature (read-only/ergonomics) is itself the ex-ante
+  trust grant, so the coordinating agent MAY type the spec-rev after reading the spec it froze
+  (e.g. via `orca terminal send` into the driver's terminal). DANGEROUS features (trading
+  write-path) never use the driver at all — they run the normal human-relayed pipeline. The
+  sha-binding stays load-bearing either way: a mid-loop re-freeze still auto-halts.
 - **It never merges and cannot cross a gate.** It only ever runs `/pipeline-impl`; it HALTs at every
   gate (e.g. `NEXT=review`, a `blocked` card, a re-freeze — and others); the merge stays a human step in
   `pipeline-review`. See *Merge safety* and [stop-points.md](stop-points.md) for the exact halt list.
