@@ -147,5 +147,40 @@ out=$(printf 'AAA\n' | PATH="$R/bin:/usr/bin:/bin" bash "$DRIVER/drive.sh" "$R/c
 echo "$out" | grep -q 'orca CLI not on PATH' && ok "orca missing -> preflight halt" || bad "orca missing: $out"
 rm -rf "$R"
 
+# 7) discovery excludes the driver's OWN terminal (Orca injects ORCA_TERMINAL_HANDLE):
+#    two matching terminals, one IS the driver -> exclusion leaves exactly 1 -> happy path
+R=$(mktemp -d); seed_repo "$R" 1; stub_orca "$R"
+cat > "$R/list.json" <<EOF
+{"ok":true,"result":{"terminals":[
+  {"handle":"term_self","worktreePath":"$R/work","title":"driver shell","connected":true,"writable":true},
+  {"handle":"term_coder","worktreePath":"$R/work","title":"impl — omp","connected":true,"writable":true}
+]}}
+EOF
+export ORCA_STUB_LIST_JSON="$R/list.json" ORCA_STUB_ON_SEND="$CODER" ORCA_TERMINAL_HANDLE="term_self"
+out=$(run "$R")
+unset ORCA_TERMINAL_HANDLE
+echo "$out" | grep -q 'all cards in review' && echo "$out" | grep -q 'impl terminal = term_coder' \
+  && ok "self-terminal excluded from discovery" || bad "self exclusion: $out"
+unset ORCA_STUB_ON_SEND; rm -rf "$R"
+
+# 8) pinned handle == the driver's own terminal -> preflight halt (config error)
+R=$(mktemp -d); seed_repo "$R" 1; stub_orca "$R"
+printf 'ORCA_TERMINAL_HANDLE=term_self\n' >> "$R/cfg"
+export ORCA_STUB_LIST_JSON="$R/list.json" ORCA_TERMINAL_HANDLE="term_self"
+out=$(run "$R")
+unset ORCA_TERMINAL_HANDLE
+echo "$out" | grep -q 'cannot type into itself' && ok "pinned self-handle -> preflight halt" || bad "pinned self: $out"
+rm -rf "$R"
+
+# 9) reset cmd after a failed idle-wait is FATAL: nothing may be typed into a busy TUI
+R=$(mktemp -d); seed_repo "$R" 1; stub_orca "$R"
+printf 'ORCA_RESET_CMD=/clear\nCARD_TIMEOUT=1\n' >> "$R/cfg"
+export ORCA_STUB_LIST_JSON="$R/list.json" ORCA_STUB_WAIT_RC=1 ORCA_STUB_SEND_LOG="$R/sends.log"
+out=$(run "$R")
+unset ORCA_STUB_WAIT_RC ORCA_STUB_SEND_LOG
+{ echo "$out" | grep -q 'not idle within'; } && [ ! -s "$R/sends.log" ] \
+  && ok "busy TUI + reset -> fatal, zero text sent" || bad "reset wait fatal: $out"
+rm -rf "$R"
+
 unset ORCA_STUB_LIST_JSON 2>/dev/null || true
 echo "----"; echo "passed=$pass failed=$fail"; [ "$fail" -eq 0 ]

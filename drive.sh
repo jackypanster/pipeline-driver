@@ -34,8 +34,11 @@ CONF="${1:-$HERE/drive.config}"
 [ -f "$CONF" ] || { echo "drive.sh: config not found: $CONF" >&2; exit 2; }
 # Orca injects ORCA_TERMINAL_HANDLE (among other ORCA_*) into EVERY terminal it
 # manages — including the one running this driver. Inheriting it would silently
-# point the impl dispatch at the driver's own terminal. Config-file-only: drop
-# any inherited value before sourcing.
+# point the impl dispatch at the driver's own terminal. Config-file-only: SAVE the
+# inherited value as "the terminal running THIS driver" so discovery can EXCLUDE it
+# (a driver launched inside the target worktree would otherwise be a discovery
+# candidate and type /pipeline-impl into itself), then drop it before sourcing.
+DRIVER_SELF_TERMINAL="${ORCA_TERMINAL_HANDLE:-}"
 unset ORCA_TERMINAL_HANDLE ORCA_TERMINAL_TITLE 2>/dev/null || true
 # shellcheck disable=SC1090
 . "$CONF"
@@ -72,17 +75,27 @@ show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path fr
 # optionally narrowed by a title substring). Exactly ONE match required — the driver
 # must never type into an ambiguous terminal.
 resolve_orca_terminal() {
-  if [ -n "$ORCA_TERMINAL_HANDLE" ]; then printf '%s\n' "$ORCA_TERMINAL_HANDLE"; return 0; fi
+  if [ -n "$ORCA_TERMINAL_HANDLE" ]; then
+    # A pinned handle must never be the driver's own terminal (config error).
+    if [ -n "${DRIVER_SELF_TERMINAL:-}" ] && [ "$ORCA_TERMINAL_HANDLE" = "$DRIVER_SELF_TERMINAL" ]; then
+      note "orca: ORCA_TERMINAL_HANDLE equals the terminal running drive.sh — the driver cannot type into itself"
+      return 1
+    fi
+    printf '%s\n' "$ORCA_TERMINAL_HANDLE"; return 0
+  fi
   local js n
   js=$(orca terminal list --json 2>/dev/null) \
     || { note "orca: 'terminal list' failed — is the Orca runtime running? (orca status)"; return 1; }
-  js=$(printf '%s' "$js" | jq --arg wd "$WORKDIR" --arg t "$ORCA_TERMINAL_TITLE" \
+  # Exclude the driver's own terminal: when drive.sh runs inside an Orca terminal in
+  # the target worktree, it would otherwise match its own discovery filter.
+  js=$(printf '%s' "$js" | jq --arg wd "$WORKDIR" --arg t "$ORCA_TERMINAL_TITLE" --arg self "${DRIVER_SELF_TERMINAL:-}" \
         '[.result.terminals[]? | select(.worktreePath==$wd and .connected and .writable)
+          | select(.handle != $self)
           | select(($t=="") or (.title | contains($t)))]') || return 1
   n=$(printf '%s' "$js" | jq 'length')
   case "$n" in
     1) printf '%s' "$js" | jq -r '.[0].handle' ;;
-    0) note "orca: no connected writable terminal for worktree $WORKDIR${ORCA_TERMINAL_TITLE:+ with title ~ '$ORCA_TERMINAL_TITLE'}"; return 1 ;;
+    0) note "orca: no connected writable terminal for worktree $WORKDIR${ORCA_TERMINAL_TITLE:+ with title ~ '$ORCA_TERMINAL_TITLE'} (the driver's own terminal is excluded)"; return 1 ;;
     *) note "orca: $n terminals match in $WORKDIR — rename the impl tab and set ORCA_TERMINAL_TITLE, or set ORCA_TERMINAL_HANDLE"; return 1 ;;
   esac
 }
@@ -185,7 +198,10 @@ run_impl_orca() {
   local handle start s
   handle=$(resolve_orca_terminal) || return 1
   if [ -n "$ORCA_RESET_CMD" ]; then
-    orca terminal wait --terminal "$handle" --for tui-idle --timeout-ms "$ORCA_IDLE_TIMEOUT_MS" >/dev/null 2>&1 || true
+    # The idle guard is as load-bearing here as for the real send: typing the reset
+    # into a BUSY TUI could corrupt an in-flight card. A wait timeout is fatal.
+    orca terminal wait --terminal "$handle" --for tui-idle --timeout-ms "$ORCA_IDLE_TIMEOUT_MS" >/dev/null 2>&1 \
+      || { note "orca: terminal $handle not idle within ${ORCA_IDLE_TIMEOUT_MS}ms (before reset)"; return 1; }
     orca terminal send --terminal "$handle" --text "$ORCA_RESET_CMD" --enter >/dev/null 2>&1 \
       || { note "orca: reset send failed for $handle"; return 1; }
   fi
