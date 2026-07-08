@@ -141,9 +141,11 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 ## Setup (one-time)
 
 1. Clone next to `pipeline/` as a read-only consumer:
-   `git clone <this> ~/workspace/pipeline-driver`.
-2. Ensure the `pipeline-*` shims are installed in Claude Code
-   (`~/.claude/skills/pipeline-impl/`).
+   `git clone <this> ~/workspace/pipeline-driver`. The driver runs in place — no install step.
+2. Ensure the `pipeline-*` shims + the impl-slot skill resolve on the runtime that runs
+   impl (claude transport: Claude Code's skill dir; orca transport: the TUI agent's skill
+   dir). Follow the pipeline repo README §Install → *Canonical multi-runtime layout* —
+   one shared physical copy (`~/.agents/skills`), each runtime attached by symlink/wrapper.
 3. **A1 — drive impl on Claude (claude transport only):** repoint the target repo's
    `.pipeline/roles.yaml` `impl` slot to a **Claude-installed** coder skill. The default
    `goal-driven-implementation` is Hermes-only and will STOP under `claude`; the
