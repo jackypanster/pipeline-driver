@@ -35,12 +35,15 @@ IMPL_AUTH_TOKEN_ENV=
 # installed, and permissions that let it finish a card unattended.
 IMPL_TRANSPORT=claude
 
-# Orca transport tuning (ignored for claude). The impl terminal is discovered by
-# worktreePath==WORKDIR (+ connected + writable); if that worktree hosts several
-# terminals, rename the impl tab (`orca terminal rename`) and set a title substring
-# here, or pin the exact handle from `orca terminal list --json`.
-# ORCA_TERMINAL_TITLE=impl
-# ORCA_TERMINAL_HANDLE=term_...
+# Orca transport tuning (ignored for claude). PREFER PINNING THE HANDLE: TUI agents
+# overwrite their own tab title on startup (field-tested: omp renamed the tab
+# `impl` -> `Pi` and title discovery went stale mid-setup), so a title substring is
+# a temporary convenience at best. Get the handle from `orca terminal list --json`
+# right before the run; handles are runtime-issued and die on app restart, so
+# re-pin per run. Fallback discovery: worktreePath==WORKDIR (+ connected+writable),
+# optionally narrowed by ORCA_TERMINAL_TITLE — exactly ONE match required.
+# ORCA_TERMINAL_HANDLE=term_...   # preferred
+# ORCA_TERMINAL_TITLE=impl        # fallback only; agents rename their tabs
 # CARD_TIMEOUT=2700          # max seconds to wait for one card before halting
 # POLL_SECS=30               # journal poll interval (seconds)
 # ORCA_IDLE_TIMEOUT_MS=60000 # wait-for-tui-idle budget before each send

@@ -79,6 +79,10 @@ TUI is a **long session**, not a cold node per card (`ORCA_RESET_CMD` approximat
 starts); it needs `jq`, a running Orca runtime, and a TUI agent that has the
 `pipeline-impl` shim + the roles.yaml impl skill installed with permissions to finish a
 card unattended. While a driven loop runs, keep other agents out of that worktree.
+Terminal discovery: **pin `ORCA_TERMINAL_HANDLE`** — TUI agents rename their own tab on
+startup, so title matching goes stale (field-tested on the first trial run); the driver
+also unsets any INHERITED `ORCA_TERMINAL_HANDLE` before reading config, because Orca
+injects it into every terminal it manages — including the one running the driver.
 
 ## Merge safety (read this before trusting it)
 
