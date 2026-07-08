@@ -25,6 +25,27 @@ IMPL_MODEL=haiku
 IMPL_BASE_URL=
 IMPL_AUTH_TOKEN_ENV=
 
+# --- impl transport --------------------------------------------------------------
+# claude (default): spawn a headless `claude` child per card (settings above apply).
+# orca: type "/pipeline-impl …" into a live Orca-managed TUI terminal (e.g. omp
+# running GLM) via `orca terminal send`, then poll origin/<BRANCH> until the journal
+# seq advances. Use when the impl model's plan only allows interactive coding tools
+# (observed: bigmodel.cn coding plan rejects headless Claude Code with a fake-529).
+# The TUI agent must have the pipeline-impl shim + the roles.yaml impl skill
+# installed, and permissions that let it finish a card unattended.
+IMPL_TRANSPORT=claude
+
+# Orca transport tuning (ignored for claude). The impl terminal is discovered by
+# worktreePath==WORKDIR (+ connected + writable); if that worktree hosts several
+# terminals, rename the impl tab (`orca terminal rename`) and set a title substring
+# here, or pin the exact handle from `orca terminal list --json`.
+# ORCA_TERMINAL_TITLE=impl
+# ORCA_TERMINAL_HANDLE=term_...
+# CARD_TIMEOUT=2700          # max seconds to wait for one card before halting
+# POLL_SECS=30               # journal poll interval (seconds)
+# ORCA_IDLE_TIMEOUT_MS=60000 # wait-for-tui-idle budget before each send
+# ORCA_RESET_CMD=            # optional per-card TUI reset command (e.g. /clear); empty = off
+
 # --- loop guards ---------------------------------------------------------------
 # HALT after this many CONSECUTIVE failed impl runs (in-run thrash guard; the
 # durable stop is the contract's attempts>=3 -> blocked -> hunt).

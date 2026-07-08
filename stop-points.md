@@ -37,7 +37,8 @@ CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  FROM != review  AND  L
 | `FROM=review`, `NEXT=impl` | review **rejected** a card and bounced it back to impl (spec unchanged) | read `reviews/*`, then re-run the driver to resume the fix |
 | `LIVE_SPEC_REV != CONFIRMED_SPEC_REV` | a re-freeze/append-card minted a **new** frozen spec | **GATE 1 again** — read the new test, re-confirm |
 | card `status: in-progress` on remote | a prior impl run died mid-card | reset that card to `todo`, re-run the driver |
-| impl child exits non-zero | a denied tool (e.g. attempted merge), a wall, or a crash | inspect output; manual `pipeline-impl` or `pipeline-hunt` |
+| impl child exits non-zero (claude transport) | a denied tool (e.g. attempted merge), a wall, or a crash | inspect output; manual `pipeline-impl` or `pipeline-hunt` |
+| no journal progress within `CARD_TIMEOUT` (orca transport) | the TUI stalled — permission prompt, crash, wedged run (the driver prints the terminal tail) | inspect the impl terminal in Orca; manual `pipeline-impl` or `pipeline-hunt` |
 | remote `seq` did not advance after a run | impl committed nothing, or did not push | inspect; the run made no pushed progress |
 
 ## The two human gates the driver never crosses

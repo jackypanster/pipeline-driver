@@ -49,6 +49,29 @@ merges (see *Merge safety* below); auto-advance past a re-freeze (a changed `spe
 halts for a fresh human read); carry any cross-stage memory into a child; touch
 `CONTRACT.md` invariants. See [stop-points.md](stop-points.md).
 
+## Impl transports
+
+The "run one card" primitive is pluggable (`IMPL_TRANSPORT` in `drive.config`); halt
+semantics, GATE 1/2, the spec-rev protocol and every guard are transport-independent.
+
+- **claude (default)** — a fresh headless `claude --bare -p` cold child per card,
+  model per `IMPL_MODEL` (optionally via an Anthropic-compatible gateway).
+- **orca** — types `/pipeline-impl …` into a live Orca-managed TUI terminal (e.g. omp
+  running GLM) with `orca terminal send`, then polls `origin/<BRANCH>` until the
+  journal seq advances or `CARD_TIMEOUT`. For coding-plan models whose gateway rejects
+  headless Claude Code (observed: bigmodel.cn answers a fake-529 to the
+  `cc_entrypoint=sdk-cli` billing marker), the interactive TUI is the compliant
+  channel — the driver only automates the typing a human would do into it.
+
+Orca-transport deltas to know: there is **no child exit code** — the only completion
+signal is the remote journal (a stuck TUI = `CARD_TIMEOUT` halt, with the terminal tail
+printed); the deny-merge `--settings` hook does **not** travel into the TUI agent (the
+durable gates — halt-before-review, human merge, trunk rules — hold regardless); the
+TUI is a **long session**, not a cold node per card (`ORCA_RESET_CMD` approximates cold
+starts); it needs `jq`, a running Orca runtime, and a TUI agent that has the
+`pipeline-impl` shim + the roles.yaml impl skill installed with permissions to finish a
+card unattended. While a driven loop runs, keep other agents out of that worktree.
+
 ## Merge safety (read this before trusting it)
 
 The driver must never let the autonomous loop merge the feature PR or clobber trunk.
@@ -100,6 +123,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `test/run.sh` | parser unit tests against a format-faithful sample journal |
 | `test/hook.sh` | merge-gate tests incl. the wrapper/refspec bypass cases |
 | `test/e2e.sh` | hermetic end-to-end loop tests (stub `claude`) + every safety halt |
+| `test/e2e-orca.sh` | hermetic e2e for the orca transport (stub `orca` plays the TUI coder) |
 | `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
 
 ## Setup (one-time)
@@ -108,10 +132,11 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    `git clone <this> ~/workspace/pipeline-driver`.
 2. Ensure the `pipeline-*` shims are installed in Claude Code
    (`~/.claude/skills/pipeline-impl/`).
-3. **A1 — drive impl on Claude:** repoint the target repo's `.pipeline/roles.yaml`
-   `impl` slot to a **Claude-installed** coder skill. The default
+3. **A1 — drive impl on Claude (claude transport only):** repoint the target repo's
+   `.pipeline/roles.yaml` `impl` slot to a **Claude-installed** coder skill. The default
    `goal-driven-implementation` is Hermes-only and will STOP under `claude`; the
-   driver pre-flights this and warns.
+   driver pre-flights this and warns. (The orca transport drives the TUI agent's own
+   runtime, where its native impl skill resolves — no repoint needed there.)
 4. `cp drive.config.example drive.config` and edit `WORKDIR`, `BRANCH`, `FEATURE`,
    `IMPL_MODEL` (floor `haiku`; or a gateway model like GLM via `IMPL_BASE_URL` +
    `IMPL_AUTH_TOKEN_ENV`).
@@ -129,7 +154,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh` — all must pass.
 
 ## Per-feature flow
 
