@@ -1,5 +1,5 @@
 {
-  "_comment": "Settings passed to every driven `claude` impl run via --settings. Two independent merge layers: the deny rules (evaluated before allow, so they win) and the PreToolUse deny-merge.sh hook (parses the real command). __DENY_MERGE_SH__ is rendered to the absolute path of deny-merge.sh by drive.sh at runtime. allow is intentionally broad: impl must run arbitrary build/test/git/gh commands to make a card's verify green — the driver gates merge, it does not sandbox the coder.",
+  "_comment": "Settings passed to every driven `claude` impl run via --settings. The deny rules and the PreToolUse deny-merge.sh hook are best-effort merge speed-bumps (normative model: README §Merge safety). __DENY_MERGE_SH__ is rendered to the absolute path of deny-merge.sh by drive.sh at runtime. allow is intentionally broad: impl must run arbitrary build/test/git/gh commands to make a card's verify green — the driver gates merge, it does not sandbox the coder.",
   "permissions": {
     "defaultMode": "dontAsk",
     "allow": [

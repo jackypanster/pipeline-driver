@@ -1,20 +1,11 @@
 #!/usr/bin/env bash
 # PreToolUse hook — a BEST-EFFORT merge speed-bump for the autonomous driver.
 #
-# IMPORTANT: this is NOT a security boundary. It regexes the Bash command string, so
-# any indirection a determined child can reach — a wrapper that builds the command
-# from base64, a variable, a file, or a not-yet-enumerated interpreter — can bypass
-# it. It catches the DIRECT forms and common quoted/wrapped forms (so a confused or
-# lightly-wrapped cheap model does not accidentally merge), nothing more.
-#
-# The merge gate this hook cannot enforce lives elsewhere (see README §Merge safety):
-#   1. control flow (the REAL gate) — the driver only ever runs `/pipeline-impl` and
-#      HALTS before review, so the merge is a human step the autonomous loop never
-#      reaches in normal operation; and
-#   2. server-side trunk force-push/deletion rules HARDEN trunk-clobber ONLY — they do
-#      NOT gate the feature-PR merge (a `require-PR` rule is incompatible with this
-#      pipeline's metadata-on-trunk, and a solo agent shares the human's identity).
-#      drive.sh pre-flights force-push + deletion protection and warns when it is absent.
+# NOT a security boundary: it regexes the Bash command string, so any indirection a
+# determined child can reach bypasses it. It catches direct and lightly-wrapped forms
+# so a confused cheap model does not accidentally merge — nothing more. The real merge
+# gate is control flow (the driver halts before review) plus the human merge.
+# Normative merge-safety model: README §Merge safety.
 #
 # Deny ⇒ print the decision JSON to stdout, exit 0. Allow ⇒ no output, exit 0.
 
