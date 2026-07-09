@@ -48,9 +48,7 @@ CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  FROM != review  AND  L
    the read is the operator's risk-tier policy (README §For agents): default a human,
    delegable to the coordinating agent only for explicitly low-risk drive-mode features.
 2. **GATE 2 — after the loop.** Only `pipeline-review` merges, and only after an
-   explicit human confirm. The DURABLE merge gate is the driver HALTING before review
-   plus you running the merge — the feature-PR merge has no clean server-side gate for a
-   solo single-identity setup. Trunk **force-push/deletion** rules (drive.sh warns if
-   absent) and the `permissions.deny` + `deny-merge.sh` hook are SEPARATE hardening that
-   protect against trunk-clobber, not the merge; the hook is a best-effort client-side
-   speed-bump (string matching is bypassable), not a security boundary.
+   explicit human confirm. The durable merge gate is the driver HALTING before review
+   plus you performing the merge; everything else (trunk rulesets, the `permissions.deny`
+   rules, the `deny-merge.sh` hook) is hardening, not a boundary. Normative merge-safety
+   model: README §Merge safety.

@@ -14,9 +14,11 @@
 #   GATE 2 (after the loop):  pipeline-review — semantic review + the explicit
 #     HUMAN merge confirm (never delegated). The driver never merges.
 #
-# HALT PREDICATE (the whole brain): CONTINUE iff
-#     NEXT == impl  AND  STATUS != blocked  AND  LIVE_SPEC_REV == CONFIRMED_SPEC_REV
-# Anything else halts and tells you exactly what to run next. The spec-rev clause
+# HALT PREDICATE (the whole brain — normative statement + halt table: stop-points.md):
+#     CONTINUE iff NEXT == impl AND STATUS != blocked AND FROM != review
+#                  AND LIVE_SPEC_REV == CONFIRMED_SPEC_REV
+# Anything else halts and tells you exactly what to run next. FROM != review halts a
+# review REJECTION (a human semantic decision) for a human read; the spec-rev clause
 # both authorizes the first card AND auto-halts on any re-freeze (a new spec-rev the
 # human has not re-read), re-firing GATE 1.
 #
@@ -138,10 +140,8 @@ if [ "$IMPL_TRANSPORT" = "claude" ] && [ -n "${impl_slot:-}" ]; then
   note "      (canonical layout: one shared skills dir, runtimes attached — pipeline README §Install)."
 fi
 
-# Trunk-clobber (force-push / deletion) is best closed SERVER-SIDE by a branch ruleset.
-# Warn if trunk is not protected. (The feature-PR MERGE gate is the driver halting before
-# review + a human merging — NOT a require-PR rule, which would break metadata-on-trunk;
-# the deny-merge hook is only a best-effort speed-bump. See README §Merge safety.)
+# Trunk-clobber (force-push / deletion) is best closed SERVER-SIDE by a branch ruleset;
+# warn if trunk is not protected. (Normative merge-safety model: README §Merge safety.)
 remote_url=$(git_q remote get-url origin 2>/dev/null || true)
 case "$remote_url" in
   *github.com*)
