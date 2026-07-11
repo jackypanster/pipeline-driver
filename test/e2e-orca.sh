@@ -46,7 +46,8 @@ EOF
 EOF
 }
 stub_orca() { mkdir -p "$1/bin"; cp "$STUB_ORCA" "$1/bin/orca"; chmod +x "$1/bin/orca"; }
-run() { printf '%s\n' "${2:-AAA}" | PATH="$1/bin:$PATH" bash "$DRIVER/drive.sh" "$1/cfg" 2>&1; }
+# DRIVE_DEFAULTS pinned: the operator's real global defaults must not leak in.
+run() { printf '%s\n' "${2:-AAA}" | DRIVE_DEFAULTS=/nonexistent PATH="$1/bin:$PATH" bash "$DRIVER/drive.sh" "$1/cfg" 2>&1; }
 
 # --- stub orca CLI: list/wait/read canned; send optionally runs the coder hook ----
 STUB_ORCA=$(mktemp)
@@ -143,7 +144,7 @@ unset ORCA_STUB_ON_SEND ORCA_STUB_SEND_LOG; rm -rf "$R"
 
 # 6) orca CLI missing from PATH -> preflight halt
 R=$(mktemp -d); seed_repo "$R" 1   # no stub installed
-out=$(printf 'AAA\n' | PATH="$R/bin:/usr/bin:/bin" bash "$DRIVER/drive.sh" "$R/cfg" 2>&1)
+out=$(printf 'AAA\n' | DRIVE_DEFAULTS=/nonexistent PATH="$R/bin:/usr/bin:/bin" bash "$DRIVER/drive.sh" "$R/cfg" 2>&1)
 echo "$out" | grep -q 'orca CLI not on PATH' && ok "orca missing -> preflight halt" || bad "orca missing: $out"
 rm -rf "$R"
 

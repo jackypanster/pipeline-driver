@@ -64,7 +64,7 @@ halts for a fresh human read); carry any cross-stage memory into a child; touch
 The "run one card" primitive is pluggable (`IMPL_TRANSPORT` in `drive.config`); halt
 semantics, GATE 1/2, the spec-rev protocol and every guard are transport-independent.
 
-- **claude (default)** — a fresh headless `claude --bare -p` cold child per card,
+- **claude (default)** — a fresh headless `claude -p` cold child per card (no `--bare`: it would skip skill loading and OAuth on current Claude Code),
   model per `IMPL_MODEL` (optionally via an Anthropic-compatible gateway).
 - **orca** — types the impl stage command (`IMPL_SLASH_CMD`, default `/pipeline-impl`)
   into a live Orca-managed TUI terminal (e.g. pi running GLM) with `orca terminal

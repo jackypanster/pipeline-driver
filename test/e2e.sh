@@ -37,8 +37,30 @@ BRANCH=master
 FEATURE=f
 EOF
 }
-stub() { mkdir -p "$1/bin"; cp "$2" "$1/bin/claude"; chmod +x "$1/bin/claude"; }
-run() { printf '%s\n' "${2:-AAA}" | PATH="$1/bin:$PATH" bash "$DRIVER/drive.sh" "$1/cfg" 2>&1; }
+# Argv regression guard injected into EVERY claude stub (field failure 2026-07-11):
+# the driver must never pass --bare (current Claude Code skips skill loading under
+# it), must pass --settings, and -p must START with /pipeline-impl (slash expansion
+# requires the skill as the first token). A violation fails the child loudly, which
+# fails the e2e case that drove it.
+GUARD=$(mktemp)
+cat > "$GUARD" <<'G'
+_settings=""; _prompt=""; _prev=""
+for _a in "$@"; do
+  case "$_prev" in --settings) _settings="$_a";; -p) _prompt="$_a";; esac
+  case "$_a" in --bare) echo "stub: FORBIDDEN --bare reached the claude child" >&2; exit 1;; esac
+  _prev="$_a"
+done
+[ -n "$_settings" ] || { echo "stub: --settings missing from the claude child argv" >&2; exit 1; }
+case "$_prompt" in "/pipeline-impl"*) ;; *) echo "stub: -p must start with /pipeline-impl, got: $_prompt" >&2; exit 1;; esac
+G
+stub() {
+  mkdir -p "$1/bin"
+  { head -1 "$2"; cat "$GUARD"; tail -n +2 "$2"; } > "$1/bin/claude"
+  chmod +x "$1/bin/claude"
+}
+# DRIVE_DEFAULTS pinned to a nonexistent path: the operator's REAL global defaults
+# (~/.config/pipeline-driver/drive.defaults) must never leak into hermetic tests.
+run() { printf '%s\n' "${2:-AAA}" | DRIVE_DEFAULTS=/nonexistent PATH="$1/bin:$PATH" bash "$DRIVER/drive.sh" "$1/cfg" 2>&1; }
 
 # --- stub: implement one card, advance journal, push (NEXT=review on the last) ---
 STUB_IMPL=$(mktemp)
@@ -57,7 +79,7 @@ printf '\n## seq=%s · t · impl→impl · completed · by=stub\ndone: x\noutput
 git add -A && git commit -qm "s=$s" && git push -q origin master
 S
 STUB_NOOP=$(mktemp); printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB_NOOP"
-trap 'rm -f "$STUB_IMPL" "$STUB_NOOP"' EXIT
+trap 'rm -f "$STUB_IMPL" "$STUB_NOOP" "$GUARD"' EXIT
 
 # 1) happy path: 3 cards -> HALT at review
 R=$(mktemp -d); seed_repo "$R" 3; stub "$R" "$STUB_IMPL"
