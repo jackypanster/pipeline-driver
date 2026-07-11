@@ -35,7 +35,9 @@ You are an agent in or around a `pipeline`-driven repo. When to reach for this d
   trust grant, so the coordinating agent MAY type the spec-rev after reading the spec it froze
   (e.g. via `orca terminal send` into the driver's terminal). DANGEROUS features (trading
   write-path) never use the driver at all — they run the normal human-relayed pipeline. The
-  sha-binding stays load-bearing either way: a mid-loop re-freeze still auto-halts.
+  sha-binding stays load-bearing either way: a mid-loop re-freeze still auto-halts. Record that
+  standing grant machine-readably with `YOLO=1` in the global defaults file (§Defaults & YOLO) so
+  it does not need re-stating in chat per run.
 - **It never merges and cannot cross a gate.** It only ever runs `/pipeline-impl`; it HALTs at every
   gate (e.g. `NEXT=review`, a `blocked` card, a re-freeze — and others); the merge stays a human step in
   `pipeline-review`. See *Merge safety* and [stop-points.md](stop-points.md) for the exact halt list.
@@ -136,13 +138,15 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `settings.driver.json` | `--settings` for each driven run: merge `deny` rules + the PreToolUse hook |
 | `deny-merge.sh` | best-effort merge speed-bump (PreToolUse hook); parses the Bash command, denies direct/wrapped merge + trunk-clobber. NOT a boundary — see *Merge safety* |
 | `clobber-guard.sh` | trunk-clobber preflight: stdin = branch-rules JSON, exit 0 iff both `non_fast_forward` + `deletion` present |
-| `drive.config.example` | per-feature config (copy to `drive.config`) |
+| `drive.config.example` | per-feature config (copy to `drive.config`): WORKDIR/BRANCH/FEATURE + per-run handle |
+| `drive.defaults.example` | GLOBAL defaults (copy once to `~/.config/pipeline-driver/drive.defaults`): transport, tuning, `YOLO` |
 | `stop-points.md` | the enumerated halt specification + hand-relay checklist |
 | `test/run.sh` | parser unit tests against a format-faithful sample journal |
 | `test/hook.sh` | merge-gate tests incl. the wrapper/refspec bypass cases |
 | `test/e2e.sh` | hermetic end-to-end loop tests (stub `claude`) + every safety halt |
 | `test/e2e-orca.sh` | hermetic e2e for the orca transport (stub `orca` plays the TUI coder) |
 | `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
+| `test/defaults-doctor.sh` | hermetic tests for the defaults layer + `drive.sh doctor` |
 
 ## Setup (one-time)
 
@@ -157,9 +161,12 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    `goal-driven-implementation` is Hermes-only and will STOP under `claude`; the
    driver pre-flights this and warns. (The orca transport drives the TUI agent's own
    runtime, where its native impl skill resolves — no repoint needed there.)
-4. `cp drive.config.example drive.config` and edit `WORKDIR`, `BRANCH`, `FEATURE`,
-   `IMPL_MODEL` (floor `haiku`; or a gateway model like GLM via `IMPL_BASE_URL` +
-   `IMPL_AUTH_TOKEN_ENV`).
+4. One-time: `mkdir -p ~/.config/pipeline-driver && cp drive.defaults.example
+   ~/.config/pipeline-driver/drive.defaults`, then set your stable preferences there
+   (transport, `IMPL_MODEL` floor `haiku` / gateway via `IMPL_BASE_URL` +
+   `IMPL_AUTH_TOKEN_ENV`, tuning, `YOLO`). Per feature: `cp drive.config.example
+   drive.config` and set just `WORKDIR`, `BRANCH`, `FEATURE` (+ the per-run
+   `ORCA_TERMINAL_HANDLE` on the orca transport) — drive.config wins on conflict.
 5. **Protect the target's trunk against force-push / deletion (server-side).** This is
    compatible with the pipeline (metadata fast-forwards + the squash-merge still work).
    Replace `OWNER/REPO` and `<trunk>`:
@@ -174,7 +181,11 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/defaults-doctor.sh` — all must pass.
+7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
+   (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
+   to pin handles from). Every MISS prints the exact remediation command; it installs nothing
+   and touches no network. Re-run until `0 blocking`.
 
 ## Per-feature flow
 
@@ -188,6 +199,20 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 
 Observe progress any time with the read-only dashboard:
 `node ~/workspace/pipeline-dashboard/dist/cli.js <WORKDIR> --out board.html`.
+
+## Defaults & YOLO
+
+Config is layered: `~/.config/pipeline-driver/drive.defaults` (global, optional — override the
+path with `$DRIVE_DEFAULTS`) is sourced first, `./drive.config` (per-feature) second and wins.
+Stable machine-wide choices — transport, model tier, tuning, slot-binding documentation
+(prd/arch/task on a frontier Claude, impl on the pi TUI, review on codex) — live in the defaults;
+a feature needs only three lines.
+
+`YOLO=1` in the defaults records the operator's **standing ex-ante grant** (the 2026-07-08
+GATE 1 policy) machine-readably: for a LOW-RISK feature the coordinating agent may read the
+frozen spec and echo the `spec-rev` — no per-run chat authorization. It changes NOTHING else:
+starting `./drive.sh` stays an explicit per-feature act (drive is never the default mode), the
+merge confirm stays human (frozen invariant), and DANGEROUS features never use the driver.
 
 ## Failure / resume / rollback
 
