@@ -41,7 +41,7 @@ EOF
   # default: ONE matching terminal for the worktree
   cat > "$ROOT/list.json" <<EOF
 {"ok":true,"result":{"terminals":[
-  {"handle":"term_stub1","worktreePath":"$ROOT/work","title":"impl — omp","connected":true,"writable":true}
+  {"handle":"term_stub1","worktreePath":"$ROOT/work","title":"impl — pi","connected":true,"writable":true}
 ]}}
 EOF
 }
@@ -110,7 +110,7 @@ R=$(mktemp -d); seed_repo "$R" 2; stub_orca "$R"
 cat > "$R/list.json" <<EOF
 {"ok":true,"result":{"terminals":[
   {"handle":"term_a","worktreePath":"$R/work","title":"cc","connected":true,"writable":true},
-  {"handle":"term_b","worktreePath":"$R/work","title":"impl — omp","connected":true,"writable":true}
+  {"handle":"term_b","worktreePath":"$R/work","title":"impl — pi","connected":true,"writable":true}
 ]}}
 EOF
 export ORCA_STUB_LIST_JSON="$R/list.json"
@@ -123,7 +123,7 @@ R=$(mktemp -d); seed_repo "$R" 2; stub_orca "$R"
 cat > "$R/list.json" <<EOF
 {"ok":true,"result":{"terminals":[
   {"handle":"term_a","worktreePath":"$R/work","title":"cc","connected":true,"writable":true},
-  {"handle":"term_b","worktreePath":"$R/work","title":"impl — omp","connected":true,"writable":true}
+  {"handle":"term_b","worktreePath":"$R/work","title":"impl — pi","connected":true,"writable":true}
 ]}}
 EOF
 printf 'ORCA_TERMINAL_TITLE=impl\n' >> "$R/cfg"
@@ -153,7 +153,7 @@ R=$(mktemp -d); seed_repo "$R" 1; stub_orca "$R"
 cat > "$R/list.json" <<EOF
 {"ok":true,"result":{"terminals":[
   {"handle":"term_self","worktreePath":"$R/work","title":"driver shell","connected":true,"writable":true},
-  {"handle":"term_coder","worktreePath":"$R/work","title":"impl — omp","connected":true,"writable":true}
+  {"handle":"term_coder","worktreePath":"$R/work","title":"impl — pi","connected":true,"writable":true}
 ]}}
 EOF
 export ORCA_STUB_LIST_JSON="$R/list.json" ORCA_STUB_ON_SEND="$CODER" ORCA_TERMINAL_HANDLE="term_self"
@@ -181,6 +181,15 @@ unset ORCA_STUB_WAIT_RC ORCA_STUB_SEND_LOG
 { echo "$out" | grep -q 'not idle within'; } && [ ! -s "$R/sends.log" ] \
   && ok "busy TUI + reset -> fatal, zero text sent" || bad "reset wait fatal: $out"
 rm -rf "$R"
+
+# 10) IMPL_SLASH_CMD override (pi skill-command syntax) is typed verbatim
+R=$(mktemp -d); seed_repo "$R" 1; stub_orca "$R"
+printf 'IMPL_SLASH_CMD=/skill:pipeline-impl\n' >> "$R/cfg"
+export ORCA_STUB_LIST_JSON="$R/list.json" ORCA_STUB_ON_SEND="$CODER" ORCA_STUB_SEND_LOG="$R/sends.log"
+out=$(run "$R")
+echo "$out" | grep -q 'all cards in review' && grep -q "^/skill:pipeline-impl repo=$R/work branch=master$" "$R/sends.log" \
+  && ok "IMPL_SLASH_CMD override typed verbatim" || bad "IMPL_SLASH_CMD override: $out $(cat "$R/sends.log" 2>/dev/null)"
+unset ORCA_STUB_ON_SEND ORCA_STUB_SEND_LOG; rm -rf "$R"
 
 unset ORCA_STUB_LIST_JSON 2>/dev/null || true
 echo "----"; echo "passed=$pass failed=$fail"; [ "$fail" -eq 0 ]

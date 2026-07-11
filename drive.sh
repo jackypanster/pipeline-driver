@@ -25,8 +25,8 @@
 # Usage:  ./drive.sh [path/to/drive.config]      (defaults to ./drive.config)
 #
 # IMPL TRANSPORT: IMPL_TRANSPORT=claude (default) spawns a headless `claude` child
-# per card. IMPL_TRANSPORT=orca instead sends "/pipeline-impl …" into a live
-# Orca-managed TUI terminal (e.g. omp running GLM) and polls origin/<BRANCH> until
+# per card. IMPL_TRANSPORT=orca instead sends "$IMPL_SLASH_CMD …" into a live
+# Orca-managed TUI terminal (e.g. pi running GLM) and polls origin/<BRANCH> until
 # the journal seq advances (or CARD_TIMEOUT). Same halt predicate, gates and
 # guards either way — only the "run one card" primitive changes.
 
@@ -41,7 +41,7 @@ CONF="${1:-$HERE/drive.config}"
 # point the impl dispatch at the driver's own terminal. Config-file-only: SAVE the
 # inherited value as "the terminal running THIS driver" so discovery can EXCLUDE it
 # (a driver launched inside the target worktree would otherwise be a discovery
-# candidate and type /pipeline-impl into itself), then drop it before sourcing.
+# candidate and type the stage command into itself), then drop it before sourcing.
 DRIVER_SELF_TERMINAL="${ORCA_TERMINAL_HANDLE:-}"
 unset ORCA_TERMINAL_HANDLE ORCA_TERMINAL_TITLE 2>/dev/null || true
 # shellcheck disable=SC1090
@@ -59,7 +59,8 @@ IMPL_TRANSPORT="${IMPL_TRANSPORT:-claude}"          # claude | orca (see header)
 ORCA_TERMINAL_HANDLE="${ORCA_TERMINAL_HANDLE:-}"    # explicit term_… handle (wins over discovery)
 ORCA_TERMINAL_TITLE="${ORCA_TERMINAL_TITLE:-}"      # substring match on the tab title (disambiguator)
 ORCA_IDLE_TIMEOUT_MS="${ORCA_IDLE_TIMEOUT_MS:-60000}"
-ORCA_RESET_CMD="${ORCA_RESET_CMD:-}"                # optional per-card TUI reset (e.g. /clear); empty = off
+ORCA_RESET_CMD="${ORCA_RESET_CMD:-}"                # optional per-card TUI reset (e.g. /new on pi); empty = off
+IMPL_SLASH_CMD="${IMPL_SLASH_CMD:-/pipeline-impl}"  # stage command typed into the TUI (pi registers skills as /skill:pipeline-impl)
 CARD_TIMEOUT="${CARD_TIMEOUT:-2700}"                # orca transport: max seconds to wait for one card
 POLL_SECS="${POLL_SECS:-30}"                        # orca transport: journal poll interval
 JOURNAL=".pipeline/$FEATURE/journal.md"
@@ -209,7 +210,7 @@ run_impl_orca() {
   fi
   orca terminal wait --terminal "$handle" --for tui-idle --timeout-ms "$ORCA_IDLE_TIMEOUT_MS" >/dev/null 2>&1 \
     || { note "orca: terminal $handle not idle within ${ORCA_IDLE_TIMEOUT_MS}ms"; return 1; }
-  orca terminal send --terminal "$handle" --text "/pipeline-impl repo=$WORKDIR branch=$BRANCH" --enter >/dev/null 2>&1 \
+  orca terminal send --terminal "$handle" --text "$IMPL_SLASH_CMD repo=$WORKDIR branch=$BRANCH" --enter >/dev/null 2>&1 \
     || { note "orca: 'terminal send' failed for $handle"; return 1; }
   start=$SECONDS
   while [ $((SECONDS - start)) -lt "$CARD_TIMEOUT" ]; do

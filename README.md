@@ -64,9 +64,12 @@ semantics, GATE 1/2, the spec-rev protocol and every guard are transport-indepen
 
 - **claude (default)** — a fresh headless `claude --bare -p` cold child per card,
   model per `IMPL_MODEL` (optionally via an Anthropic-compatible gateway).
-- **orca** — types `/pipeline-impl …` into a live Orca-managed TUI terminal (e.g. omp
-  running GLM) with `orca terminal send`, then polls `origin/<BRANCH>` until the
-  journal seq advances or `CARD_TIMEOUT`. For coding-plan models whose gateway rejects
+- **orca** — types the impl stage command (`IMPL_SLASH_CMD`, default `/pipeline-impl`)
+  into a live Orca-managed TUI terminal (e.g. pi running GLM) with `orca terminal
+  send`, then polls `origin/<BRANCH>` until the journal seq advances or
+  `CARD_TIMEOUT`. The command syntax is the TUI agent's: pi registers skills as
+  `/skill:<name>`, so set `IMPL_SLASH_CMD=/skill:pipeline-impl` there.
+  For coding-plan models whose gateway rejects
   headless Claude Code (observed: bigmodel.cn answers a fake-529 to the
   `cc_entrypoint=sdk-cli` billing marker), the interactive TUI is the compliant
   channel — the driver only automates the typing a human would do into it.
