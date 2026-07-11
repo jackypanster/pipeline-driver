@@ -1,11 +1,13 @@
 # drive.config — per-feature config for drive.sh. Copy to drive.config and edit.
 # Sourced by bash, so: VAR=value, no spaces around '='.
 #
-# LAYERING: a global defaults file (~/.config/pipeline-driver/drive.defaults, see
-# drive.defaults.example) is sourced BEFORE this file — put stable cross-feature
-# preferences (IMPL_TRANSPORT, timeouts, YOLO, …) there once; this file then only
-# needs the per-feature facts (WORKDIR / BRANCH / FEATURE, plus the per-run
-# ORCA_TERMINAL_HANDLE for the orca transport). Anything set here wins.
+# LAYERING: the global defaults file (~/.config/pipeline-driver/drive.defaults, see
+# drive.defaults.example) is sourced BEFORE this file and carries every stable
+# cross-feature preference (transport, model/gateway, tuning, YOLO, …). This file
+# holds ONLY the per-feature facts — anything set here overrides the defaults for
+# this feature, so keep it to the three lines below (plus the per-run handle).
+# Without a defaults file, drive.sh's built-in defaults apply (claude transport,
+# IMPL_MODEL=haiku, standard tuning) — the three lines still suffice.
 
 # The local clone of the TARGET repo (the git+md state bus). The driver only ever
 # reads origin/<BRANCH> refs from here; the driven impl child shares this checkout.
@@ -17,55 +19,11 @@ BRANCH=main
 # The .pipeline/<feature> directory name.
 FEATURE=my-feature
 
-# --- impl model tier (A1: drive impl on Claude) -------------------------------
-# Floor is haiku. May be any alias (haiku|sonnet|opus|fable) or a full model id.
-IMPL_MODEL=haiku
+# Orca transport only: pin the impl terminal PER RUN — handles are runtime-issued
+# and die on app restart; titles are unreliable (field-tested: the coder TUI renamed
+# its own tab mid-setup). Get it from `orca terminal list --json` right before the run.
+# ORCA_TERMINAL_HANDLE=term_...
 
-# Optional: route impl to a non-Anthropic, Anthropic-compatible model via a gateway
-# (e.g. GLM 5.2 xhigh). Leave IMPL_BASE_URL empty to use the Anthropic default.
-# IMPL_AUTH_TOKEN_ENV names an EXISTING env var holding the gateway token (the token
-# itself is never written here or printed).
-#   IMPL_MODEL=glm-4.6
-#   IMPL_BASE_URL=https://your-anthropic-compatible-gateway/v1
-#   IMPL_AUTH_TOKEN_ENV=GLM_API_KEY
-IMPL_BASE_URL=
-IMPL_AUTH_TOKEN_ENV=
-
-# --- impl transport --------------------------------------------------------------
-# claude (default): spawn a headless `claude` child per card (settings above apply).
-# orca: type "$IMPL_SLASH_CMD …" into a live Orca-managed TUI terminal (e.g. pi
-# running GLM) via `orca terminal send`, then poll origin/<BRANCH> until the journal
-# seq advances. Use when the impl model's plan only allows interactive coding tools
-# (observed: bigmodel.cn coding plan rejects headless Claude Code with a fake-529).
-# The TUI agent must have the pipeline-impl shim + the roles.yaml impl skill
-# installed, and permissions that let it finish a card unattended.
-IMPL_TRANSPORT=claude
-
-# Orca transport tuning (ignored for claude). PREFER PINNING THE HANDLE: TUI agents
-# overwrite their own tab title on startup (field-tested: the coder TUI renamed the
-# tab `impl` -> `Pi` and title discovery went stale mid-setup), so a title substring
-# is a temporary convenience at best. Get the handle from `orca terminal list --json`
-# right before the run; handles are runtime-issued and die on app restart, so
-# re-pin per run. Fallback discovery: worktreePath==WORKDIR (+ connected+writable),
-# optionally narrowed by ORCA_TERMINAL_TITLE — exactly ONE match required.
-# ORCA_TERMINAL_HANDLE=term_...   # preferred
-# ORCA_TERMINAL_TITLE=impl        # fallback only; agents rename their tabs
-# IMPL_SLASH_CMD=/pipeline-impl   # stage command typed into the TUI. pi registers
-#                                 # skills as /skill:<name> -> set /skill:pipeline-impl
-# CARD_TIMEOUT=2700          # max seconds to wait for one card before halting
-# POLL_SECS=30               # journal poll interval (seconds)
-# ORCA_IDLE_TIMEOUT_MS=60000 # wait-for-tui-idle budget before each send
-# ORCA_RESET_CMD=            # optional per-card TUI reset command (e.g. /new on pi); empty = off
-
-# --- loop guards ---------------------------------------------------------------
-# HALT after this many CONSECUTIVE failed impl runs (in-run thrash guard; the
-# durable stop is the contract's attempts>=3 -> blocked -> hunt).
-MAX_CONSEC_FAIL=2
-
-# 1 = auto-continue informed retries (failed -> impl, attempts<3) on the cheap model.
-# 0 = HALT on every impl failure so a human inspects it.
-RETRY_ON_FAIL=1
-
-# Path to the settings template carrying the merge-deny hook (default: alongside
-# drive.sh). drive.sh renders the absolute hook path into a temp copy at runtime.
-# SETTINGS=/abs/path/to/settings.driver.json
+# Rare per-feature overrides: ANY variable documented in drive.defaults.example may
+# be set here to override it for THIS feature only (e.g. IMPL_MODEL=sonnet for a
+# hairier codebase). Do NOT bulk-copy stable values here — that defeats the layering.

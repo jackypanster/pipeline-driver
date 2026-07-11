@@ -125,11 +125,14 @@ doctor() {
       else d_miss "orca not on PATH but IMPL_TRANSPORT=orca" "install the Orca CLI, or set IMPL_TRANSPORT=claude"; fi
       if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH (orca transport needs it)"
       else d_miss "jq not on PATH but IMPL_TRANSPORT=orca" "brew install jq"; fi ;;
-    *)
-      if command -v claude >/dev/null 2>&1; then d_ok "claude on PATH (IMPL_TRANSPORT=$IMPL_TRANSPORT)"
-      else d_miss "claude not on PATH but IMPL_TRANSPORT=$IMPL_TRANSPORT" "install Claude Code, or set IMPL_TRANSPORT=orca"; fi
+    claude)
+      if command -v claude >/dev/null 2>&1; then d_ok "claude on PATH (IMPL_TRANSPORT=claude)"
+      else d_miss "claude not on PATH but IMPL_TRANSPORT=claude" "install Claude Code, or set IMPL_TRANSPORT=orca"; fi
       if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH"
       else d_warn "jq not on PATH" "needed only for the orca transport + terminal listing: brew install jq"; fi ;;
+    *)
+      d_miss "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT' (drive.sh would halt on it)" \
+        "set IMPL_TRANSPORT=claude or orca in $DEFAULTS / drive.config" ;;
   esac
   if command -v gh >/dev/null 2>&1; then d_ok "gh on PATH"
   else d_warn "gh not on PATH" "trunk-protection preflight + PR review degrade: brew install gh"; fi
@@ -159,7 +162,14 @@ doctor() {
   if [ -f "$DEFAULTS" ]; then d_ok "global defaults: $DEFAULTS"
   else d_warn "no global defaults file ($DEFAULTS)" \
        "mkdir -p $(dirname "$DEFAULTS") && cp $HERE/drive.defaults.example $DEFAULTS   # one-time"; fi
-  if [ -f "$CONF" ]; then d_ok "per-feature config: $CONF"
+  if [ -f "$CONF" ]; then
+    local missing=""
+    [ -n "${WORKDIR:-}" ] || missing="$missing WORKDIR"
+    [ -n "${BRANCH:-}" ]  || missing="$missing BRANCH"
+    [ -n "${FEATURE:-}" ] || missing="$missing FEATURE"
+    if [ -z "$missing" ]; then d_ok "per-feature config: $CONF (WORKDIR/BRANCH/FEATURE all set)"
+    else d_miss "required setting(s) unset after sourcing defaults+config:$missing" \
+         "set them in $CONF (see drive.config.example) — drive.sh would die on them"; fi
   else d_warn "no per-feature config ($CONF)" \
        "cp $HERE/drive.config.example ${CONF}   # then set WORKDIR / BRANCH / FEATURE"; fi
   if [ "$YOLO" = "1" ]; then
@@ -174,15 +184,24 @@ doctor() {
       d_ok "WORKDIR is a git repo: $WORKDIR"
       if [ -f "$WORKDIR/.pipeline/current.json" ]; then d_ok "target has .pipeline/current.json"
       else d_warn "target has no .pipeline/current.json" "start the feature with pipeline-prd (it seeds current.json)"; fi
-      slot=$(awk -F'#' '{print $1}' "$WORKDIR/.pipeline/roles.yaml" 2>/dev/null \
-             | awk -F'[][, ]+' '/^impl:/{print $2}' | head -1)
-      if [ -n "${slot:-}" ]; then
-        if [ -d "$SKILLS_DIR/$slot" ]; then
-          d_ok "impl slot '$slot' present in $SKILLS_DIR (verify the impl runtime is attached to it)"
+      if [ -f "$WORKDIR/.pipeline/roles.yaml" ]; then
+        # `|| true` matters: under set -e/pipefail a failing pipeline inside $()
+        # would abort doctor mid-report instead of printing the summary.
+        slot=$(awk -F'#' '{print $1}' "$WORKDIR/.pipeline/roles.yaml" 2>/dev/null \
+               | awk -F'[][, ]+' '/^impl:/{print $2}' | head -1 || true)
+        if [ -n "${slot:-}" ]; then
+          if [ -d "$SKILLS_DIR/$slot" ]; then
+            d_ok "impl slot '$slot' present in $SKILLS_DIR (verify the impl runtime is attached to it)"
+          else
+            d_warn "impl slot '$slot' not in $SKILLS_DIR" \
+              "install it there + attach the impl runtime (pipeline README §Verify dependencies)"
+          fi
         else
-          d_warn "impl slot '$slot' not in $SKILLS_DIR" \
-            "install it there + attach the impl runtime (pipeline README §Verify dependencies)"
+          d_warn "roles.yaml has no parseable impl slot" "check $WORKDIR/.pipeline/roles.yaml"
         fi
+      else
+        d_warn "target has no .pipeline/roles.yaml" \
+          "seed it: cp $PIPELINE_REPO/roles.yaml $WORKDIR/.pipeline/roles.yaml"
       fi
     else
       d_miss "WORKDIR is not a git repo: $WORKDIR" "clone the target repo there, or fix WORKDIR in $CONF"
