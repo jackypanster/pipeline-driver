@@ -147,6 +147,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `test/e2e-orca.sh` | hermetic e2e for the orca transport (stub `orca` plays the TUI coder) |
 | `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
 | `test/defaults-doctor.sh` | hermetic tests for the defaults layer + `drive.sh doctor` |
+| `test/board-relay.sh` | hermetic tests for `BOARD_OUT` auto-refresh + the one-key review relay |
 
 ## Setup (one-time)
 
@@ -181,7 +182,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/defaults-doctor.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
    (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
    to pin handles from). Every MISS prints the exact remediation command; it installs nothing
@@ -198,7 +199,8 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 ```
 
 Observe progress any time with the read-only dashboard:
-`node ~/workspace/pipeline-dashboard/dist/cli.js <WORKDIR> --out board.html`.
+`node ~/workspace/pipeline-dashboard/dist/cli.js <WORKDIR> --out board.html` — or set
+`BOARD_OUT` and the driver keeps that file fresh for you (§Board & review relay).
 
 ## Defaults & YOLO
 
@@ -213,6 +215,23 @@ GATE 1 policy) machine-readably: for a LOW-RISK feature the coordinating agent m
 frozen spec and echo the `spec-rev` — no per-run chat authorization. It changes NOTHING else:
 starting `./drive.sh` stays an explicit per-feature act (drive is never the default mode), the
 merge confirm stays human (frozen invariant), and DANGEROUS features never use the driver.
+
+## Board & review relay
+
+**Board auto-refresh.** Non-empty `BOARD_OUT` makes the driver re-render the read-only
+dashboard (needs `node` + a built `DASHBOARD_REPO`) after GATE 1, after every advanced
+card, and on every halt — keep it open in a browser and the board is always current.
+Best-effort side effect: a render failure warns once and never halts the loop.
+
+**One-key review relay.** With `REVIEW_TERMINAL_HANDLE` (preferred; pin per run) or a
+unique `REVIEW_TERMINAL_TITLE` configured, the `NEXT=review` halt prints its banner
+first, then OFFERS:
+`review relay — send "/pipeline-review repo=… branch=…" to terminal …? [y/N]`. You read
+the halt, you press `y`, `orca terminal send` does the typing into the review TUI (e.g.
+codex; the review shim rebuilds all state from the journal tail per the CONTRACT). This
+automates the TYPING of the hand-relay, not the decision: default is N, unconfigured =
+silent no-op, and it is NOT a review scheduler — the halt still fires, the review stage
+and the GATE 2 human merge confirm are untouched.
 
 ## Failure / resume / rollback
 

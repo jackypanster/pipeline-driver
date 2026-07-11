@@ -93,14 +93,43 @@ YOLO="${YOLO:-0}"
 PIPELINE_REPO="${PIPELINE_REPO:-$HOME/workspace/pipeline}"
 DASHBOARD_REPO="${DASHBOARD_REPO:-$HOME/workspace/pipeline-dashboard}"
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
+# Board auto-refresh: non-empty BOARD_OUT re-renders the read-only dashboard there
+# after GATE 1, after every advanced card, and on halt. Best-effort side effect —
+# a render failure never halts the loop.
+BOARD_OUT="${BOARD_OUT:-}"
+# One-key review relay (README §Board & review relay): when the loop halts at
+# NEXT=review and a review terminal is configured, OFFER to type the review stage
+# command into it — the human reads the halt and presses y. Never automatic; the
+# GATE 2 merge confirm is untouched. Handle wins over title discovery.
+REVIEW_TERMINAL_HANDLE="${REVIEW_TERMINAL_HANDLE:-}"
+REVIEW_TERMINAL_TITLE="${REVIEW_TERMINAL_TITLE:-}"
+REVIEW_SLASH_CMD="${REVIEW_SLASH_CMD:-/pipeline-review}"
 JOURNAL=".pipeline/${FEATURE:-}/journal.md"
 TASKS=".pipeline/${FEATURE:-}/tasks"
 
+halt_banner() { printf '\n=== DRIVER HALT ===\n%s\nNEXT (human): %s\n' "$1" "$2" >&2; }
 halt() { # <reason> <what-the-human-should-run-next> [exit-code]
-  printf '\n=== DRIVER HALT ===\n%s\nNEXT (human): %s\n' "$1" "$2" >&2
+  render_board   # the last board reflects the halt state (best-effort no-op when off)
+  halt_banner "$1" "$2"
   exit "${3:-0}"
 }
 note() { printf '%s\n' "$*" >&2; }
+
+# Re-render the read-only dashboard (BOARD_OUT non-empty = on). Never fails the
+# caller; complains at most once per run.
+render_board() {
+  [ -n "${BOARD_OUT:-}" ] || return 0
+  if ! command -v node >/dev/null 2>&1 || [ ! -f "${DASHBOARD_REPO:-}/dist/cli.js" ]; then
+    [ -n "${BOARD_WARNED:-}" ] || note "board: need node + a built $DASHBOARD_REPO/dist/cli.js — BOARD_OUT disabled this run (drive.sh doctor)"
+    BOARD_WARNED=1; return 0
+  fi
+  if node "$DASHBOARD_REPO/dist/cli.js" "$WORKDIR" --out "$BOARD_OUT" >/dev/null 2>&1; then :
+  else
+    [ -n "${BOARD_WARNED:-}" ] || note "board: render failed (non-fatal) — check: node $DASHBOARD_REPO/dist/cli.js $WORKDIR --out $BOARD_OUT"
+    BOARD_WARNED=1
+  fi
+  return 0
+}
 
 git_q() { git -C "$WORKDIR" "$@"; }
 show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path from the REMOTE ref
@@ -245,7 +274,7 @@ resolve_orca_terminal() {
   js=$(printf '%s' "$js" | jq --arg wd "$WORKDIR" --arg t "$ORCA_TERMINAL_TITLE" --arg self "${DRIVER_SELF_TERMINAL:-}" \
         '[.result.terminals[]? | select(.worktreePath==$wd and .connected and .writable)
           | select(.handle != $self)
-          | select(($t=="") or (.title | contains($t)))]') || return 1
+          | select(($t=="") or ((.title // "") | contains($t)))]') || return 1
   n=$(printf '%s' "$js" | jq 'length')
   case "$n" in
     1) printf '%s' "$js" | jq -r '.[0].handle' ;;
@@ -258,6 +287,58 @@ remote_seq() {   # seq of the LAST journal entry on origin/<BRANCH>; empty outpu
   local J
   J=$(show_origin "$JOURNAL") || return 1
   printf '%s' "$J" | awk -f "$AWK" | sed -n 's/^SEQ=\([0-9][0-9]*\);.*/\1/p'
+}
+
+# ---- one-key review relay ---------------------------------------------------------
+# Resolve the REVIEW terminal: pinned handle > title-substring discovery (title is
+# REQUIRED for discovery here — the review TUI usually sits in a different worktree,
+# so the impl transport's worktree filter does not apply). Exactly ONE match.
+resolve_review_terminal() {
+  if [ -n "$REVIEW_TERMINAL_HANDLE" ]; then
+    if [ -n "${DRIVER_SELF_TERMINAL:-}" ] && [ "$REVIEW_TERMINAL_HANDLE" = "$DRIVER_SELF_TERMINAL" ]; then
+      note "review relay: REVIEW_TERMINAL_HANDLE is the terminal running drive.sh itself"
+      return 1
+    fi
+    printf '%s\n' "$REVIEW_TERMINAL_HANDLE"; return 0
+  fi
+  [ -n "$REVIEW_TERMINAL_TITLE" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  local js n
+  js=$(orca terminal list --json 2>/dev/null) || return 1
+  js=$(printf '%s' "$js" | jq --arg t "$REVIEW_TERMINAL_TITLE" --arg self "${DRIVER_SELF_TERMINAL:-}" \
+        '[.result.terminals[]? | select(.connected and .writable)
+          | select(.handle != $self)
+          | select((.title // "") | contains($t))]') || return 1
+  n=$(printf '%s' "$js" | jq 'length')
+  [ "$n" = "1" ] || { note "review relay: $n terminals match title ~ '$REVIEW_TERMINAL_TITLE' — pin REVIEW_TERMINAL_HANDLE"; return 1; }
+  printf '%s' "$js" | jq -r '.[0].handle'
+}
+
+# At the NEXT=review halt: OFFER to type the review stage command into the review
+# terminal (e.g. codex). The human reads the halt and answers y — this automates the
+# TYPING of the relay, not the decision (README §Board & review relay; the pipeline's
+# review stage itself, incl. the human merge confirm, is unchanged). Skipped silently
+# when unconfigured; every failure degrades to relay-by-hand.
+offer_review_relay() {
+  [ -n "$REVIEW_TERMINAL_HANDLE$REVIEW_TERMINAL_TITLE" ] || return 0
+  command -v orca >/dev/null 2>&1 || { note "review relay: orca not on PATH — relay by hand"; return 0; }
+  local h a
+  h=$(resolve_review_terminal) || { note "review relay: cannot resolve the review terminal — relay by hand"; return 0; }
+  printf 'review relay — send "%s repo=%s branch=%s" to terminal %s? [y/N] ' \
+    "$REVIEW_SLASH_CMD" "$WORKDIR" "$BRANCH" "$h" >&2
+  read -r a || { note "review relay: no answer — relay by hand"; return 0; }
+  case "$a" in
+    y|Y)
+      orca terminal wait --terminal "$h" --for tui-idle --timeout-ms "$ORCA_IDLE_TIMEOUT_MS" >/dev/null 2>&1 \
+        || { note "review relay: terminal $h not idle within ${ORCA_IDLE_TIMEOUT_MS}ms — relay by hand"; return 0; }
+      if orca terminal send --terminal "$h" --text "$REVIEW_SLASH_CMD repo=$WORKDIR branch=$BRANCH" --enter >/dev/null 2>&1; then
+        note "review relay: sent — GATE 2 ahead (semantic review + HUMAN merge confirm; the driver never merges)"
+      else
+        note "review relay: 'terminal send' failed for $h — relay by hand"
+      fi ;;
+    *) note "review relay: skipped — relay by hand" ;;
+  esac
+  return 0
 }
 
 # ---- preflight ----------------------------------------------------------------
@@ -422,6 +503,7 @@ fi
 printf 'GATE 1 — type the spec-rev above to confirm you read the frozen red test: ' >&2
 read -r ACK || halt "GATE 1 needs an interactive terminal (stdin closed)" "run drive.sh attached to a TTY" 2
 [ "$ACK" = "$CONFIRMED_SPEC_REV" ] || halt "spec-rev not confirmed (got '${ACK}')" "read the frozen test, then re-run drive.sh" 2
+render_board   # fresh board at drive start (no-op when BOARD_OUT is empty)
 
 # ---- the loop -----------------------------------------------------------------
 consec_fail=0
@@ -450,7 +532,11 @@ while : ; do
   # --- HALT PREDICATE ---
   if [ "$NEXT" != "impl" ] || [ "${STATUS}" = "blocked" ]; then
     case "$NEXT" in
-      review) halt "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" "pipeline-review (frontier, semantic review + merge confirm)" 0 ;;
+      review) # banner FIRST — the operator must read the halt before answering the relay prompt
+              render_board
+              halt_banner "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" "pipeline-review (frontier, semantic review + merge confirm)"
+              offer_review_relay
+              exit 0 ;;
       hunt)   halt "card blocked / integration incident (seq=$SEQ, status=$STATUS)" "pipeline-hunt (frontier, root-cause)" 0 ;;
       "")     halt "terminal/awaiting entry, no next command (seq=$SEQ)" "read $JOURNAL tail — likely awaiting your merge 'go', or feature done" 0 ;;
       *)      halt "tail routes to pipeline-$NEXT (seq=$SEQ, status=$STATUS) — outside the impl loop" "pipeline-$NEXT (human)" 0 ;;
@@ -494,4 +580,5 @@ while : ; do
   [ "${SEQ:-0}" -gt "$prev_seq" ] || halt "no progress: remote seq still $prev_seq after impl (stage committed nothing, or did not push)" \
        "inspect: the impl run made no pushed journal entry" 1
   note "<<< advanced to seq=$SEQ (status=$STATUS, next=$NEXT)"
+  render_board
 done

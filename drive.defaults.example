@@ -41,7 +41,23 @@ IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
 # confirm, and DANGEROUS features (external write-paths) never use the driver.
 YOLO=0
 
-# --- sibling repos (drive.sh doctor) ---------------------------------------------
+# --- sibling repos (drive.sh doctor, board rendering) ------------------------------
 # PIPELINE_REPO=$HOME/workspace/pipeline
 # DASHBOARD_REPO=$HOME/workspace/pipeline-dashboard
 # SKILLS_DIR=$HOME/.agents/skills
+
+# --- board auto-refresh -------------------------------------------------------------
+# Non-empty = re-render the read-only dashboard here after GATE 1, after every
+# advanced card, and on halt (needs node + a built DASHBOARD_REPO). Open it in a
+# browser and refresh whenever you glance over.
+# BOARD_OUT=/tmp/pipeline-board.html
+
+# --- one-key review relay (README §Board & review relay) ----------------------------
+# When the loop halts at NEXT=review, OFFER to type "$REVIEW_SLASH_CMD repo=… branch=…"
+# into the review terminal (e.g. codex) — you read the halt, you press y. Never
+# automatic; GATE 2 (semantic review + HUMAN merge confirm) is untouched.
+# Pin the HANDLE per run (orca terminal list --json; handles die on app restart), or
+# give a unique title substring for discovery.
+# REVIEW_TERMINAL_HANDLE=term_...
+# REVIEW_TERMINAL_TITLE=codex
+# REVIEW_SLASH_CMD=/pipeline-review
