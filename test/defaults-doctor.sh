@@ -72,6 +72,43 @@ if [ "$rc" -eq 1 ] && grep -q "npm install && npm run build" <<<"$out"; then
   ok "doctor: unbuilt dashboard -> MISS with build command"
 else bad "doctor unbuilt dashboard (rc=$rc)" "$out"; fi
 
+# --- 7. drive.config.example stays minimal: active assignments are EXACTLY the trio
+# (bulk-copying the example must not override the global defaults — review finding)
+active=$(grep -E '^[A-Za-z_]+=' "$HERE/../drive.config.example" | cut -d= -f1 | sort | tr '\n' ' ')
+if [ "$active" = "BRANCH FEATURE WORKDIR " ]; then ok "drive.config.example active keys == {WORKDIR,BRANCH,FEATURE}"
+else bad "drive.config.example minimality" "active keys: $active"; fi
+
+: > "$TMP/dashboard/dist/cli.js"   # restore what test 6 removed; tests below want a healthy base
+
+# --- 8. doctor: invalid IMPL_TRANSPORT is a MISS, not a false-green claude check
+cat > "$TMP/defaults4" <<EOF
+PIPELINE_REPO=$TMP/pipeline
+DASHBOARD_REPO=$TMP/dashboard
+SKILLS_DIR=$TMP/skills
+IMPL_TRANSPORT=warp-drive
+EOF
+out=$(DRIVE_DEFAULTS="$TMP/defaults4" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/no-such.config" 2>&1); rc=$?
+if [ "$rc" -eq 1 ] && grep -q "unknown IMPL_TRANSPORT 'warp-drive'" <<<"$out"; then
+  ok "doctor: invalid transport -> MISS, exit 1"
+else bad "doctor invalid transport (rc=$rc)" "$out"; fi
+
+# --- 9. doctor: config file present but a required key unset -> MISS naming it
+printf 'WORKDIR=%s\nBRANCH=main\n' "$TMP" > "$TMP/incomplete.config"   # FEATURE missing
+out=$(DRIVE_DEFAULTS="$TMP/defaults3" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/incomplete.config" 2>&1); rc=$?
+if [ "$rc" -eq 1 ] && grep -q "required setting(s) unset.* FEATURE" <<<"$out"; then
+  ok "doctor: incomplete config -> MISS names FEATURE"
+else bad "doctor incomplete config (rc=$rc)" "$out"; fi
+
+# --- 10. doctor: git WORKDIR without roles.yaml must NOT abort mid-report (was rc=2)
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+mkdir -p "$TMP/target" && git init -q "$TMP/target" && mkdir -p "$TMP/target/.pipeline"
+: > "$TMP/target/.pipeline/current.json"
+printf 'WORKDIR=%s/target\nBRANCH=main\nFEATURE=f\n' "$TMP" > "$TMP/target.config"
+out=$(DRIVE_DEFAULTS="$TMP/defaults3" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "no .pipeline/roles.yaml" <<<"$out" && grep -q "doctor: 0 blocking" <<<"$out"; then
+  ok "doctor: missing roles.yaml -> warn + full summary (no early exit)"
+else bad "doctor missing roles.yaml (rc=$rc)" "$out"; fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
