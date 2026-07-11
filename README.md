@@ -224,7 +224,8 @@ card, and on every halt — keep it open in a browser and the board is always cu
 Best-effort side effect: a render failure warns once and never halts the loop.
 
 **One-key review relay.** With `REVIEW_TERMINAL_HANDLE` (preferred; pin per run) or a
-unique `REVIEW_TERMINAL_TITLE` configured, the `NEXT=review` halt first OFFERS:
+unique `REVIEW_TERMINAL_TITLE` configured, the `NEXT=review` halt prints its banner
+first, then OFFERS:
 `review relay — send "/pipeline-review repo=… branch=…" to terminal …? [y/N]`. You read
 the halt, you press `y`, `orca terminal send` does the typing into the review TUI (e.g.
 codex; the review shim rebuilds all state from the journal tail per the CONTRACT). This

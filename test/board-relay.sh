@@ -38,7 +38,7 @@ seed() {
 #!/bin/sh
 echo "\$@" >> $ROOT/orca.log
 case "\$2" in
-  list) printf '{"result":{"terminals":[{"handle":"term_rev1","title":"codex review","worktreePath":"/x","connected":true,"writable":true}]}}\n' ;;
+  list) printf '{"result":{"terminals":[{"handle":"term_nul","title":null,"worktreePath":"/y","connected":true,"writable":true},{"handle":"term_rev1","title":"codex review","worktreePath":"/x","connected":true,"writable":true}]}}\n' ;;
 esac
 exit 0
 ORC
@@ -107,8 +107,8 @@ if command -v jq >/dev/null 2>&1; then
 y
 ')
   if grep -q "review relay: sent" <<<"$out" && grep -q -- "--terminal term_rev1" "$R/orca.log"; then
-    ok "relay: title discovery resolves the unique codex terminal"
-  else bad "relay title discovery" "$out"; fi
+    ok "relay: title discovery survives a null-title terminal in the list"
+  else bad "relay title discovery (null-title regression)" "$out"; fi
   rm -rf "$R"
 else
   echo "skip title-discovery case (no jq)"
@@ -121,6 +121,19 @@ out=$(run "$R" 'AAA
 if grep -q "all cards in review" <<<"$out" && ! grep -q "review relay" <<<"$out"; then
   ok "relay unconfigured: silent no-op, review halt unchanged"
 else bad "relay unconfigured" "$out"; fi
+rm -rf "$R"
+
+# --- 7. ordering: the DRIVER HALT banner prints BEFORE the y/N prompt ---
+R=$(mktemp -d); seed "$R"
+printf 'REVIEW_TERMINAL_HANDLE=term_rev1\n' >> "$R/cfg"
+out=$(run "$R" 'AAA
+n
+')
+bl=$(grep -n "=== DRIVER HALT ===" <<<"$out" | head -1 | cut -d: -f1)
+pl=$(grep -n "review relay — send" <<<"$out" | head -1 | cut -d: -f1)
+if [ -n "$bl" ] && [ -n "$pl" ] && [ "$bl" -lt "$pl" ]; then
+  ok "ordering: halt banner (line $bl) precedes the relay prompt (line $pl)"
+else bad "ordering banner-before-prompt (banner=$bl prompt=$pl)" "$out"; fi
 rm -rf "$R"
 
 echo "----"

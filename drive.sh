@@ -107,9 +107,10 @@ REVIEW_SLASH_CMD="${REVIEW_SLASH_CMD:-/pipeline-review}"
 JOURNAL=".pipeline/${FEATURE:-}/journal.md"
 TASKS=".pipeline/${FEATURE:-}/tasks"
 
+halt_banner() { printf '\n=== DRIVER HALT ===\n%s\nNEXT (human): %s\n' "$1" "$2" >&2; }
 halt() { # <reason> <what-the-human-should-run-next> [exit-code]
   render_board   # the last board reflects the halt state (best-effort no-op when off)
-  printf '\n=== DRIVER HALT ===\n%s\nNEXT (human): %s\n' "$1" "$2" >&2
+  halt_banner "$1" "$2"
   exit "${3:-0}"
 }
 note() { printf '%s\n' "$*" >&2; }
@@ -273,7 +274,7 @@ resolve_orca_terminal() {
   js=$(printf '%s' "$js" | jq --arg wd "$WORKDIR" --arg t "$ORCA_TERMINAL_TITLE" --arg self "${DRIVER_SELF_TERMINAL:-}" \
         '[.result.terminals[]? | select(.worktreePath==$wd and .connected and .writable)
           | select(.handle != $self)
-          | select(($t=="") or (.title | contains($t)))]') || return 1
+          | select(($t=="") or ((.title // "") | contains($t)))]') || return 1
   n=$(printf '%s' "$js" | jq 'length')
   case "$n" in
     1) printf '%s' "$js" | jq -r '.[0].handle' ;;
@@ -307,7 +308,7 @@ resolve_review_terminal() {
   js=$(printf '%s' "$js" | jq --arg t "$REVIEW_TERMINAL_TITLE" --arg self "${DRIVER_SELF_TERMINAL:-}" \
         '[.result.terminals[]? | select(.connected and .writable)
           | select(.handle != $self)
-          | select(.title | contains($t))]') || return 1
+          | select((.title // "") | contains($t))]') || return 1
   n=$(printf '%s' "$js" | jq 'length')
   [ "$n" = "1" ] || { note "review relay: $n terminals match title ~ '$REVIEW_TERMINAL_TITLE' — pin REVIEW_TERMINAL_HANDLE"; return 1; }
   printf '%s' "$js" | jq -r '.[0].handle'
@@ -531,8 +532,11 @@ while : ; do
   # --- HALT PREDICATE ---
   if [ "$NEXT" != "impl" ] || [ "${STATUS}" = "blocked" ]; then
     case "$NEXT" in
-      review) offer_review_relay
-              halt "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" "pipeline-review (frontier, semantic review + merge confirm)" 0 ;;
+      review) # banner FIRST — the operator must read the halt before answering the relay prompt
+              render_board
+              halt_banner "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" "pipeline-review (frontier, semantic review + merge confirm)"
+              offer_review_relay
+              exit 0 ;;
       hunt)   halt "card blocked / integration incident (seq=$SEQ, status=$STATUS)" "pipeline-hunt (frontier, root-cause)" 0 ;;
       "")     halt "terminal/awaiting entry, no next command (seq=$SEQ)" "read $JOURNAL tail — likely awaiting your merge 'go', or feature done" 0 ;;
       *)      halt "tail routes to pipeline-$NEXT (seq=$SEQ, status=$STATUS) — outside the impl loop" "pipeline-$NEXT (human)" 0 ;;
