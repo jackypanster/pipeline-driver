@@ -353,8 +353,8 @@ esac
 git_q rev-parse --git-dir >/dev/null 2>&1 || halt "WORKDIR is not a git repo: $WORKDIR" "clone the target repo there" 2
 git_q fetch origin --quiet || halt "git fetch origin failed (network / auth)" "fix connectivity, re-run" 1
 
-# Render the settings with the absolute hook path (--bare ignores project hooks; the
-# hook MUST travel in --settings). Process-local temp; cleaned on exit.
+# Render the settings with the absolute hook path (the hook travels in --settings so
+# it applies regardless of the child's ambient config). Process-local temp; cleaned on exit.
 RENDERED="${TMPDIR:-/tmp}/pipeline-driver-settings.$$.json"
 sed "s#__DENY_MERGE_SH__#$HERE/deny-merge.sh#g" "$SETTINGS_TMPL" > "$RENDERED"
 chmod +x "$HERE/deny-merge.sh" 2>/dev/null || true
@@ -414,7 +414,11 @@ run_impl_claude() {
         [ -n "${tok:-}" ] && export ANTHROPIC_AUTH_TOKEN="$tok"   # never printed
       fi
     fi
-    claude --bare \
+    # NO --bare: on current Claude Code, --bare skips skill loading entirely
+    # ("Unknown command: /pipeline-impl" — field-failed 2026-07-11, biji stats live run)
+    # and restricts auth to ANTHROPIC_API_KEY (OAuth/keychain skipped). The deny-merge
+    # hook still binds via --settings; ambient hooks/CLAUDE.md loading is acceptable.
+    claude \
       --settings "$RENDERED" \
       --permission-mode dontAsk \
       --model "$IMPL_MODEL" \

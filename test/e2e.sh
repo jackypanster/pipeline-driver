@@ -38,7 +38,9 @@ FEATURE=f
 EOF
 }
 stub() { mkdir -p "$1/bin"; cp "$2" "$1/bin/claude"; chmod +x "$1/bin/claude"; }
-run() { printf '%s\n' "${2:-AAA}" | PATH="$1/bin:$PATH" bash "$DRIVER/drive.sh" "$1/cfg" 2>&1; }
+# DRIVE_DEFAULTS pinned to a nonexistent path: the operator's REAL global defaults
+# (~/.config/pipeline-driver/drive.defaults) must never leak into hermetic tests.
+run() { printf '%s\n' "${2:-AAA}" | DRIVE_DEFAULTS=/nonexistent PATH="$1/bin:$PATH" bash "$DRIVER/drive.sh" "$1/cfg" 2>&1; }
 
 # --- stub: implement one card, advance journal, push (NEXT=review on the last) ---
 STUB_IMPL=$(mktemp)
