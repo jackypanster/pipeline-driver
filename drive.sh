@@ -23,6 +23,16 @@
 # human has not re-read), re-firing GATE 1.
 #
 # Usage:  ./drive.sh [path/to/drive.config]      (defaults to ./drive.config)
+#         ./drive.sh doctor [path/to/drive.config]
+#                    — install/config diagnosis for the pipeline+dashboard+driver
+#                      trio: prints one line per check with the exact remediation
+#                      command; installs nothing, touches no network.
+#
+# CONFIG LAYERING: an optional global defaults file
+# (${XDG_CONFIG_HOME:-~/.config}/pipeline-driver/drive.defaults, see
+# drive.defaults.example) is sourced BEFORE the per-feature drive.config, so
+# stable cross-feature preferences live in one place and drive.config always
+# wins. Override the path with $DRIVE_DEFAULTS (tests use this to stay hermetic).
 #
 # IMPL TRANSPORT: IMPL_TRANSPORT=claude (default) spawns a headless `claude` child
 # per card. IMPL_TRANSPORT=orca instead sends "$IMPL_SLASH_CMD …" into a live
@@ -34,8 +44,12 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 AWK="$HERE/parse-tail.awk"
 
+SUBCMD=""
+case "${1:-}" in doctor) SUBCMD=doctor; shift ;; esac
 CONF="${1:-$HERE/drive.config}"
-[ -f "$CONF" ] || { echo "drive.sh: config not found: $CONF" >&2; exit 2; }
+if [ "$SUBCMD" != "doctor" ]; then
+  [ -f "$CONF" ] || { echo "drive.sh: config not found: $CONF" >&2; exit 2; }
+fi
 # Orca injects ORCA_TERMINAL_HANDLE (among other ORCA_*) into EVERY terminal it
 # manages — including the one running this driver. Inheriting it would silently
 # point the impl dispatch at the driver's own terminal. Config-file-only: SAVE the
@@ -44,13 +58,19 @@ CONF="${1:-$HERE/drive.config}"
 # candidate and type the stage command into itself), then drop it before sourcing.
 DRIVER_SELF_TERMINAL="${ORCA_TERMINAL_HANDLE:-}"
 unset ORCA_TERMINAL_HANDLE ORCA_TERMINAL_TITLE 2>/dev/null || true
+# Global defaults first (optional), per-feature config second — drive.config wins.
+DEFAULTS="${DRIVE_DEFAULTS:-${XDG_CONFIG_HOME:-$HOME/.config}/pipeline-driver/drive.defaults}"
 # shellcheck disable=SC1090
-. "$CONF"
+[ -f "$DEFAULTS" ] && . "$DEFAULTS"
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
 
 # ---- config defaults ----------------------------------------------------------
-: "${WORKDIR:?set WORKDIR (a local clone of the target repo) in drive.config}"
-: "${BRANCH:?set BRANCH (trunk, e.g. main/master) in drive.config}"
-: "${FEATURE:?set FEATURE (the .pipeline/<feature> name) in drive.config}"
+if [ "$SUBCMD" != "doctor" ]; then   # doctor diagnoses a missing config instead of dying on it
+  : "${WORKDIR:?set WORKDIR (a local clone of the target repo) in drive.config}"
+  : "${BRANCH:?set BRANCH (trunk, e.g. main/master) in drive.config}"
+  : "${FEATURE:?set FEATURE (the .pipeline/<feature> name) in drive.config}"
+fi
 IMPL_MODEL="${IMPL_MODEL:-haiku}"
 MAX_CONSEC_FAIL="${MAX_CONSEC_FAIL:-2}"
 RETRY_ON_FAIL="${RETRY_ON_FAIL:-1}"
@@ -63,8 +83,18 @@ ORCA_RESET_CMD="${ORCA_RESET_CMD:-}"                # optional per-card TUI rese
 IMPL_SLASH_CMD="${IMPL_SLASH_CMD:-/pipeline-impl}"  # stage command typed into the TUI (pi registers skills as /skill:pipeline-impl)
 CARD_TIMEOUT="${CARD_TIMEOUT:-2700}"                # orca transport: max seconds to wait for one card
 POLL_SECS="${POLL_SECS:-30}"                        # orca transport: journal poll interval
-JOURNAL=".pipeline/$FEATURE/journal.md"
-TASKS=".pipeline/$FEATURE/tasks"
+# YOLO=1 records the operator's STANDING ex-ante grant for LOW-RISK drive features
+# (README §YOLO): the coordinating agent may read the frozen spec and echo the
+# spec-rev at GATE 1 without a fresh chat authorization. It does NOT auto-start
+# drive (still explicit per feature), never touches the merge confirm, and
+# DANGEROUS features never use the driver at all.
+YOLO="${YOLO:-0}"
+# Sibling-repo locations, used by `drive.sh doctor` (pipeline README canonical layout).
+PIPELINE_REPO="${PIPELINE_REPO:-$HOME/workspace/pipeline}"
+DASHBOARD_REPO="${DASHBOARD_REPO:-$HOME/workspace/pipeline-dashboard}"
+SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
+JOURNAL=".pipeline/${FEATURE:-}/journal.md"
+TASKS=".pipeline/${FEATURE:-}/tasks"
 
 halt() { # <reason> <what-the-human-should-run-next> [exit-code]
   printf '\n=== DRIVER HALT ===\n%s\nNEXT (human): %s\n' "$1" "$2" >&2
@@ -74,6 +104,106 @@ note() { printf '%s\n' "$*" >&2; }
 
 git_q() { git -C "$WORKDIR" "$@"; }
 show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path from the REMOTE ref
+
+# ---- doctor ---------------------------------------------------------------------
+# `drive.sh doctor` — one line per check, with the EXACT remediation command on a
+# MISS. Installs nothing, touches no network (freshness is pipeline-update's job).
+# MISS = blocks a drive run (exit 1). warn = degraded but drivable. info = context.
+doctor() {
+  local bad=0 warn=0 t slot terms
+  d_ok()   { printf 'ok    %s\n' "$1"; }
+  d_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; bad=$((bad+1)); }
+  d_warn() { printf 'warn  %s\n      %s\n' "$1" "$2"; warn=$((warn+1)); }
+  d_info() { printf 'info  %s\n' "$1"; }
+
+  printf -- '--- deps ----------------------------------------------------------\n'
+  if command -v git >/dev/null 2>&1; then d_ok "git on PATH"
+  else d_miss "git not on PATH" "install git (xcode-select --install / your package manager)"; fi
+  case "$IMPL_TRANSPORT" in
+    orca)
+      if command -v orca >/dev/null 2>&1; then d_ok "orca on PATH (IMPL_TRANSPORT=orca)"
+      else d_miss "orca not on PATH but IMPL_TRANSPORT=orca" "install the Orca CLI, or set IMPL_TRANSPORT=claude"; fi
+      if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH (orca transport needs it)"
+      else d_miss "jq not on PATH but IMPL_TRANSPORT=orca" "brew install jq"; fi ;;
+    *)
+      if command -v claude >/dev/null 2>&1; then d_ok "claude on PATH (IMPL_TRANSPORT=$IMPL_TRANSPORT)"
+      else d_miss "claude not on PATH but IMPL_TRANSPORT=$IMPL_TRANSPORT" "install Claude Code, or set IMPL_TRANSPORT=orca"; fi
+      if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH"
+      else d_warn "jq not on PATH" "needed only for the orca transport + terminal listing: brew install jq"; fi ;;
+  esac
+  if command -v gh >/dev/null 2>&1; then d_ok "gh on PATH"
+  else d_warn "gh not on PATH" "trunk-protection preflight + PR review degrade: brew install gh"; fi
+  if command -v node >/dev/null 2>&1; then d_ok "node on PATH"
+  else d_warn "node not on PATH" "dashboard rendering unavailable: install node"; fi
+
+  printf -- '--- sibling repos (pipeline / dashboard / driver) ------------------\n'
+  if [ -d "$PIPELINE_REPO/.git" ]; then d_ok "pipeline repo at $PIPELINE_REPO"
+  else d_miss "pipeline repo not found at $PIPELINE_REPO" \
+       "git clone https://github.com/jackypanster/pipeline.git $PIPELINE_REPO   # or set PIPELINE_REPO in $DEFAULTS"; fi
+  if [ -d "$DASHBOARD_REPO/.git" ]; then
+    d_ok "dashboard repo at $DASHBOARD_REPO"
+    if [ -f "$DASHBOARD_REPO/dist/cli.js" ]; then d_ok "dashboard built (dist/cli.js)"
+    else d_miss "dashboard not built (no dist/cli.js)" "(cd $DASHBOARD_REPO && npm install && npm run build)"; fi
+  else
+    d_miss "dashboard repo not found at $DASHBOARD_REPO" \
+      "git clone https://github.com/jackypanster/pipeline-dashboard.git $DASHBOARD_REPO   # or set DASHBOARD_REPO in $DEFAULTS"
+  fi
+  d_ok "driver at $HERE (you are running it)"
+
+  printf -- '--- skills (canonical shared layout) -------------------------------\n'
+  if [ -d "$SKILLS_DIR/pipeline-impl" ]; then d_ok "pipeline-impl shim in $SKILLS_DIR"
+  else d_miss "pipeline-impl shim not in $SKILLS_DIR" \
+       "cp -r $PIPELINE_REPO/skills/pipeline-* $SKILLS_DIR/   # then attach each runtime (pipeline README §Install)"; fi
+
+  printf -- '--- config ----------------------------------------------------------\n'
+  if [ -f "$DEFAULTS" ]; then d_ok "global defaults: $DEFAULTS"
+  else d_warn "no global defaults file ($DEFAULTS)" \
+       "mkdir -p $(dirname "$DEFAULTS") && cp $HERE/drive.defaults.example $DEFAULTS   # one-time"; fi
+  if [ -f "$CONF" ]; then d_ok "per-feature config: $CONF"
+  else d_warn "no per-feature config ($CONF)" \
+       "cp $HERE/drive.config.example ${CONF}   # then set WORKDIR / BRANCH / FEATURE"; fi
+  if [ "$YOLO" = "1" ]; then
+    d_info "YOLO=1 — standing low-risk grant on record: the coordinating agent may echo the spec-rev at GATE 1"
+  else
+    d_info "YOLO=0 — GATE 1 expects a human to read the frozen spec and echo its spec-rev"
+  fi
+
+  if [ -n "${WORKDIR:-}" ]; then
+    printf -- '--- target repo -----------------------------------------------------\n'
+    if git -C "$WORKDIR" rev-parse --git-dir >/dev/null 2>&1; then
+      d_ok "WORKDIR is a git repo: $WORKDIR"
+      if [ -f "$WORKDIR/.pipeline/current.json" ]; then d_ok "target has .pipeline/current.json"
+      else d_warn "target has no .pipeline/current.json" "start the feature with pipeline-prd (it seeds current.json)"; fi
+      slot=$(awk -F'#' '{print $1}' "$WORKDIR/.pipeline/roles.yaml" 2>/dev/null \
+             | awk -F'[][, ]+' '/^impl:/{print $2}' | head -1)
+      if [ -n "${slot:-}" ]; then
+        if [ -d "$SKILLS_DIR/$slot" ]; then
+          d_ok "impl slot '$slot' present in $SKILLS_DIR (verify the impl runtime is attached to it)"
+        else
+          d_warn "impl slot '$slot' not in $SKILLS_DIR" \
+            "install it there + attach the impl runtime (pipeline README §Verify dependencies)"
+        fi
+      fi
+    else
+      d_miss "WORKDIR is not a git repo: $WORKDIR" "clone the target repo there, or fix WORKDIR in $CONF"
+    fi
+  fi
+
+  # Live Orca terminals (info only): where to pin ORCA_TERMINAL_HANDLE from.
+  if command -v orca >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    terms=$(orca terminal list --json 2>/dev/null \
+      | jq -r '.result.terminals[]? | "\(.handle)\t\(.title)\t\(.worktreePath)"' 2>/dev/null || true)
+    if [ -n "${terms:-}" ]; then
+      d_info "live Orca terminals (pin ORCA_TERMINAL_HANDLE from here; handles die on app restart):"
+      printf '%s\n' "$terms" | sed 's/^/      /'
+    fi
+  fi
+
+  printf -- '---------------------------------------------------------------------\n'
+  printf 'doctor: %d blocking, %d warning(s)\n' "$bad" "$warn"
+  [ "$bad" -eq 0 ]
+}
+if [ "$SUBCMD" = "doctor" ]; then doctor; exit $?; fi
 
 # ---- orca transport helpers -----------------------------------------------------
 # Resolve the impl terminal: explicit handle > (worktree==WORKDIR + connected+writable,
@@ -265,6 +395,11 @@ note "Frozen spec-rev: $CONFIRMED_SPEC_REV"
 note "----- frozen spec (read it before authorizing the autonomous loop) -----"
 git_q show --stat "$CONFIRMED_SPEC_REV" >&2 || true
 note "-----------------------------------------------------------------------"
+if [ "$YOLO" = "1" ]; then
+  note "YOLO=1 — standing grant on record (README §YOLO): for a LOW-RISK feature the"
+  note "coordinating agent may read the frozen spec and type the spec-rev below."
+  note "Merge confirm stays human; DANGEROUS features never use the driver."
+fi
 printf 'GATE 1 — type the spec-rev above to confirm you read the frozen red test: ' >&2
 read -r ACK || halt "GATE 1 needs an interactive terminal (stdin closed)" "run drive.sh attached to a TTY" 2
 [ "$ACK" = "$CONFIRMED_SPEC_REV" ] || halt "spec-rev not confirmed (got '${ACK}')" "read the frozen test, then re-run drive.sh" 2

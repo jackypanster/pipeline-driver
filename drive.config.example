@@ -1,5 +1,11 @@
 # drive.config — per-feature config for drive.sh. Copy to drive.config and edit.
 # Sourced by bash, so: VAR=value, no spaces around '='.
+#
+# LAYERING: a global defaults file (~/.config/pipeline-driver/drive.defaults, see
+# drive.defaults.example) is sourced BEFORE this file — put stable cross-feature
+# preferences (IMPL_TRANSPORT, timeouts, YOLO, …) there once; this file then only
+# needs the per-feature facts (WORKDIR / BRANCH / FEATURE, plus the per-run
+# ORCA_TERMINAL_HANDLE for the orca transport). Anything set here wins.
 
 # The local clone of the TARGET repo (the git+md state bus). The driver only ever
 # reads origin/<BRANCH> refs from here; the driven impl child shares this checkout.

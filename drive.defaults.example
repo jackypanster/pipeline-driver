@@ -1,0 +1,41 @@
+# drive.defaults — GLOBAL defaults for drive.sh, shared by every feature/run.
+# One-time install:
+#   mkdir -p ~/.config/pipeline-driver && cp drive.defaults.example ~/.config/pipeline-driver/drive.defaults
+# Sourced by bash BEFORE the per-feature drive.config, so anything here is a
+# default and drive.config always wins. Keep per-feature facts (WORKDIR, BRANCH,
+# FEATURE, the per-run ORCA_TERMINAL_HANDLE) OUT of this file.
+#
+# Slot bindings on this machine (documentation, not mechanism — CONTRACT.md keeps
+# runtime binding out of roles.yaml on purpose; the operator assigns the bots):
+#   prd / arch / task : Claude (frontier reasoning tier, e.g. opus/fable)
+#   impl              : pi TUI via the orca transport (cheap coding model)
+#   review            : codex (independent reviewer; merge confirm stays HUMAN)
+
+# --- impl transport + model (stable across features) ---------------------------
+IMPL_TRANSPORT=orca
+IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
+# ORCA_RESET_CMD=/new                 # per-card TUI reset; empty = off
+# ORCA_TERMINAL_TITLE=impl            # title fallback only — pin the HANDLE per run in drive.config
+# IMPL_MODEL=haiku                    # claude transport only
+# IMPL_BASE_URL=
+# IMPL_AUTH_TOKEN_ENV=
+
+# --- loop tuning ----------------------------------------------------------------
+# CARD_TIMEOUT=2700
+# POLL_SECS=30
+# ORCA_IDLE_TIMEOUT_MS=60000
+# MAX_CONSEC_FAIL=2
+# RETRY_ON_FAIL=1
+
+# --- YOLO: standing ex-ante grant (README §YOLO) --------------------------------
+# 1 = record ONCE that, for LOW-RISK features driven on this machine, the
+# coordinating agent may read the frozen spec and echo the spec-rev at GATE 1 —
+# no per-run chat authorization needed. This does NOT auto-start drive (starting
+# ./drive.sh stays an explicit per-feature act), never delegates the merge
+# confirm, and DANGEROUS features (external write-paths) never use the driver.
+YOLO=0
+
+# --- sibling repos (drive.sh doctor) ---------------------------------------------
+# PIPELINE_REPO=$HOME/workspace/pipeline
+# DASHBOARD_REPO=$HOME/workspace/pipeline-dashboard
+# SKILLS_DIR=$HOME/.agents/skills
