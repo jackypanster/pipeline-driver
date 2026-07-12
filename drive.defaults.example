@@ -61,4 +61,7 @@ YOLO=0
 # give a unique title substring for discovery.
 # REVIEW_TERMINAL_HANDLE=term_...
 # REVIEW_TERMINAL_TITLE=codex
-# REVIEW_SLASH_CMD=/pipeline-review
+# REVIEW_SLASH_CMD='$pipeline-review'   # codex >=0.144 invokes skills with a $-prefix from
+#                                       # ~/.codex/skills — SINGLE-QUOTE the value (unquoted,
+#                                       # bash would expand $pipeline to empty). /pipeline-review
+#                                       # is the claude-style default.
