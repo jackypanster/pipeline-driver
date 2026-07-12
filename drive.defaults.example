@@ -19,6 +19,7 @@ IMPL_TRANSPORT=orca
 IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
 # ORCA_RESET_CMD=/new                 # per-card TUI reset; empty = off
 # ORCA_TERMINAL_TITLE=impl            # title fallback only — pin the HANDLE per run in drive.config
+# TUI_SKILLS_DIR=$HOME/.pi/agent/skills   # where the TUI agent loads skills; doctor checks the impl slot resolves THERE
 # IMPL_MODEL=haiku                    # claude transport only; floor haiku, any alias or model id
 # Gateway (claude transport, non-Anthropic Anthropic-compatible model, e.g. GLM):
 # IMPL_AUTH_TOKEN_ENV names an EXISTING env var holding the token (never written here).
@@ -60,4 +61,7 @@ YOLO=0
 # give a unique title substring for discovery.
 # REVIEW_TERMINAL_HANDLE=term_...
 # REVIEW_TERMINAL_TITLE=codex
-# REVIEW_SLASH_CMD=/pipeline-review
+# REVIEW_SLASH_CMD='$pipeline-review'   # codex >=0.144 invokes skills with a $-prefix from
+#                                       # ~/.codex/skills — SINGLE-QUOTE the value (unquoted,
+#                                       # bash would expand $pipeline to empty). /pipeline-review
+#                                       # is the claude-style default.

@@ -93,6 +93,9 @@ YOLO="${YOLO:-0}"
 PIPELINE_REPO="${PIPELINE_REPO:-$HOME/workspace/pipeline}"
 DASHBOARD_REPO="${DASHBOARD_REPO:-$HOME/workspace/pipeline-dashboard}"
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
+# Where the orca-transport TUI agent (e.g. pi) loads skills from — doctor checks the
+# impl slot resolves THERE, since that is the runtime that actually runs the stage.
+TUI_SKILLS_DIR="${TUI_SKILLS_DIR:-$HOME/.pi/agent/skills}"
 # Board auto-refresh: non-empty BOARD_OUT re-renders the read-only dashboard there
 # after GATE 1, after every advanced card, and on halt. Best-effort side effect —
 # a render failure never halts the loop.
@@ -139,7 +142,7 @@ show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path fr
 # MISS. Installs nothing, touches no network (freshness is pipeline-update's job).
 # MISS = blocks a drive run (exit 1). warn = degraded but drivable. info = context.
 doctor() {
-  local bad=0 warn=0 t slot terms
+  local bad=0 warn=0 t slot terms js n
   d_ok()   { printf 'ok    %s\n' "$1"; }
   d_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; bad=$((bad+1)); }
   d_warn() { printf 'warn  %s\n      %s\n' "$1" "$2"; warn=$((warn+1)); }
@@ -220,11 +223,30 @@ doctor() {
                | awk -F'[][, ]+' '/^impl:/{print $2}' | head -1 || true)
         if [ -n "${slot:-}" ]; then
           if [ -d "$SKILLS_DIR/$slot" ]; then
-            d_ok "impl slot '$slot' present in $SKILLS_DIR (verify the impl runtime is attached to it)"
+            d_ok "impl slot '$slot' present in $SKILLS_DIR (canonical copy)"
           else
             d_warn "impl slot '$slot' not in $SKILLS_DIR" \
               "install it there + attach the impl runtime (pipeline README §Verify dependencies)"
           fi
+          # Resolution check on the runtime that will actually RUN impl. Skills register
+          # by frontmatter `name:` (field-verified 2026-07-12: a symlinked dir name does
+          # NOT register on Claude Code), so grep the name, not the directory.
+          case "$IMPL_TRANSPORT" in
+            orca)
+              if grep -qs "^name: ${slot}\$" "$TUI_SKILLS_DIR"/*/SKILL.md 2>/dev/null; then
+                d_ok "impl slot '$slot' resolves in the TUI agent's skill dir ($TUI_SKILLS_DIR)"
+              else
+                d_miss "impl slot '$slot' not registered under $TUI_SKILLS_DIR — the orca-driven TUI agent would STOP at slot resolution" \
+                  "ln -s $SKILLS_DIR/$slot $TUI_SKILLS_DIR/$slot   # or set TUI_SKILLS_DIR in $DEFAULTS"
+              fi ;;
+            claude)
+              if grep -qs "^name: ${slot}\$" "$HOME/.claude/skills"/*/SKILL.md 2>/dev/null; then
+                d_ok "impl slot '$slot' resolves on the Claude runtime (~/.claude/skills)"
+              else
+                d_warn "impl slot '$slot' not found by frontmatter name under ~/.claude/skills" \
+                  "attach it there (symlink whose SKILL.md name matches, or a name-shim wrapper)"
+              fi ;;
+          esac
         else
           d_warn "roles.yaml has no parseable impl slot" "check $WORKDIR/.pipeline/roles.yaml"
         fi
@@ -234,6 +256,34 @@ doctor() {
       fi
     else
       d_miss "WORKDIR is not a git repo: $WORKDIR" "clone the target repo there, or fix WORKDIR in $CONF"
+    fi
+  fi
+
+  # Review-relay binding: verify the configured terminal is actually reachable NOW.
+  if [ -n "$REVIEW_TERMINAL_HANDLE$REVIEW_TERMINAL_TITLE" ] \
+     && command -v orca >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    js=$(orca terminal list --json 2>/dev/null || true)
+    if [ -n "${js:-}" ]; then
+      if [ -n "$REVIEW_TERMINAL_HANDLE" ]; then
+        n=$(printf '%s' "$js" | jq --arg h "$REVIEW_TERMINAL_HANDLE" \
+            '[.result.terminals[]? | select(.handle==$h and .connected and .writable)] | length' 2>/dev/null || true); n="${n:-0}"
+        if [ "$n" = "1" ]; then d_ok "review relay: pinned terminal $REVIEW_TERMINAL_HANDLE is live+writable"
+        else d_warn "review relay: pinned REVIEW_TERMINAL_HANDLE is not among live writable terminals (handles die on app restart)" \
+             "re-pin from the live list below"; fi
+      else
+        n=$(printf '%s' "$js" | jq --arg t "$REVIEW_TERMINAL_TITLE" \
+            '[.result.terminals[]? | select(.connected and .writable) | select((.title // "") | contains($t))] | length' 2>/dev/null || true); n="${n:-0}"
+        case "$n" in
+          1) d_ok "review relay: title ~ '$REVIEW_TERMINAL_TITLE' matches exactly one live terminal" ;;
+          0) d_warn "review relay: NO live terminal title contains '$REVIEW_TERMINAL_TITLE' (TUI agents rename their own tabs)" \
+             "retitle the review tab, or pin REVIEW_TERMINAL_HANDLE from the live list below" ;;
+          *) d_warn "review relay: $n terminals match title ~ '$REVIEW_TERMINAL_TITLE' — ambiguous" \
+             "pin REVIEW_TERMINAL_HANDLE" ;;
+        esac
+      fi
+    else
+      d_warn "review relay: configured (REVIEW_TERMINAL_HANDLE/TITLE) but 'orca terminal list' returned nothing — binding UNVERIFIED" \
+        "is the Orca runtime running? (orca status), then re-run doctor"
     fi
   fi
 
