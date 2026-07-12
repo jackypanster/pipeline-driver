@@ -242,3 +242,74 @@ route to pipeline-impl for card 03. When 03 AND 04 are also review (all 4 review
 freeze gate (git diff 4ac12ec..HEAD -- test/setup-*.sh empty) + full-verify green + semantic + HUMAN merge.
 On failure: attempts++; >=3 -> blocked -> pipeline-hunt.
 <<< END
+
+## seq=5 · 2026-07-12T15:09:20Z · impl→review · completed · by=pi-impl
+done:   Card C2 (defaults generation + ask_* / headless seam) green on feat/drive-setup.
+        Implemented the four ask_* helpers (ask_value/ask_confirm/ask_choice/ask_multi:
+        SETUP_<KEY> env -> caller DEFAULT in headless (SETUP_YES=1) -> fzf/read on a TTY;
+        ONE code path, so headless is the real flow not a fork — ADR 0003) and filled
+        setup_defaults: it resolves each field via ask_value (IMPL_TRANSPORT IMPL_SLASH_CMD
+        IMPL_MODEL REVIEW_TERMINAL_TITLE REVIEW_SLASH_CMD YOLO BOARD_OUT + PIPELINE_REPO
+        DASHBOARD_REPO SKILLS_DIR TUI_SKILLS_DIR) and writes $DEFAULTS from a deterministic
+        template. REVIEW_SLASH_CMD is emitted SINGLE-QUOTED ('$pipeline-review') so bash
+        does not expand $pipeline to empty on source (drive.defaults.example:80). Paths
+        keep a literal $HOME (portable + byte-deterministic). mkdir -p the parent dir.
+        Idempotent overwrite (ADR 0003): identical content -> no write, no .bak; changed
+        -> cp existing to <file>.bak (single, overwritten), then write. The caller DEFAULT
+        is the HARDCODED field default (not the sourced value) so a re-run with SETUP_<KEY>
+        unset always lands the deterministic default — pinned by assertion 4.
+verify: bash -n drive.sh (clean) + bash test/setup-defaults.sh -> passed=4 failed=0
+        (values land + codex cmd single-quoted / idempotent no-.bak / .bak-on-change /
+        env-override-beats-default). C1 still green (3/3); existing 8-test suite PASS.
+output: feat/drive-setup @ bfc774a (drive.sh, impl-paths only; spec-paths untouched —
+        freeze gate diff 4ac12ec..HEAD -- test/ empty) · PR #9 updated · main: tasks/02.md
+        status:review + this entry (one commit; stage stays impl)
+--- handoff ---
+>>> NEXT
+Run pipeline-impl on a FRESH session (assume you know nothing — rebuild from repo + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: capable-local OK (impl only) — operator assigns the bot (pi, orca transport).
+First: git pull --rebase; no .env in this repo (skip CONTRACT step 2).
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md — normative protocol (read FIRST;
+    impl-paths + src ONLY, NEVER edit spec-paths)
+  - .pipeline/drive-setup/tasks/03.md — the NEXT card (oldest todo): pboard marker block
+  - .pipeline/drive-setup/tasks/04.md — the last todo card (target roles.yaml)
+  - .pipeline/drive-setup/arch.md — §idempotency invariants (pboard markers + own-only-your-markers)
+  - .pipeline/drive-setup/CONTEXT.md + docs/adr/0003 — marker-delimited block rule
+  - drive.sh (setup_pboard_block stub at line ~250, the step gated by SETUP_DO_PBOARD inside setup())
+    — YOUR target; fill setup_pboard_block
+  - test/setup-pboard.sh — the frozen test that is YOUR spec (card-scoped verify)
+GATE 1 (frozen spec): the feature's single spec-rev is still 4ac12ec905adab2da59666447e8a264245fc3cd3
+  (shared across all 4 cards). Read test/setup-pboard.sh — it IS the spec for card 03.
+State of the branch: feat/drive-setup is OPEN (PR #9) with C1+C2 landed. git checkout feat/drive-setup
+&& git pull --rebase origin main, then build C3 ON TOP (same branch, same PR). Do NOT cut a new branch.
+Your task (concrete, numbered):
+  1. On feat/drive-setup, fill setup_pboard_block: write the pboard() shell function into
+     ${SETUP_SHELL_RC:-$HOME/.zshrc} inside a marker-delimited block
+     '# >>> pipeline pboard >>>' ... '# <<< pipeline pboard <<<'. Idempotent write = delete any
+     existing delimited block (sed range delete between the markers, inclusive) then append the fresh
+     block. Own ONLY your markers: an unmarked legacy pboard() elsewhere in the rc is left untouched
+     (ADR 0003). The rc file may not exist yet (test runs against a fresh path) — create it.
+  2. Editing ONLY impl-paths (drive.sh). Run the card's verify: `bash -n drive.sh && bash
+     test/setup-pboard.sh` until passed=3 failed=0. NEVER touch test/setup-*.sh (freeze gate).
+  3. When green: push feat/drive-setup (PR #9 auto-updates); on main flip tasks/03.md status:todo->review,
+     append this journal (seq=6, impl->review completed), commit once, push. Then route to pipeline-impl
+     for card 04 (target). Only when 04 is ALSO review (all 4 review) -> pipeline-review.
+Feature gotchas (project-specific traps the next node MUST know):
+  - The rc path is ${SETUP_SHELL_RC:-$HOME/.zshrc} — the frozen test pins SETUP_SHELL_RC to a temp
+    path that does NOT exist yet; setup_pboard_block must create it (and mkdir -p its dir if needed).
+  - Idempotency is MARKER-based, not content-based: a re-run deletes the old marked block (sed range)
+    and appends the new one -> still exactly ONE marker pair. Do NOT use .bak here (different from
+    C2's file-overwrite rule) — the block is a region inside a larger file setup owns only part of.
+  - setup() already calls setup_pboard_block gated by SETUP_DO_PBOARD (its own toggle, separate from
+    SETUP_DO_DASHBOARD) — just fill the function body (currently ':'). The pboard() body that gets
+    written should render/open the board, but its exact correctness is review-reads (the frozen test
+    only checks the markers + that a pboard() exists inside them).
+  - Leave the unmarked legacy line in place: assertion 3 pre-seeds an unmarked pboard() and asserts it
+    survives the run (setup owns only its marked region).
+Done when: card 03 verify green on feat/drive-setup + pushed + tasks/03.md -> review on main. On success:
+route to pipeline-impl for card 04. When 04 is also review (all 4 review) -> pipeline-review (codex):
+freeze gate (git diff 4ac12ec..HEAD -- test/setup-*.sh empty) + full-verify green + semantic + HUMAN merge.
+On failure: attempts++; >=3 -> blocked -> pipeline-hunt.
+<<< END
