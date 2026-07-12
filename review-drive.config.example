@@ -25,5 +25,14 @@
 # default: the gh-authenticated user. Everyone else's comments are inert text.
 # PROTOCOL_AUTHOR=
 
+# REQUIRED non-empty (default: claude-style /pipeline-review) — the review dispatch's
+# first token; the relayed review must BE pipeline-review in meta-PR mode.
+# Codex >=0.144: single-quote it so bash does not expand the $.
+# REVIEW_SLASH_CMD='$pipeline-review'
+
+# The FIXER terminal must sit in a checkout of the PR's repo (verified at preflight)
+# ON the PR's topic branch (re-verified before every fix dispatch) — write
+# instructions are refused otherwise.
+
 # Rare per-run overrides (documented in drive.defaults.example §review-drive):
 # MAX_ROUNDS=5  HUNT_AFTER=3  REVIEW_TIMEOUT=2700  FIX_TIMEOUT=2700  POLL_SECS=30

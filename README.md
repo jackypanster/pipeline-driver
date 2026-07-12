@@ -261,9 +261,10 @@ e.g. codex `$pipeline-review`, to prefix it with your runtime's skill command), 
 verdict lands on the PR, and `approved` halts for the human-confirm. It never drives
 the feature pipeline's `review` stage (that is the 5-stage state machine inside a
 target repo, untouched here). The authorization for this second bounded span lives in
-the **canonical design itself** — pipeline `DESIGN.md` §Constraints, amended through
-its own gated meta-PR lane (pipeline PR #40) — not unilaterally in this repo; this
-PR's merge follows that one.
+the **canonical design itself** — pipeline PR #40, which amends `DESIGN.md`
+§Constraints AND extends `CONTRACT.md` §Self-improvement + the `pipeline-review`
+meta-PR predicate, so the lane is mechanically REACHABLE for sibling-repo and
+doc-only proposals — not unilaterally in this repo; this PR's merge follows that one.
 
 ```
             ┌──────────────────────────────┐
@@ -283,29 +284,40 @@ PR's merge follows that one.
 ```
 
 Same iron rules as `drive.sh`: deterministic bash, forbidden to be smart, zero local
-state, and TUI screen text is never a completion signal. Kill+restart **resumes**
-rather than resets: prior rounds, the findings history, the per-round digest AND the
-phase are rebuilt from the thread's verdict comments — a restart cannot mint a fresh
-round budget, an `approved` that binds an OLDER head is a **stale approval** (it never
-blesses later pushes; a fresh round runs instead), and an unfixed `changes-requested`
-whose head is still live resumes at its **fix phase**, not with a wasted re-review.
-The two TUIs never talk to each other and the driver never forwards
-review TEXT — each side reads the PR itself via `gh`; orca only types a one-line
-dispatch (a pointer: PR URL + head SHA + comment URL). Verdicts travel as
-machine-readable protocol lines in plain PR comments — `verdict:` / `reviewed-head:` /
-`findings:` / `review-nonce:` from the reviewer, `fixed:` / `fix-nonce:` from the fixer
-— because both sides share one GitHub account, which cannot approve/request-changes on
-its own PR. Protocol comments are **authenticated twice over**: only comments authored
-by the gh-authenticated login (override: `PROTOCOL_AUTHOR`) parse at all — a drive-by
+state, and TUI screen text is never a completion signal. The two TUIs never talk to
+each other and the driver never forwards review TEXT — each side reads the PR itself
+via `gh`; orca only types a one-line dispatch (a pointer: PR URL + head SHA + comment
+URL), and the review dispatch's **first token is the canonical skill invocation**
+(`REVIEW_SLASH_CMD`, required non-empty, default `/pipeline-review`; codex ≥0.144
+wants `$pipeline-review`) — the relayed review must BE `pipeline-review` in meta-PR
+mode, never generic prose. Verdicts travel as machine-readable protocol lines in
+plain PR comments — `verdict:` / `reviewed-head:` / `reviewed-base:` / `findings:` /
+`review-nonce:` from the reviewer, `fixed:` / `fix-nonce:` from the fixer — because
+both sides share one GitHub account, which cannot approve/request-changes on its own
+PR. Protocol comments are **authenticated twice over**: only comments authored by the
+gh-authenticated login (override: `PROTOCOL_AUTHOR`) parse at all — a drive-by
 `verdict: approved` is inert text — and within the shared account the ROLES are
 separated by per-dispatch **nonces**, typed only into that role's terminal and echoed
 back in the comment: the fixer never sees the review nonce so it cannot forge a
 verdict, the reviewer never sees the fix nonce so it cannot forge a fix, and no stale
-comment replays across rounds or sessions. SHA echoes bind **exactly** — full 40
-characters, string equality, never a prefix: a verdict about any other head halts the
-loop, a fix is accepted only when its echoed sha IS the live head. And each review
-round pins the **base OID** it dispatched against: a base that moves mid-review halts
-the round, so a verdict can never silently bind a stale merge-base.
+comment steers the LIVE loop. SHA echoes bind **exactly** — full 40 characters,
+string equality, never a prefix: a verdict must name BOTH the head and the base tip
+it reviewed (`reviewed-base:` mismatch halts like a head mismatch), and a fix is
+accepted only when its echoed sha IS the live head. Each review round additionally
+pins the live **base OID** at dispatch: a base that moves mid-review halts the round.
+
+Kill+restart **resumes fail-closed**: a prior session's nonces are unknowable, so
+same-author verdict history is folded ONLY into quantities a forged or nonce-less
+comment can **tighten** — the round budget, the no-progress streak, and the digest —
+and never into approval or phase. A restart therefore always **re-reviews** the live
+head/base with a fresh nonce: a historical `approved` (any head, with or without a
+nonce) cannot terminate a new session, and an unfixed rejection is re-stated by a
+fresh review rather than trusted as a fix instruction. And because the fixer is the
+terminal that receives WRITE-and-push instructions, its identity is **proven, not
+assumed**: both pinned handles must be live+writable in the current orca listing, and
+the fixer's `worktreePath` must be a git checkout whose `origin` IS the PR's repo —
+re-proven to be sitting on the PR's topic branch before EVERY fix dispatch. Anything
+unprovable fails closed before a single character is typed.
 
 Per round: dispatch the review → poll `gh` until a verdict comment lands on the CURRENT
 head (new comments are detected by a comment-INDEX baseline, immune to local↔GitHub
@@ -361,12 +373,12 @@ Deps: `gh` (authed), `jq`, `orca`, both TUIs live in Orca terminals.
 **review-drive.sh** (no journal, no cards, no frozen spec, no `deny-merge.sh` — its
 state bus and guards are the PR itself):
 
-- **Zero state → kill+restart RESUMES.** Rounds, findings history, digest and the
-  phase are rebuilt from the thread's authenticated verdict comments (§review-drive):
-  no fresh round budget, stale approvals don't bless later pushes, an unfixed verdict
-  re-enters at its fix phase.
+- **Zero state → kill+restart RESUMES fail-closed.** Same-author verdict history is
+  folded only into the round budget, no-progress streak and digest (quantities a
+  forged comment can only tighten); approval and phase are never taken from history —
+  the restart re-reviews the live head/base with a fresh nonce (§review-drive).
 - **Mid-round kill** leaves at most a dispatched TUI still working; on restart the
-  resume scan either finds its protocol comment (round counted) or re-runs the round.
+  resume scan either counts its verdict (budget) or the fresh review supersedes it.
   Nothing is stranded — the PR is the only memory.
 - **Blast radius:** worst case is commits on the PR topic branch plus PR comments —
   both revertable; trunk is never touched. The loop contains no merge call; a merge

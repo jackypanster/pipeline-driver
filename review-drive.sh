@@ -25,6 +25,7 @@
 #
 #   reviewer comment:   verdict: approved | changes-requested
 #                       reviewed-head: <the FULL 40-char sha it reviewed>
+#                       reviewed-base: <the FULL 40-char base tip it reviewed against>
 #                       findings: <count>
 #                       review-nonce: <echo of this dispatch's nonce>
 #                       ...then the findings (file:line + failure scenario)
@@ -37,10 +38,16 @@
 # "verdict: approved" is inert text — and within the shared account the ROLES are
 # separated by per-dispatch nonces typed only into that role's terminal, so the
 # fixer cannot forge a verdict, the reviewer cannot forge a fix, and no stale
-# comment replays across rounds or sessions. SHA echoes bind exactly (full 40
-# chars, string equality — never a prefix). The scope is ENFORCED, not just
+# comment steers the LIVE loop (live acceptance always demands the current
+# dispatch's nonce; ACROSS sessions, where nonces are unknowable, history is
+# folded fail-closed — see resume below). SHA echoes bind exactly (full 40
+# chars, string equality — never a prefix), and a verdict must name BOTH the
+# head and the base tip it reviewed. The scope is ENFORCED, not just
 # documented: the PR's repo must match REVIEW_REPO_RE (default: the pipeline
-# toolchain repos) and fork (cross-repository) PRs are refused at preflight.
+# toolchain repos), fork (cross-repository) PRs are refused at preflight, the
+# review dispatch's first token must invoke pipeline-review (REVIEW_SLASH_CMD,
+# required non-empty), and WRITE instructions go to the fixer terminal only
+# after its worktree is PROVEN to be this PR's repo on the PR's topic branch.
 #
 # The TUIs never talk to each other and the driver never forwards review TEXT —
 # each side reads the PR itself via gh; orca only types the dispatch line
@@ -50,10 +57,11 @@
 # CONTAINS the reviewed head (a diverged compare = force-push/rebase = halt) and
 # whose value the fixer's `fixed:` line must echo, and a base OID pinned per
 # review round (a moved base = the verdict binds a stale merge-base = halt).
-# Kill+restart RESUMES: prior rounds, the findings history, the digest AND the
-# phase are rebuilt from the PR thread itself — a restart cannot mint a fresh
-# round budget, a stale 'approved' (older head) never blesses later pushes, and
-# an unfixed changes-requested resumes at its fix phase.
+# Kill+restart RESUMES fail-closed: prior same-author verdicts are folded ONLY
+# into quantities they can TIGHTEN (round budget, no-progress streak, digest) —
+# never into approval or phase, because a prior session's nonces are unknowable
+# and an unauthenticated history must not steer anything. A restart therefore
+# always re-reviews the live head/base with a fresh nonce.
 #
 # HALT PREDICATE (the whole brain — halt table: stop-points.md §review-drive):
 #     CONTINUE iff verdict == changes-requested AND round < MAX_ROUNDS
@@ -102,9 +110,13 @@ REVIEW_TERMINAL_HANDLE="${REVIEW_TERMINAL_HANDLE:-}"   # reviewer TUI (e.g. code
 REVIEW_TERMINAL_TITLE="${REVIEW_TERMINAL_TITLE:-}"
 FIX_TERMINAL_HANDLE="${FIX_TERMINAL_HANDLE:-}"         # fixer TUI (e.g. pi)
 FIX_TERMINAL_TITLE="${FIX_TERMINAL_TITLE:-}"
-# Optional skill-invocation prefix for the review dispatch (e.g. codex '$pipeline-review'),
-# shared with drive.sh's one-key relay — the relayed review IS pipeline-review, meta-PR mode.
-REVIEW_SLASH_CMD="${REVIEW_SLASH_CMD:-}"
+# Skill invocation for the review dispatch — REQUIRED non-empty: the canonical
+# authorization (pipeline DESIGN.md §Constraints) is conditional on the relayed
+# review BEING pipeline-review in meta-PR mode, so the dispatch's first token must
+# be the reviewer runtime's skill command. Shared with drive.sh's one-key relay.
+# Claude-style default; codex >=0.144 wants '$pipeline-review' (single-quote it).
+# The `-` (not `:-`) default keeps an explicitly-emptied value visible to preflight.
+REVIEW_SLASH_CMD="${REVIEW_SLASH_CMD-/pipeline-review}"
 
 # ---- PR identity ------------------------------------------------------------------
 case "$PR_ARG" in
@@ -124,7 +136,9 @@ PR_URL="https://github.com/$REPO_SLUG/pull/$PR"
 
 note() { printf '%s\n' "$*" >&2; }
 is_num() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
-nonce() { od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'; }   # 16 hex chars, regex-safe
+# 16 hex chars, regex-safe; EMPTY output on any failure (callers halt on empty) —
+# the braces + || true keep set -e/pipefail from killing the run before the HALT.
+nonce() { { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; } 2>/dev/null || true; }
 DIGEST=""   # one row per review round, printed on every halt
 
 halt() { # <reason> <what-the-human-should-run-next> [exit-code]
@@ -154,7 +168,8 @@ comment_count() { printf '%s' "$1" | jq -r '.comments | length'; }
 # not multiline anchors) — line-leading is spelled (?:^|\n) throughout.
 
 # Last authenticated comment at index >= $2 echoing review-nonce $3, with a
-# "verdict:" line. TSV: verdict, reviewed-head (or "none"), findings (or "-"), url.
+# "verdict:" line. TSV: verdict, reviewed-head (or "none"), reviewed-base (or
+# "none"), findings (or "-"), url.
 scan_verdict() {
   printf '%s' "$1" | jq -r --argjson idx "$2" --arg who "$WHO" --arg nonce "$3" '
     .comments[$idx:]
@@ -164,6 +179,7 @@ scan_verdict() {
     | last // empty
     | [ (.body | capture("(?:^|\\n)verdict: *(?<v>approved|changes-requested)").v),
         ((.body | capture("(?:^|\\n)reviewed-head: *(?<h>[0-9a-fA-F]{40})").h) // "none"),
+        ((.body | capture("(?:^|\\n)reviewed-base: *(?<b>[0-9a-fA-F]{40})").b) // "none"),
         ((.body | capture("(?:^|\\n)findings: *(?<n>[0-9]+)").n) // "-"),
         .url ]
     | @tsv'
@@ -241,10 +257,46 @@ send_to() {   # <handle> <text> — idle guard is load-bearing: never type into 
 
 tail_of() { orca terminal read --terminal "$1" 2>/dev/null | tail -20 >&2 || true; }
 
+# A pinned handle is not an identity. Cheap liveness: the handle must be present,
+# connected and writable in the CURRENT orca listing (handles die on app restart).
+handle_live() {   # <handle>
+  local n
+  n=$(orca terminal list --json 2>/dev/null \
+      | jq --arg h "$1" '[.result.terminals[]? | select(.handle==$h and .connected and .writable)] | length' 2>/dev/null) || n=0
+  [ "${n:-0}" = "1" ]
+}
+# Strong identity for the FIXER — the terminal that receives WRITE-and-push
+# instructions: its orca worktreePath must be a git checkout whose origin IS this
+# PR's repo — and, when $1=1 (re-proved before EVERY fix dispatch), sitting on the
+# PR's topic branch. Any unprovable step fails closed; a stale or mistyped handle
+# must never be typed write instructions for an unrelated checkout.
+verify_fixer_worktree() {   # <check_branch: 0|1>
+  local wt url slug_re br
+  wt=$(orca terminal list --json 2>/dev/null \
+       | jq -r --arg h "$FIXER" '[.result.terminals[]? | select(.handle==$h)][0].worktreePath // ""' 2>/dev/null) || wt=""
+  [ -n "$wt" ] || { note "fixer worktree: terminal $FIXER has no worktreePath in the live orca listing"; return 1; }
+  url=$(git -C "$wt" remote get-url origin 2>/dev/null) \
+    || { note "fixer worktree: $wt is not a git checkout with an origin remote"; return 1; }
+  slug_re=$(printf '%s' "$REPO_SLUG" | sed 's/[.[\*^$()+?{|]/\\&/g')
+  printf '%s' "$url" | grep -Eq "(^|[@/])github\.com[:/]${slug_re}(\.git)?/?$" \
+    || { note "fixer worktree: $wt origin '$url' is not $REPO_SLUG"; return 1; }
+  if [ "$1" = "1" ]; then
+    br=$(git -C "$wt" symbolic-ref --short -q HEAD 2>/dev/null) || br=""
+    [ "$br" = "$HEAD_REF" ] \
+      || { note "fixer worktree: $wt is on '${br:-<detached>}', not the PR branch '$HEAD_REF'"; return 1; }
+  fi
+  return 0
+}
+
 # ---- preflight ---------------------------------------------------------------------
-for dep in gh jq orca; do
+for dep in gh jq orca git; do
   command -v "$dep" >/dev/null 2>&1 || halt "$dep not on PATH" "install $dep, then re-run" 2
 done
+[ -n "$REVIEW_SLASH_CMD" ] \
+  || halt "REVIEW_SLASH_CMD is empty — the relayed review MUST invoke pipeline-review (meta-PR mode), never generic prose" \
+          "set it: claude-style '/pipeline-review', codex '\$pipeline-review' (single-quoted)" 2
+[ -n "$(nonce)" ] \
+  || halt "cannot generate dispatch nonces (od / tr / /dev/urandom unavailable)" "fix the environment, then re-run" 2
 # Numeric config must be sane BEFORE anything is dispatched — a bad value would
 # otherwise break arithmetic or disarm a timeout mid-loop. Fail here, fail closed.
 for v in MAX_ROUNDS HUNT_AFTER REVIEW_TIMEOUT FIX_TIMEOUT POLL_SECS ORCA_IDLE_TIMEOUT_MS; do
@@ -266,6 +318,12 @@ FIXER=$(resolve_terminal "fixer" "$FIX_TERMINAL_HANDLE" "$FIX_TERMINAL_TITLE") \
   || halt "cannot resolve the FIXER terminal" "open the fixer TUI in Orca; pin FIX_TERMINAL_HANDLE" 2
 [ "$REVIEWER" != "$FIXER" ] \
   || halt "reviewer and fixer resolve to the SAME terminal ($REVIEWER)" "pin two distinct handles" 2
+handle_live "$REVIEWER" \
+  || halt "reviewer terminal $REVIEWER is not live+writable in the current orca listing (handles die on app restart)" \
+          "re-pin REVIEW_TERMINAL_HANDLE from 'orca terminal list --json'" 2
+handle_live "$FIXER" \
+  || halt "fixer terminal $FIXER is not live+writable in the current orca listing (handles die on app restart)" \
+          "re-pin FIX_TERMINAL_HANDLE from 'orca terminal list --json'" 2
 
 SNAP=$(pr_snap)
 [ -n "$SNAP" ] || halt "cannot read PR #$PR on $REPO_SLUG via gh" "check gh auth / the PR number" 2
@@ -275,6 +333,9 @@ assert_open "$SNAP"
           "review fork PRs by hand; this loop only drives same-repo toolchain branches" 2
 HEAD_REF=$(snap_field "$SNAP" headRefName)
 BASE_REF=$(snap_field "$SNAP" baseRefName)
+verify_fixer_worktree 0 \
+  || halt "cannot prove the fixer terminal's worktree is a checkout of $REPO_SLUG" \
+          "open the fixer TUI in the PR repo's checkout; re-pin FIX_TERMINAL_HANDLE from the live listing" 2
 
 # ---- start gate: bind the confirmation to the PR (wrong-PR accidents die here) ------
 note "PR      : #$PR $PR_URL"
@@ -286,17 +347,19 @@ printf 'GATE — type the PR number above to start the loop: ' >&2
 read -r ACK || halt "the start gate needs an interactive terminal (stdin closed)" "run attached to a TTY" 2
 [ "$ACK" = "$PR" ] || halt "PR number not confirmed (got '$ACK')" "re-run with the intended PR" 2
 
-# ---- resume: rebuild loop state from the PR thread itself -----------------------------
-# Kill+restart must not mint a fresh round budget, forget the findings history, or
-# misread the PHASE: every prior AUTHENTICATED verdict comment counts as a consumed
-# round; an 'approved' ends the run ONLY if it binds the LIVE head (a stale approval
-# of an older head can never bless later pushes); and an unfixed changes-requested
-# whose head is still live resumes at its FIX phase, not with a wasted re-review.
+# ---- resume: rebuild the LOOP BUDGET from the PR thread itself -------------------------
+# One shared account cannot authenticate ACROSS sessions (a prior session's nonces
+# are unknowable), so history is folded FAIL-CLOSED: same-author verdict comments
+# count ONLY toward the round budget, the no-progress streak and the digest —
+# quantities a forged or nonce-less comment can only TIGHTEN, never loosen. History
+# never approves and never picks a phase: a restart always re-reviews the live
+# head/base with a fresh nonce, so no stale verdict — approval or rejection — can
+# steer a new session.
 rounds_done=0
 prev_findings=""      # findings value from the previous review ("-" = unparseable)
 have_prior=0          # 1 once any verdict has been consumed (resumed or live)
 nondrop_streak=0      # consecutive reviews without a PROVEN decrease in findings
-last_verdict="" last_rhead="" last_url=""
+last_verdict=""
 while IFS=$(printf '\t') read -r v h n u; do
   [ -n "$v" ] || continue
   rounds_done=$((rounds_done + 1))
@@ -306,33 +369,22 @@ while IFS=$(printf '\t') read -r v h n u; do
     if is_num "$n" && is_num "$prev_findings" && [ "$n" -lt "$prev_findings" ]; then nondrop_streak=0
     else nondrop_streak=$((nondrop_streak + 1)); fi
   fi
-  have_prior=1; prev_findings="$n"; last_verdict="$v"; last_rhead="$h"; last_url="$u"
+  have_prior=1; prev_findings="$n"; last_verdict="$v"
 done <<EOF
 $(scan_all_verdicts "$SNAP")
 EOF
-pending_fix=0
-cur_head=$(snap_field "$SNAP" headRefOid)
 if [ "$rounds_done" -gt 0 ]; then
-  note "resume: $rounds_done prior review round(s) found on the PR thread"
-  if [ "$last_verdict" = "approved" ]; then
-    if [ "$last_rhead" = "$cur_head" ]; then
-      halt "the thread's last verdict is already 'approved' and binds the LIVE head — nothing to drive" \
-           "confirm the merge through the review lane (meta-PR gate: human-confirm + reviewer-only squash-merge)" 0
-    fi
-    note "resume: the last 'approved' binds $(printf '%s' "$last_rhead" | cut -c1-7) but the live head is $(printf '%s' "$cur_head" | cut -c1-7) — STALE approval, a fresh review round is required"
-  fi
+  note "resume: $rounds_done prior review round(s) on the thread — counted toward the budget, never trusted for approval or phase"
+  [ "$last_verdict" != "approved" ] \
+    || note "resume: the thread ends in 'approved', but a historical verdict cannot terminate a NEW session — re-reviewing the live head fail-closed"
   [ "$rounds_done" -lt "$MAX_ROUNDS" ] \
     || halt "round cap: the thread already carries $MAX_ROUNDS review round(s) — a restart cannot mint a fresh budget" \
             "read the digest above and the PR thread; continue by hand" 0
   [ "$nondrop_streak" -lt 2 ] \
     || halt "no convergence on the resumed thread: no proven decrease in findings for 2 consecutive reviews" \
             "read the last two reviews; decide the direction yourself" 0
-  if [ "$last_verdict" = "changes-requested" ] && [ "$last_rhead" = "$cur_head" ]; then
-    pending_fix=1
-    note "resume: round $rounds_done's changes-requested still binds the live head — resuming at its FIX phase"
-  fi
 fi
-if [ "$pending_fix" = 1 ]; then round=$rounds_done; else round=$((rounds_done + 1)); fi
+round=$((rounds_done + 1))
 
 # ---- the loop ------------------------------------------------------------------------
 while : ; do
@@ -345,14 +397,7 @@ while : ; do
   base_oid=$(snap_field "$SNAP" baseRefOid)   # the verdict binds THIS merge-base
   base_idx=$(comment_count "$SNAP")
 
-  # --- review phase (skipped once when resuming into a pending fix) -------------------
-  if [ "$pending_fix" = 1 ]; then
-    pending_fix=0
-    verdict="changes-requested"; curl_="$last_url"
-    note ""
-    note ">>> round $round/$MAX_ROUNDS: resuming at the FIX phase (verdict: $curl_)"
-  else
-
+  # --- review phase: ALWAYS runs — approval and phase are never taken from history ----
   # Role separation inside one account: each dispatch carries a fresh nonce, typed
   # ONLY into that role's terminal; the protocol comment must echo it. The fixer
   # never sees the review nonce, so it cannot forge a verdict — and vice versa.
@@ -360,7 +405,7 @@ while : ; do
   [ -n "$RNONCE" ] || halt "cannot generate a review dispatch nonce (od / /dev/urandom)" "fix the environment, re-run" 2
   note ""
   note ">>> round $round/$MAX_ROUNDS: review dispatch (head=$(printf '%s' "$head" | cut -c1-7)) ..."
-  send_to "$REVIEWER" "${REVIEW_SLASH_CMD:+$REVIEW_SLASH_CMD }Review PR $PR_URL at head $head in meta-PR mode (CONTRACT.md §Self-improvement: semantic review only — real improvement, no weakening, every hard rule and frozen invariant preserved). Read the full diff and every earlier round's comments via gh, verify the claims hold, then post EXACTLY ONE PR comment (gh pr comment) whose first four lines are: 'verdict: approved' or 'verdict: changes-requested', then 'reviewed-head: $head' (that FULL 40-char sha), then 'findings: <count>', then 'review-nonce: $RNONCE' — followed by each finding with file:line and a concrete failure scenario. Never merge, never close the PR, never push, never use GitHub review approvals: the comment IS the verdict." \
+  send_to "$REVIEWER" "$REVIEW_SLASH_CMD Review PR $PR_URL at head $head in meta-PR mode (CONTRACT.md §Self-improvement: semantic review only — real improvement, no weakening, every hard rule and frozen invariant preserved). Read the full diff and every earlier round's comments via gh, verify the claims hold, then post EXACTLY ONE PR comment (gh pr comment) whose first five lines are: 'verdict: approved' or 'verdict: changes-requested', then 'reviewed-head: $head' (that FULL 40-char sha), then 'reviewed-base: $base_oid' (the base branch tip you reviewed against, FULL 40-char), then 'findings: <count>', then 'review-nonce: $RNONCE' — followed by each finding with file:line and a concrete failure scenario. Never merge, never close the PR, never push, never use GitHub review approvals: the comment IS the verdict." \
     || halt "cannot dispatch to the reviewer terminal $REVIEWER" "inspect it in Orca, re-run" 1
 
   # --- wait for the verdict (PR facts only; TUI text is never a signal) --------------
@@ -381,7 +426,7 @@ while : ; do
       fi
       row=$(scan_verdict "$SNAP" "$base_idx" "$RNONCE")
       if [ -n "$row" ]; then
-        IFS=$(printf '\t') read -r verdict rhead findings curl_ <<EOF
+        IFS=$(printf '\t') read -r verdict rhead rbase findings curl_ <<EOF
 $row
 EOF
         break
@@ -394,10 +439,14 @@ EOF
     fi
   done
 
-  # Exact binding: the echo must BE the round head, full 40 chars — no prefixes.
+  # Exact binding: the echoes must BE the round head AND base, full 40 chars each —
+  # no prefixes; a verdict that cannot name its exact merge-base does not count.
   [ "$rhead" = "$head" ] \
     || halt "reviewer echoed reviewed-head '$rhead' but round $round head is $head — stale or misdirected review" \
             "read $curl_; re-run when review targets the live head" 1
+  [ "$rbase" = "$base_oid" ] \
+    || halt "reviewer echoed reviewed-base '$rbase' but round $round base is $base_oid — the verdict binds a stale merge-base" \
+            "read $curl_; re-run when the repo is quiet" 1
   DIGEST="$DIGEST$(printf '%-6s %-18s %-9s %-14s %s' "$round" "$verdict" "$findings" "$(printf '%s' "$head" | cut -c1-7)" "$curl_")
 "
   note "<<< round $round verdict: $verdict (findings: $findings) — $curl_"
@@ -428,9 +477,13 @@ EOF
             "read the digest above and the PR thread; continue by hand or re-run for another window" 0
 
   base_idx=$(comment_count "$SNAP")
-  fi   # end review phase
 
   # --- dispatch the fixer --------------------------------------------------------------
+  # A pinned handle is not an identity: before WRITE instructions go anywhere, prove
+  # the fixer terminal's worktree IS this PR's repo checked out on the PR branch.
+  verify_fixer_worktree 1 \
+    || halt "cannot prove the fixer terminal's worktree is $REPO_SLUG on branch '$HEAD_REF' — refusing to dispatch write instructions" \
+            "point the fixer TUI's checkout at the PR branch (git checkout $HEAD_REF), re-pin FIX_TERMINAL_HANDLE from the live listing, re-run" 2
   FNONCE=$(nonce)
   [ -n "$FNONCE" ] || halt "cannot generate a fix dispatch nonce (od / /dev/urandom)" "fix the environment, re-run" 2
   hunt=""
