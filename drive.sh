@@ -323,7 +323,32 @@ setup_defaults() {                 # 5  write $DEFAULTS from the drive.defaults 
   if [ -f "$DEFAULTS" ]; then cp "$DEFAULTS" "$DEFAULTS.bak"; fi
   printf '%s\n' "$out" > "$DEFAULTS"
 }
-setup_target()          { :; }   # 6  target .pipeline/roles.yaml (impl slot rewritten)   (C4)
+setup_target() {                    # 6  target .pipeline/roles.yaml (impl slot rewritten)   (C4)
+  # Copy $SETUP_PIPELINE_REPO/roles.yaml -> $SETUP_TARGET_REPO/.pipeline/roles.yaml,
+  # rewriting the impl-slot placeholder <autonomous-coding-skill> -> goal-driven-implementation
+  # (the real installed name; CONTRACT §roles.yaml invariant). The file stays tool-agnostic:
+  # NO runtime/LLM name is introduced on any slot (prd/arch/task/impl/review/hunt/improve) — the
+  # source template already satisfies this and the only rewrite is the placeholder substitution.
+  # Overwrite policy = .bak-on-change-only, the same idiom as setup_defaults (ADR 0003).
+  local src dst out rf
+  src=$(ask_value PIPELINE_REPO "pipeline repo (roles.yaml source)" "$PIPELINE_REPO")
+  dst=$(ask_value TARGET_REPO "target repo (roles.yaml dest; empty=skip)" "")
+  [ -n "$dst" ] || return 0
+  if [ ! -f "$src/roles.yaml" ]; then
+    s_miss "target roles.yaml source" "no roles.yaml at $src/roles.yaml (set SETUP_PIPELINE_REPO to the pipeline repo)"
+    return 0
+  fi
+  mkdir -p "$dst/.pipeline"
+  rf="$dst/.pipeline/roles.yaml"
+  # Literal substitution on the copied content — the ONLY rewrite (ADR 0003 file-gen idempotency).
+  out=$(sed 's/<autonomous-coding-skill>/goal-driven-implementation/g' "$src/roles.yaml")
+  # Idempotent overwrite (ADR 0003): identical -> no write, no .bak; changed -> cp to .bak, write.
+  if [ -f "$rf" ] && [ "$(cat "$rf")" = "$out" ]; then
+    return 0
+  fi
+  if [ -f "$rf" ]; then cp "$rf" "$rf.bak"; fi
+  printf '%s\n' "$out" > "$rf"
+}
 
 setup() {
   local setup_bad=0 doctor_rc=0
