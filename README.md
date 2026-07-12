@@ -249,15 +249,21 @@ the fixer, each fix pasted back for re-review. `review-drive.sh` automates exact
 shuttle for **toolchain-repo PRs** and nothing else — enforced in code, not just
 documented: the PR's repo must match `REVIEW_REPO_RE` (default: `jackypanster/pipeline`
 and the `-driver`/`-dashboard`/`-dispatch` siblings) and fork (cross-repository) PRs are
-refused at preflight. The lane it serves is the operator's **gated-PR convention** on
-those repos — topic branch → PR → independent bot review → operator merge — of which
-`pipeline-improve` is the pipeline-repo instance; the siblings run the same convention
-for their own PRs (this repo's entire PR history included). It never merges, never
-approves via GitHub reviews, and never drives the feature pipeline's `review` stage:
-CONTRACT.md's "only `pipeline-review` merges" governs the `feat/<feature>` squash-merge
-inside a target repo's 5-stage state machine and is untouched here — toolchain repos
-have no `.pipeline/`, and their merge authority is (and stays) the operator's explicit
-act (see *For agents*).
+refused at preflight. The lane it serves is the **canonical meta-PR gate**
+(pipeline CONTRACT.md §Self-improvement): `pipeline-improve` opens the PR,
+**`pipeline-review` in meta-PR mode** reviews it — semantic only: real improvement, no
+weakening, every hard rule and frozen invariant preserved — and the merge is the
+**human-confirm + reviewer-only squash-merge**; the proposer never merges. The siblings
+run the same convention for their own PRs (this repo's entire PR history included). The
+loop automates the TYPING between verdicts, never a review judgment and never the
+merge: the review dispatch invokes that meta-PR-mode review (set `REVIEW_SLASH_CMD`,
+e.g. codex `$pipeline-review`, to prefix it with your runtime's skill command), the
+verdict lands on the PR, and `approved` halts for the human-confirm. It never drives
+the feature pipeline's `review` stage (that is the 5-stage state machine inside a
+target repo, untouched here). The authorization for this second bounded span lives in
+the **canonical design itself** — pipeline `DESIGN.md` §Constraints, amended through
+its own gated meta-PR lane (pipeline PR #40) — not unilaterally in this repo; this
+PR's merge follows that one.
 
 ```
             ┌──────────────────────────────┐
@@ -278,22 +284,28 @@ act (see *For agents*).
 
 Same iron rules as `drive.sh`: deterministic bash, forbidden to be smart, zero local
 state, and TUI screen text is never a completion signal. Kill+restart **resumes**
-rather than resets: prior rounds, the findings history and the per-round digest are
-rebuilt from the thread's verdict comments, so a restart cannot mint a fresh round
-budget. The two TUIs never talk to each other and the driver never forwards
+rather than resets: prior rounds, the findings history, the per-round digest AND the
+phase are rebuilt from the thread's verdict comments — a restart cannot mint a fresh
+round budget, an `approved` that binds an OLDER head is a **stale approval** (it never
+blesses later pushes; a fresh round runs instead), and an unfixed `changes-requested`
+whose head is still live resumes at its **fix phase**, not with a wasted re-review.
+The two TUIs never talk to each other and the driver never forwards
 review TEXT — each side reads the PR itself via `gh`; orca only types a one-line
 dispatch (a pointer: PR URL + head SHA + comment URL). Verdicts travel as
 machine-readable protocol lines in plain PR comments — `verdict:` / `reviewed-head:` /
-`findings:` from the reviewer, `fixed: <sha>` from the fixer — because both sides share
-one GitHub account, which cannot approve/request-changes on its own PR. Protocol
-comments are **authenticated**: only comments authored by the gh-authenticated login
-(override: `PROTOCOL_AUTHOR`) parse as protocol, so a drive-by `verdict: approved` from
-any other account is inert text. The `reviewed-head` echo is load-bearing (same family
-as the spec-rev echo): a verdict about any other head halts the loop instead of
-advancing it. The `fixed:` echo is equally load-bearing — a fix is accepted only when
-its echoed sha IS the live head. And each review round pins the **base OID** it
-dispatched against: a base that moves mid-review halts the round, so a verdict can
-never silently bind a stale merge-base.
+`findings:` / `review-nonce:` from the reviewer, `fixed:` / `fix-nonce:` from the fixer
+— because both sides share one GitHub account, which cannot approve/request-changes on
+its own PR. Protocol comments are **authenticated twice over**: only comments authored
+by the gh-authenticated login (override: `PROTOCOL_AUTHOR`) parse at all — a drive-by
+`verdict: approved` is inert text — and within the shared account the ROLES are
+separated by per-dispatch **nonces**, typed only into that role's terminal and echoed
+back in the comment: the fixer never sees the review nonce so it cannot forge a
+verdict, the reviewer never sees the fix nonce so it cannot forge a fix, and no stale
+comment replays across rounds or sessions. SHA echoes bind **exactly** — full 40
+characters, string equality, never a prefix: a verdict about any other head halts the
+loop, a fix is accepted only when its echoed sha IS the live head. And each review
+round pins the **base OID** it dispatched against: a base that moves mid-review halts
+the round, so a verdict can never silently bind a stale merge-base.
 
 Per round: dispatch the review → poll `gh` until a verdict comment lands on the CURRENT
 head (new comments are detected by a comment-INDEX baseline, immune to local↔GitHub
@@ -332,6 +344,8 @@ Deps: `gh` (authed), `jq`, `orca`, both TUIs live in Orca terminals.
 
 ## Failure / resume / rollback
 
+**drive.sh** (journal/card machinery — does NOT apply to review-drive):
+
 - **Zero state → kill+restart is safe.** Restart `./drive.sh`; it re-folds the
   journal tail from `origin/<BRANCH>` and resumes the live position.
 - **Mid-card kill** can strand a card `in-progress`; the driver detects this on the
@@ -343,6 +357,22 @@ Deps: `gh` (authed), `jq`, `orca`, both TUIs live in Orca terminals.
   force-/delete-pushes best-effort (a wrapped command can bypass string matching — see
   *Merge safety*). On the normal forge path the worst a runaway driver does is push code
   commits to `feat/<feature>` — revertable.
+
+**review-drive.sh** (no journal, no cards, no frozen spec, no `deny-merge.sh` — its
+state bus and guards are the PR itself):
+
+- **Zero state → kill+restart RESUMES.** Rounds, findings history, digest and the
+  phase are rebuilt from the thread's authenticated verdict comments (§review-drive):
+  no fresh round budget, stale approvals don't bless later pushes, an unfixed verdict
+  re-enters at its fix phase.
+- **Mid-round kill** leaves at most a dispatched TUI still working; on restart the
+  resume scan either finds its protocol comment (round counted) or re-runs the round.
+  Nothing is stranded — the PR is the only memory.
+- **Blast radius:** worst case is commits on the PR topic branch plus PR comments —
+  both revertable; trunk is never touched. The loop contains no merge call; a merge
+  behind its back halts on detection; the durable lines are the protocol
+  authentication, the trunk rulesets, and the human-confirm before the reviewer's
+  squash-merge (§review-drive *Merge safety, precisely*).
 
 ## Relationship to the contract
 

@@ -62,25 +62,33 @@ number after reading the banner) and every exit is one of these:
 
 | event | meaning | run next (human) |
 |-------|---------|------------------|
-| `verdict: approved` | the reviewer signed off | read the PR, then perform the **operator merge** (the loop merges nothing; toolchain-PR merge authority is the operator's, as in `pipeline-improve`); then `pipeline-update` |
-| thread already ends in `verdict: approved` at start | a resumed run has nothing to drive | same operator merge gate |
+| `verdict: approved` (echoing the live head + this dispatch's nonce) | the meta-PR review signed off | read the PR, then the meta-PR merge gate: **human-confirm + reviewer-only squash-merge** (the loop merges nothing, the proposer never merges); then `pipeline-update` |
+| thread already ends in `verdict: approved` **for the live head** at start | a resumed run has nothing to drive | same meta-PR merge gate |
 | round cap (`MAX_ROUNDS`, default 5) — live or already consumed by the resumed thread | review N still requests changes; a restart cannot mint a fresh budget | read the digest + thread; continue by hand or re-run for another window |
 | no progress: `findings:` did not **provably** decrease for 2 consecutive reviews (a missing/unparseable count counts as no progress) | ping-pong, scope growth, or protocol drift | read the last two reviews, decide the direction |
-| no verdict comment within `REVIEW_TIMEOUT` | reviewer TUI stalled or stopped posting to the PR (the loop is blind to TUI text by design; unauthenticated comments are inert) | inspect the reviewer terminal (tail printed) |
-| no pushed fix + `fixed:` comment within `FIX_TIMEOUT` | fixer TUI stalled, pushed without evidence, or its `fixed:` echo never matched the live head | inspect the fixer terminal (tail printed) |
-| `reviewed-head` echo ≠ the round's head | stale or misdirected review | read the mismatched comment first |
+| no verdict comment within `REVIEW_TIMEOUT` | reviewer TUI stalled or stopped posting to the PR (the loop is blind to TUI text by design; unauthenticated or nonce-less comments are inert) | inspect the reviewer terminal (tail printed) |
+| no pushed fix + `fixed:` comment within `FIX_TIMEOUT` | fixer TUI stalled, pushed without evidence, or its `fixed:`/`fix-nonce:` echo never matched | inspect the fixer terminal (tail printed) |
+| `reviewed-head` echo ≠ the round's head (full-40 string equality; a prefix never parses) | stale or misdirected review | read the mismatched comment first |
 | head moved during a review round | someone else is pushing to the PR | find out who; re-run when quiet |
 | base moved during a review round | the verdict would bind a stale merge-base | re-run when the repo is quiet; the next round reviews against the new base |
 | head history rewritten during a fix (compare ≠ fast-forward) | force-push/rebase | fresh human read of the branch, then restart |
 | PR merged / closed / conflicts with base mid-loop | a human-level event outside the loop | act on the PR itself |
 | PR's repo outside `REVIEW_REPO_RE`, or a fork (cross-repository) PR | outside the sanctioned toolchain scope — refused at preflight, nothing dispatched | feature work goes through the 5-stage pipeline; fork PRs are reviewed by hand |
-| reviewer and fixer resolve to the same terminal / unresolvable terminal | config error | pin two distinct live handles |
+| shared/unresolvable terminals, or non-numeric loop config | config error, refused at preflight | pin two distinct live handles / fix the named value |
+
+Two resume events are deliberately NOT halts: a stale `approved` binding an older
+head triggers a fresh review round (an old blessing never covers new pushes), and an
+unfixed `changes-requested` still binding the live head re-enters at its FIX phase
+(no wasted re-review).
 
 Protocol lines (why comments, not GitHub reviews: one account cannot
 approve/request-changes on its own PR): reviewer comments carry `verdict:` +
-`reviewed-head:` + `findings:`; fixer comments carry `fixed: <sha>`, which must echo
-the live head to be accepted. Only comments authored by the gh-authenticated login
-(override: `PROTOCOL_AUTHOR`) parse as protocol — anyone else's comment is inert
-text, silently ignored rather than a halt. All parsing is grep/jq-deterministic — no
-LLM in the scheduler. Restart resumes: rounds, findings history and the digest are
-rebuilt from the thread's authenticated verdict comments.
+`reviewed-head:` + `findings:` + `review-nonce:`; fixer comments carry `fixed:` +
+`fix-nonce:`. Authentication is two-layer: only the gh-authenticated login's comments
+(override: `PROTOCOL_AUTHOR`) parse at all, and each dispatch's nonce — typed only
+into that role's terminal — must be echoed back, so the roles cannot forge each
+other and nothing replays across rounds/sessions; anyone else's comment is inert
+text, silently ignored rather than a halt. SHA echoes bind by full-40 string
+equality. All parsing is grep/jq-deterministic — no LLM in the scheduler. Restart
+resumes: rounds, findings history, digest and phase are rebuilt from the thread's
+authenticated verdict comments.
