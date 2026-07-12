@@ -2,5 +2,5 @@
   "repo": "https://github.com/jackypanster/pipeline-driver.git",
   "branch": "main",
   "feature": "drive-setup",
-  "stage": "prd"
+  "stage": "arch"
 }
