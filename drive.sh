@@ -196,7 +196,12 @@ ask_value() {   # KEY PROMPT DEFAULT -> echoes the resolved value
   local def="$3"
   if [ -n "$val" ]; then printf '%s\n' "$val"; return; fi
   if [ "${SETUP_YES:-0}" != "1" ]; then
-    local ans="$def"; read -e -i "$def" -p "$2: " ans || ans="$def"; def="$ans"
+    # Bash-3.2-safe prompt (NO `read -e -i` — -i needs bash 4; review-01 finding 5).
+    # setup()'s non-TTY refusal means this branch only runs on a real TTY; an empty
+    # answer keeps the caller default (prompt EOF is never re-interpreted as consent).
+    local ans=""
+    read -e -p "$2 [$def]: " ans || true
+    [ -n "$ans" ] && def="$ans"
   fi
   printf '%s\n' "$def"
 }
@@ -208,7 +213,8 @@ ask_confirm() {   # KEY PROMPT DEFAULT(0|1) -> echoes 0 or 1
     case "$val" in 1|y|Y|yes|YES|true|on) echo 1 ;; *) echo 0 ;; esac; return
   fi
   if [ "${SETUP_YES:-0}" != "1" ]; then
-    local ans; read -e -i "$def" -p "$2 [y/N]: " ans || ans="$def"
+    local ans=""
+    read -e -p "$2 [y/N]: " ans || true
     case "${ans:-$def}" in y|Y|yes|YES|true|on|1) def=1 ;; *) def=0 ;; esac
   fi
   printf '%s\n' "$def"
@@ -222,9 +228,10 @@ ask_choice() {   # KEY PROMPT DEFAULT OPT... -> echoes one of the OPTs
   if command -v fzf >/dev/null 2>&1; then
     local ans; ans=$(printf '%s\n' "$@" | fzf --prompt "$2: " --height 40% || true); printf '%s\n' "${ans:-$def}"
   else
-    local i=1 o ans="$def"
+    local i=1 o ans=""
     for o in "$@"; do printf '%d) %s\n' "$i" "$o" >&2; i=$((i+1)); done
-    read -e -i "$def" -p "$2: " ans || ans="$def"; printf '%s\n' "$ans"
+    read -e -p "$2 [$def]: " ans || true
+    [ -n "$ans" ] || ans="$def"; printf '%s\n' "$ans"
   fi
 }
 ask_multi() {   # KEY PROMPT DEFAULT_CSV OPT... -> echoes a CSV of the chosen OPTs
@@ -247,21 +254,31 @@ setup_sources()         { :; }   # 2  git clone / opt-in fetch+reset on the 3 so
 setup_skills()          { :; }   # 3  cp -r pipeline-* + ln -sfn per runtime (grok impl-only)
 setup_dashboard_build() { :; }   # 4a npm ci && npm run build && npm link
 setup_pboard_block() {              # 4b marker-delimited pboard() block into $SHELL_RC (C3)
-  local rc="${SETUP_SHELL_RC:-$HOME/.zshrc}" tmp
+  local rc="${SETUP_SHELL_RC:-$HOME/.zshrc}" body="" opens=0 closes=0
   mkdir -p "$(dirname "$rc")"
-  # Idempotent + own-only-your-markers (ADR 0003): delete any existing delimited block
-  # (sed range, inclusive) then append the fresh one. Portable temp-file sed (no -i flag,
-  # so BSD + GNU sed agree). Unmarked lines — including a legacy pboard() — are untouched.
+  # Balanced-marker guard (review-01 finding 3): an UNMATCHED opening marker must NOT
+  # sed-delete following user content through EOF. Refuse (s_miss, leave the file untouched)
+  # unless the markers balance; only then delete complete blocks. Own ONLY our markers —
+  # unmarked lines (incl. a legacy pboard()) are carried through verbatim (ADR 0003).
   if [ -f "$rc" ]; then
-    tmp="${rc}.tmp.$$"
-    if sed '/# >>> pipeline pboard >>>/,/# <<< pipeline pboard <<</d' "$rc" > "$tmp"; then
-      mv "$tmp" "$rc"
+    opens=$(grep -c '^# >>> pipeline pboard >>>$' "$rc" 2>/dev/null) || opens=0
+    closes=$(grep -c '^# <<< pipeline pboard <<<$' "$rc" 2>/dev/null) || closes=0
+    if [ "$opens" -ne "$closes" ]; then
+      s_miss "pboard marker block" "unbalanced pboard markers in $rc (open=$opens close=$closes); repair the rc and re-run"
+      return 0
+    fi
+    if [ "$opens" -gt 0 ]; then
+      body=$(awk '/^# >>> pipeline pboard >>>$/{f=1;next} f && /^# <<< pipeline pboard <<<$/{f=0;next} !f' "$rc")
     else
-      rm -f "$tmp"
+      body=$(cat "$rc")
     fi
   fi
-  # Quoted heredoc: the body is written LITERALLY (vars expand when pboard runs, not now).
-  cat >> "$rc" <<'PBOARD'
+  # Write to the SAME inode (`> "$rc"`, never `mv`) so an existing rc keeps its mode and
+  # owner — a 0600 rc must NOT widen to 0644 (review-01 finding 4). Quoted heredoc: the
+  # pboard() body is written LITERALLY (vars expand when pboard runs, not now).
+  {
+    if [ -n "$body" ]; then printf '%s\n' "$body"; fi
+    cat <<'PBOARD'
 # >>> pipeline pboard >>>
 pboard() {   # render + open the read-only pipeline dashboard (see drive.sh §Board)
   local repo="${DASHBOARD_REPO:-$HOME/workspace/pipeline-dashboard}"
@@ -274,6 +291,28 @@ pboard() {   # render + open the read-only pipeline dashboard (see drive.sh §Bo
 }
 # <<< pipeline pboard <<<
 PBOARD
+  } > "$rc"
+}
+# setup_kv serializes one KEY=VALUE line for the generated defaults, injection-safe
+# (review-01 finding 2). A value made only of shell-safe chars (alphanumerics and
+# _./:@+$-) is emitted BARE — that preserves the frozen happy-path asserts (e.g.
+# ^IMPL_TRANSPORT=orca) AND lets a literal $HOME in the path fields expand at source
+# time (portable + byte-deterministic). ANY other char — a space, newline, quote, or a
+# $ in a non-path slot — is wrapped in single quotes with every embedded ' escaped to
+# '\'', so it can neither break the assignment nor inject/execute when sourced. Empty
+# is emitted bare (KEY=). setup_kvq ALWAYS single-quote-escapes, for REVIEW_SLASH_CMD
+# whose literal '$pipeline' must NOT expand on source (drive.defaults.example:80).
+# Output is deterministic (no timestamps) so idempotency is a plain string compare.
+setup_kv() {   # KEY VALUE -> echoes "KEY=<bare>" or "KEY='<escaped>'"
+  local k="$1" v="$2" re='^[A-Za-z0-9_./:@+$-]+$' LC_ALL=C
+  if [ -z "$v" ] || [[ $v =~ $re ]]; then
+    printf '%s=%s' "$k" "$v"
+  else
+    printf "%s='%s'" "$k" "$(printf '%s' "$v" | sed "s/'/'\\\\''/g")"
+  fi
+}
+setup_kvq() {   # KEY VALUE -> always single-quoted, escaped (values whose '$' must not expand)
+  printf "%s='%s'" "$1" "$(printf '%s' "$2" | sed "s/'/'\\\\''/g")"
 }
 setup_defaults() {                 # 5  write $DEFAULTS from the drive.defaults template (C2)
   local out dir \
@@ -294,25 +333,25 @@ setup_defaults() {                 # 5  write $DEFAULTS from the drive.defaults 
   dashboard_repo=$(ask_value DASHBOARD_REPO "dashboard repo" '$HOME/workspace/pipeline-dashboard')
   skills_dir=$(ask_value SKILLS_DIR "skills dir" '$HOME/.agents/skills')
   tui_skills_dir=$(ask_value TUI_SKILLS_DIR "TUI skills dir" '$HOME/.pi/agent/skills')
-  # REVIEW_SLASH_CMD carries a literal '$' -> it MUST be single-quoted in the file or bash
-  # expands $pipeline to empty on source (drive.defaults.example:80). Other fields are
-  # simple values; paths keep a literal $HOME for portability. Content is deterministic
-  # (no timestamps) so the idempotency check is a plain string compare (ADR 0003).
+  # Each field is serialized via setup_kv (bare-when-safe, else single-quote-escaped) so
+  # a hostile SETUP_* value can never inject/execute on source. REVIEW_SLASH_CMD always
+  # single-quoted (setup_kvq) — its literal '$pipeline' must not expand. Content is
+  # deterministic (no timestamps) so the idempotency check is a plain string compare.
   out=$(printf '%s\n' \
     "# drive.defaults - generated by drive.sh setup (idempotent; re-run freely; .bak on change)." \
     "" \
-    "IMPL_TRANSPORT=$impl_transport" \
-    "IMPL_SLASH_CMD=$impl_slash_cmd" \
-    "IMPL_MODEL=$impl_model" \
-    "REVIEW_TERMINAL_TITLE=$review_terminal_title" \
-    "REVIEW_SLASH_CMD='$review_slash_cmd'" \
-    "YOLO=$yolo" \
-    "BOARD_OUT=$board_out" \
+    "$(setup_kv IMPL_TRANSPORT "$impl_transport")" \
+    "$(setup_kv IMPL_SLASH_CMD "$impl_slash_cmd")" \
+    "$(setup_kv IMPL_MODEL "$impl_model")" \
+    "$(setup_kv REVIEW_TERMINAL_TITLE "$review_terminal_title")" \
+    "$(setup_kvq REVIEW_SLASH_CMD "$review_slash_cmd")" \
+    "$(setup_kv YOLO "$yolo")" \
+    "$(setup_kv BOARD_OUT "$board_out")" \
     "" \
-    "PIPELINE_REPO=$pipeline_repo" \
-    "DASHBOARD_REPO=$dashboard_repo" \
-    "SKILLS_DIR=$skills_dir" \
-    "TUI_SKILLS_DIR=$tui_skills_dir")
+    "$(setup_kv PIPELINE_REPO "$pipeline_repo")" \
+    "$(setup_kv DASHBOARD_REPO "$dashboard_repo")" \
+    "$(setup_kv SKILLS_DIR "$skills_dir")" \
+    "$(setup_kv TUI_SKILLS_DIR "$tui_skills_dir")")
   dir=$(dirname "$DEFAULTS")
   [ -d "$dir" ] || mkdir -p "$dir"
   # Idempotent overwrite (ADR 0003): identical content -> no write, no .bak; changed ->
@@ -351,6 +390,15 @@ setup_target() {                    # 6  target .pipeline/roles.yaml (impl slot 
 }
 
 setup() {
+  # Non-interactive refusal (review-01 finding 5): the wizard is interactive by nature.
+  # Without an explicit --yes/SETUP_YES=1 AND without a TTY on stdin, REFUSE up front — a
+  # read error/EOF is not consent and must not mutate files. The frozen happy-path tests
+  # run headless via SETUP_YES=1; an operator on a real TTY is never blocked.
+  if [ "${SETUP_YES:-0}" != "1" ] && [ ! -t 0 ]; then
+    echo "drive.sh setup: refusing non-interactive run without --yes (stdin is not a TTY)." >&2
+    echo "  re-run with --yes (or SETUP_YES=1) for headless, or from an interactive terminal." >&2
+    return 2
+  fi
   local setup_bad=0 doctor_rc=0
   # Inner helpers mirror doctor()'s d_* shape: dynamic scoping makes setup_bad the
   # counter they mutate while setup() is the active caller. s_step prints a section
@@ -358,7 +406,7 @@ setup() {
   s_step() { printf -- '--- %s ----------------------------------------------------------\n' "$1"; }
   s_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; setup_bad=$((setup_bad+1)); }
 
-  if setup_do_step PREFLIGHT; then s_step preflight; setup_preflight; fi
+  if setup_do_step DEPS; then s_step deps; setup_preflight; fi
   if setup_do_step SOURCES;   then s_step sources;   setup_sources;   fi
   if setup_do_step SKILLS;    then s_step skills;    setup_skills;    fi
   if setup_do_step DASHBOARD; then s_step dashboard; setup_dashboard_build; fi
