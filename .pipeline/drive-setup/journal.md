@@ -381,3 +381,72 @@ the LAST card, that makes all 4 review -> pipeline-review (codex): freeze gate +
 HUMAN merge confirm (the driver/impl NEVER merges).
 On failure: attempts++; >=3 -> blocked -> pipeline-hunt.
 <<< END
+
+## seq=7 · 2026-07-12T16:12:47Z · impl→review · completed · by=pi-impl
+done:   Card C4 (target repo .pipeline/roles.yaml init) green on feat/drive-setup. Filled
+        setup_target: resolves SETUP_PIPELINE_REPO (source) + SETUP_TARGET_REPO (destination)
+        through the ask_* seam (same ONE-path resolution as C2; empty dst -> skip the step),
+        mkdir -p $dst/.pipeline, and writes $dst/.pipeline/roles.yaml from the pipeline repo's
+        template with a LITERAL substitution of the impl-slot placeholder
+        '<autonomous-coding-skill>' -> 'goal-driven-implementation' (sed 's/.../.../g', the
+        ONLY rewrite). Tool-agnostic invariant held (CONTRACT): no runtime/LLM name introduced
+        on any slot — the source template already satisfies it and the rewrite touches only the
+        placeholder. Idempotent overwrite (ADR 0003, same idiom as setup_defaults): render to
+        string, and if identical to the existing file -> no write, no .bak; changed -> cp existing
+        to <file>.bak (single, overwritten) then write. Honest-degrade (ADR 0002): a missing
+        source roles.yaml calls s_miss (setup_bad++) with a fix: line rather than fake success;
+        setup still ends on doctor. Step 6 scaffolds roles.yaml only — NO per-feature drive.config
+        (PRD-confirmed non-scope).
+verify: bash -n drive.sh (clean) + bash test/setup-target.sh -> passed=3 failed=0
+        (impl slot rewritten + placeholder gone / tool-agnostic grep-negative / .bak-on-change
+        holds the stale prior version). C1 (3/3) + C2 (4/4) + C3 (3/3) still green; existing
+        8-test suite PASS (run 11 / hook 29 / preflight 7 / e2e 6 / e2e-orca 10 /
+        defaults-doctor 15 / board-relay 7 / review-drive 34) — no regression.
+output: feat/drive-setup @ 4fe87f8 (drive.sh, impl-paths only; spec-paths untouched — freeze
+        gate diff 4ac12ec..HEAD -- test/ empty) · PR #9 updated · main: tasks/04.md
+        status:review + this entry (one commit; stage stays impl)
+--- handoff ---
+>>> NEXT
+ALL 4 CARDS ARE NOW status:review. Route to pipeline-review (the driver/impl NEVER merges).
+Run pipeline-review on a FRESH session (assume you know nothing — rebuild from repo + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: frontier SOTA required (review is a reasoning slot) — operator assigns the bot; the
+pipeline can't verify the model.
+First: git pull --rebase; no .env in this repo (skip CONTRACT step 2).
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md — normative protocol (read FIRST;
+    esp. the freeze gate is YOURS to enforce: git diff <spec-rev>..HEAD -- spec-paths MUST be empty;
+    you merge ONLY on green + clean freeze + semantic review + HUMAN confirm)
+  - .pipeline/current.json — feature=drive-setup, stage=impl, full-verify = bash -n + the 12-test
+    run-all line (run/hook/preflight/e2e/e2e-orca/defaults-doctor/board-relay/review-drive +
+    setup-plumbing/setup-defaults/setup-pboard/setup-target)
+  - .pipeline/drive-setup/tasks/{01,02,03,04}.md — all four cards status:review (impl complete)
+  - .pipeline/drive-setup/arch.md — §Idempotency invariants the freeze gate + semantic review bind to
+  - .pipeline/drive-setup/CONTEXT.md + docs/adr/{0002,0003}.md — honest-degrade + idempotency
+GATE 1 (frozen spec / freeze gate): the feature's single spec-rev is
+  4ac12ec905adab2da59666447e8a264245fc3cd3. Enforce: git diff 4ac12ec..feat/drive-setup -- test/setup-*.sh
+  MUST be empty (impl wrote ZERO tests — it only made them green via drive.sh). If non-empty -> REJECT.
+GATE 2 (full-verify): on feat/drive-setup, run current.json.full-verify — all 12 tests + bash -n must
+  pass. Already confirmed green by impl on 4fe87f8; re-run to re-prove on the merge commit.
+Semantic review (review reads, not frozen): the external-tool steps setup_preflight/setup_sources/
+  setup_skills/setup_dashboard_build are stubbed bodies riding C1's plumbing — confirm their gates,
+  honest-degrade wiring, and the ask_* interactive path (fzf/read) are sound even though the hermetic
+  tests only drive the headless path. Confirm the impl-slot rewrite is the ONLY mutation of the copied
+  roles.yaml and no runtime/LLM name can leak for any source template.
+Feature gotchas (project-specific traps the reviewer MUST know):
+  - feat/drive-setup diverged from main at d43f783 and was NOT rebased onto main's metadata commits
+    (spec-rev 4ac12ec never advanced, so the skill's rebase condition was never met). Merging
+    feat/drive-setup -> main reconciles code (feat) with trunk metadata (main) cleanly — different
+    files, no conflict expected. The freeze gate diffs against spec-rev 4ac12ec, NOT main's tip, so
+    the divergence does not affect it.
+  - The impl NEVER merges. You merge ONLY after: freeze gate empty + full-verify green + semantic
+    review pass + HUMAN confirm. Report all four; halt for the human on the merge itself.
+  - SETUP_DO_PBOARD (C3) is a SEPARATE toggle from SETUP_DO_DASHBOARD — both must stay independently
+    gated. REVIEW_SLASH_CMD='$pipeline-review' must stay SINGLE-QUOTED in generated drive.defaults.
+  - The impl slot's real installed name is goal-driven-implementation; the target roles.yaml must
+    carry exactly that on the impl line (never the <autonomous-coding-skill> placeholder).
+Done when: freeze gate empty + full-verify green + semantic review pass + HUMAN merge confirm. Advance
+current.json.stage per the CONTRACT only after the merge lands (the driver/impl does not touch it here).
+On failure (freeze dirty / full-verify red / semantic reject): per CONTRACT review-reject — do NOT
+merge; report the gate that failed and the exact remediation.
+<<< END
