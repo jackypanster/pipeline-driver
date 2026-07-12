@@ -500,3 +500,57 @@ Feature gotchas:
 Done when: one new shared spec-rev covers every card, red tests prove the reviewed gaps, and an
 actionable todo card routes to pipeline-impl. On task failure: attempts++; >=3 => pipeline-hunt.
 <<< END
+
+## seq=10 · 2026-07-12T23:24:59Z · task→impl · completed · by=claude-opus-4-8 (cc)
+done:   Re-froze the whole feature after review-01 (new shared spec-rev 59ad1d8). Added
+        test/setup-safety.sh (injection-safe serialization, unmatched-marker EOF safety, rc-mode
+        preservation, non-TTY refusal) to card 01 and test/setup-external.sh (the 4 external steps must
+        ACT + SETUP_DO_DEPS gates preflight) as new card 05. Verified both RED against PR #9 head's
+        setup() for the EXACT reviewed defects (BOARD_OUT dropped its space; INJECTED_ASSIGN/CMD
+        executed on source; keep-after line deleted; mode 644; rc=0 non-TTY). Every card's spec-rev
+        bumped to 59ad1d8; cards 02/03/04 kept review/0, card 01 stays todo/attempts=1, card 05 todo/0.
+output: freeze 59ad1d8 · tasks/{01,05}.md · tasks/{02,03,04}.md (spec-rev) · current.json (full-verify)
+--- handoff ---
+>>> NEXT
+Run pipeline-impl on a FRESH session (assume you know nothing — rebuild from the repo + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: capable-local OK (impl only) — operator assigns the bot (pi, orca transport).
+First: git pull --rebase; no .env in this repo.
+GATE 1 (frozen spec): the feature's NEW single spec-rev is 59ad1d8069f0f75f258b30e93ff1e6cf473515f4
+  (the re-freeze commit adding test/setup-safety.sh + test/setup-external.sh). The OLD 4ac12ec is dead.
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md — §Test ownership (re-freeze: you
+    make the NEW frozen tests green via impl-paths ONLY; never edit spec-paths) + §State authority
+    (rebase your in-flight branch onto advanced trunk BEFORE continuing)
+  - .pipeline/drive-setup/reviews/review-01.md — the 6 blocking findings + exact probe evidence
+  - .pipeline/drive-setup/tasks/01.md (todo, attempts=1) + tasks/05.md (todo, new) — your two targets
+  - .pipeline/drive-setup/tasks/{02,03,04}.md — stay review; do not re-implement, just keep green
+  - test/setup-safety.sh + test/setup-external.sh — the NEW frozen spec (what "fixed" means)
+Your task (concrete, numbered):
+  1. REBASE FIRST: `feat/drive-setup` carries the STALE spec (old spec-rev). Rebase it onto the
+     advanced `main` (which now has 59ad1d8) and force-push YOUR feature branch — otherwise review's
+     freeze gate diffs the new spec-rev against a stale tip and falsely rejects. (Never force-push main.)
+  2. Card 01 — harden the shared helpers in drive.sh (make test/setup-safety.sh green): (a) serialize
+     EVERY generated drive.defaults value with robust shell quoting so a space/newline/quote can neither
+     break the assignment nor inject/execute on source; (b) pboard write must validate a balanced marker
+     pair (an unmatched opening marker must NOT sed-delete to EOF — refuse/backup) AND preserve the rc
+     file's mode (0600 stays 0600); (c) the ask_* seam must REFUSE on a non-TTY without --yes (prompt
+     error/EOF is not consent) and use a macOS-Bash-3.2-safe prompt (NO `read -e -i`).
+  3. Card 05 — implement the 4 external steps (make test/setup-external.sh green): preflight checks deps
+     + honest-degrades (s_miss) and is gated by SETUP_DO_DEPS (rename from SETUP_DO_PREFLIGHT); skills
+     copies pipeline-* into the canonical SKILLS_DIR; sources + dashboard honest-degrade (s_miss +
+     non-zero) on a missing repo. Never a silent no-op (ADR 0002).
+  4. Run each card's verify; when all green, ensure the FULL suite (current.json.full-verify — now 14
+     commands incl. setup-safety + setup-external) is green on the branch HEAD. Flip cards 01, 05 →
+     review, push metadata to trunk, and the PR #9 branch carries the fixes.
+Feature gotchas:
+  - impl writes ZERO spec tests; fix ONLY drive.sh (+ README for card 01). Do NOT edit test/setup-*.sh.
+  - The 6 review findings ARE the spec now — a fix that passes setup-safety.sh/setup-external.sh but
+    reintroduces any listed defect will be re-rejected.
+  - macOS system Bash is 3.2: `read -e -i` is unsupported — its failure must NOT fall through to a
+    silent default (that IS finding 5).
+Done when: all 14 full-verify commands green on feat/drive-setup HEAD (rebased onto 59ad1d8), cards 01+05
+review, PR #9 updated. On success: run pipeline-review (codex) again — freeze gate vs 59ad1d8 + full
+suite + semantic + HUMAN merge confirm. On failure: attempts++; card 01 already at 1, so a 2nd fail = 2,
+3rd ⇒ blocked ⇒ pipeline-hunt.
+<<< END
