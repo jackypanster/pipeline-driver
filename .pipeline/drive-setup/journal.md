@@ -118,3 +118,55 @@ full-verify recorded. On success: set current.json.stage=task, append journal, t
 frozen red test, echo its spec-rev) and dispatch pipeline-impl to pi.
 On failure: attempts++; >=3 ⇒ blocked ⇒ run pipeline-hunt.
 <<< END
+
+## seq=3 · 2026-07-12T14:29:56Z · task→impl · completed · by=claude-opus-4-8 (cc)
+done:   Decomposed drive-setup into 4 atomic cards (C1 plumbing / C2 defaults-gen+seam / C3 pboard
+        block / C4 target roles.yaml). Froze all 4 red tests in ONE commit (shared spec-rev
+        4ac12ec) as dedicated per-card files test/setup-*.sh — verified bash -n clean AND genuinely
+        RED now (setup subcommand absent). Recorded cards + full-verify. impl (pi) makes them green by
+        writing setup() in drive.sh only.
+output: .pipeline/drive-setup/tasks/{01,02,03,04}.md · current.json (stage=task, full-verify) · freeze commit 4ac12ec
+--- handoff ---
+>>> NEXT
+Run pipeline-impl on a FRESH session (assume you know nothing — rebuild from the repo + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=none
+Model: capable-local OK (impl only) — operator assigns the bot (pi, orca transport); the pipeline can't verify the model.
+First: git pull --rebase; no .env in this repo (skip CONTRACT step 2).
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md — normative protocol (read FIRST;
+    esp. §Test ownership: you make the frozen test green via impl-paths + src ONLY, NEVER edit spec-paths)
+  - .pipeline/drive-setup/tasks/01.md … 04.md — the 4 cards; pick the OLDEST `todo` first
+  - .pipeline/drive-setup/arch.md — the SETUP_* interface table + drive.sh integration anchors (the map)
+  - .pipeline/drive-setup/CONTEXT.md + docs/adr/0002,0003 — honest-degrade + idempotency invariants
+  - drive.sh (doctor() @144-303, dispatch @304) — the structure setup() mirrors; YOUR impl target
+GATE 1 (frozen spec): the feature's single spec-rev is 4ac12ec905adab2da59666447e8a264245fc3cd3
+  (the freeze commit adding test/setup-*.sh). Read those tests — they ARE the spec you implement to.
+Your task (concrete, numbered):
+  1. Cut `feat/drive-setup` from `main` (all 4 cards land on this ONE branch; impl-paths = drive.sh,
+     + README.md for card 01).
+  2. Pick the oldest `todo` card. Make its `verify` green by writing setup() in drive.sh (+ README for
+     C1) — editing ONLY impl-paths. Do NOT touch any test/setup-*.sh (freeze gate — a spec edit is a
+     review reject). Run the card's `verify`; when green, flip the card `status: todo→review` (or per
+     the driver loop), commit on the branch.
+  3. Repeat for cards 02, 03, 04 in order on the same branch — each new card's setup() code builds on
+     the prior. When all 4 verifies are green, open ONE PR feat/drive-setup → main.
+  4. impl writes ZERO spec tests; white-box helper tests, if any, go under impl-paths (drive.sh inline)
+     only.
+Feature gotchas (project-specific traps the next node MUST know):
+  - `SETUP_DO_PBOARD` is a SEPARATE toggle from `SETUP_DO_DASHBOARD` (arch splits step 4 into 4a
+    build/link + 4b pboard block) — the frozen tests set them independently; implement both.
+  - Emit `REVIEW_SLASH_CMD='$pipeline-review'` SINGLE-QUOTED in the generated drive.defaults (codex
+    ≥0.144 $-prefix; unquoted bash expands it to empty).
+  - The impl-slot skill's real name is `goal-driven-implementation`; the target roles.yaml must carry
+    that on the impl line (never the `<autonomous-coding-skill>` placeholder or a runtime twin name).
+  - Honest-degrade (ADR 0002): setup NEVER declares success on its own — it terminates on `doctor` and
+    returns its rc; an un-automatable step prints a `fix:` remediation line and sets setup_bad.
+  - Config-guard bypass: the WORKDIR/BRANCH/FEATURE guards (drive.sh:69-73) must skip for SUBCMD=setup,
+    exactly like they already do for doctor — else setup dies on a missing drive.config.
+  - Idempotency: `.bak`-on-change-only (no churn on identical re-run); marker-delimited pboard block;
+    `cp` overwrite / `ln -sfn`. All pinned by the frozen tests.
+Done when: all 4 cards' `verify` green on feat/drive-setup + the PR is open. On success: cards →review,
+run pipeline-review (codex) — freeze gate (git diff 4ac12ec..HEAD -- test/setup-*.sh MUST be empty) +
+full-verify green + semantic review + HUMAN merge confirm.
+On failure: attempts++; >=3 ⇒ blocked ⇒ run pipeline-hunt.
+<<< END
