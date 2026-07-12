@@ -1,0 +1,15 @@
+# roles.yaml — per-target-repo skill bindings (this repo = pipeline-driver).
+# Each command resolves its slot to a skill NAME here. Point a slot at a better skill any time —
+# the contract is unchanged. The runtime is ANY capable agent you paste the command into; the
+# pipeline is framework-, machine- and LLM-agnostic. Per CONTRACT.md, NO tool/runtime/LLM name
+# ever goes in this file — the operator assigns which bot runs each stage out of band.
+# Per-stage model requirement: reasoning slots (prd/arch/task/review/hunt/improve) want a frontier
+# SOTA model; impl tolerates a capable local model.
+
+prd:    [grill-me, think]   # grill-me clarifies the rough idea, then think produces the plan
+arch:   grill-with-docs     # walks the design tree against the codebase; emits CONTEXT.md + ADRs
+task:   think               # decomposes into atomic cards (the agent writes the red tests)
+impl:   goal-driven-implementation   # autonomous think→design-tests→code→check skill (real installed name)
+review: check               # semantic review of the diff/PR
+hunt:   hunt                # root-cause a blocked card before re-queue
+improve: think              # meta: draft a reviewed skill-improvement PR against the pipeline repo
