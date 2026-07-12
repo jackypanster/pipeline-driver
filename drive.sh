@@ -281,6 +281,9 @@ doctor() {
              "pin REVIEW_TERMINAL_HANDLE" ;;
         esac
       fi
+    else
+      d_warn "review relay: configured (REVIEW_TERMINAL_HANDLE/TITLE) but 'orca terminal list' returned nothing — binding UNVERIFIED" \
+        "is the Orca runtime running? (orca status), then re-run doctor"
     fi
   fi
 

@@ -150,11 +150,19 @@ if [ "$rc" -eq 0 ] && grep -q "NO live terminal title contains 'codex'" <<<"$out
 else bad "doctor review title unmatched (rc=$rc)" "$out"; fi
 
 # 14: title matching exactly one live terminal -> ok
-sed -i '' 's/REVIEW_TERMINAL_TITLE=codex/REVIEW_TERMINAL_TITLE=pipeline/' "$TMP/defaults5"
+grep -v '^REVIEW_TERMINAL_TITLE=' "$TMP/defaults5" > "$TMP/defaults5.new" && mv "$TMP/defaults5.new" "$TMP/defaults5"
+printf 'REVIEW_TERMINAL_TITLE=pipeline\n' >> "$TMP/defaults5"
 out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
 if [ "$rc" -eq 0 ] && grep -q "matches exactly one live terminal" <<<"$out"; then
   ok "doctor: unique review-title match -> ok"
 else bad "doctor review title unique (rc=$rc)" "$out"; fi
+
+# --- 15. review relay configured but `orca terminal list` empty -> warn, never silent
+printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/orca"; chmod +x "$TMP/bin/orca"   # list outputs nothing
+out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "binding UNVERIFIED" <<<"$out"; then
+  ok "doctor: empty terminal list -> explicit UNVERIFIED warn (no false green)"
+else bad "doctor empty terminal list (rc=$rc)" "$out"; fi
 
 echo "----"
 echo "passed=$pass failed=$fail"
