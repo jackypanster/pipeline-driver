@@ -313,3 +313,71 @@ route to pipeline-impl for card 04. When 04 is also review (all 4 review) -> pip
 freeze gate (git diff 4ac12ec..HEAD -- test/setup-*.sh empty) + full-verify green + semantic + HUMAN merge.
 On failure: attempts++; >=3 -> blocked -> pipeline-hunt.
 <<< END
+
+## seq=6 · 2026-07-12T15:14:46Z · impl→review · completed · by=pi-impl
+done:   Card C3 (pboard marker-delimited block) green on feat/drive-setup. Filled
+        setup_pboard_block: writes the pboard() shell function into
+        ${SETUP_SHELL_RC:-$HOME/.zshrc} inside a marker-delimited block
+        ('# >>> pipeline pboard >>>' ... '# <<< pipeline pboard <<<'). Idempotent +
+        own-only-your-markers (ADR 0003): a re-run sed-range-deletes any existing marked
+        block (inclusive, portable temp-file sed so BSD + GNU agree) then appends the fresh
+        one -> still exactly ONE marker pair; unmarked lines (incl. a legacy pboard()) are
+        left untouched. mkdir -p the rc's dir; the rc is created if absent. The pboard() body
+        renders the dashboard via $DASHBOARD_REPO/dist/cli.js into BOARD_OUT and opens it
+        (review-reads — not frozen).
+verify: bash -n drive.sh (clean) + bash test/setup-pboard.sh -> passed=3 failed=0
+        (one marker pair + pboard() inside / idempotent across re-runs / unmarked legacy line
+        preserved). C1 (3/3) + C2 (4/4) still green; existing 8-test suite PASS.
+output: feat/drive-setup @ 79cecb8 (drive.sh, impl-paths only; spec-paths untouched — freeze
+        gate diff 4ac12ec..HEAD -- test/ empty) · PR #9 updated · main: tasks/03.md
+        status:review + this entry (one commit; stage stays impl)
+--- handoff ---
+>>> NEXT
+Run pipeline-impl on a FRESH session (assume you know nothing — rebuild from repo + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: capable-local OK (impl only) — operator assigns the bot (pi, orca transport).
+First: git pull --rebase; no .env in this repo (skip CONTRACT step 2).
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md — normative protocol (read FIRST;
+    impl-paths + src ONLY, NEVER edit spec-paths)
+  - .pipeline/drive-setup/tasks/04.md — the LAST card (oldest+only todo): target repo roles.yaml init
+  - .pipeline/drive-setup/arch.md — §idempotency invariants (roles.yaml .bak-on-change + the impl-slot
+    rewrite <autonomous-coding-skill> -> goal-driven-implementation, tool-agnostic)
+  - .pipeline/drive-setup/CONTEXT.md + docs/adr/0003 — file-gen idempotency (.bak-on-change-only)
+  - drive.sh (setup_target stub, the step gated by SETUP_DO_TARGET inside setup()) — YOUR target
+  - test/setup-target.sh — the frozen test that is YOUR spec (card-scoped verify)
+GATE 1 (frozen spec): the feature's single spec-rev is still 4ac12ec905adab2da59666447e8a264245fc3cd3
+  (shared across all 4 cards). Read test/setup-target.sh — it IS the spec for card 04.
+State of the branch: feat/drive-setup is OPEN (PR #9) with C1+C2+C3 landed. git checkout feat/drive-setup
+&& git pull --rebase origin main, then build C4 ON TOP (same branch, same PR). Do NOT cut a new branch.
+Your task (concrete, numbered):
+  1. On feat/drive-setup, fill setup_target (gated by SETUP_DO_TARGET; target path SETUP_TARGET_REPO,
+     empty = skip the step): mkdir -p $TARGET/.pipeline; copy $SETUP_PIPELINE_REPO/roles.yaml ->
+     $TARGET/.pipeline/roles.yaml, REWRITING the impl slot value '<autonomous-coding-skill>' ->
+     'goal-driven-implementation'. Keep it tool-agnostic (NO runtime/LLM name on any slot — CONTRACT
+     invariant). Overwrite policy = .bak-on-change-only (same as C2: identical -> no write/no .bak;
+     changed -> cp existing to <file>.bak, then write).
+  2. Editing ONLY impl-paths (drive.sh). Run the card's verify: `bash -n drive.sh && bash
+     test/setup-target.sh` until passed=3 failed=0. NEVER touch test/setup-*.sh (freeze gate).
+  3. When green: push feat/drive-setup (PR #9 auto-updates); on main flip tasks/04.md status:todo->review,
+     append this journal (seq=7, impl->review completed), commit once, push. At that point ALL 4 cards
+     are review -> route to pipeline-review (codex): freeze gate (git diff 4ac12ec..HEAD -- test/setup-*.sh
+     empty) + full-verify green + semantic review + HUMAN merge.
+Feature gotchas (project-specific traps the next node MUST know):
+  - SETUP_PIPELINE_REPO is the SOURCE of the template roles.yaml (the frozen test stubs a fake pipeline
+    repo at SETUP_PIPELINE_REPO whose roles.yaml still carries '<autonomous-coding-skill>'); SETUP_TARGET_REPO
+    is the destination. Both are pinned by the frozen test.
+  - The impl-slot rewrite is a literal substitution on the copied file: '<autonomous-coding-skill>' (the
+    placeholder) -> 'goal-driven-implementation' (the real installed name). The assertion greps
+    '^impl:[[:space:]]+goal-driven-implementation' and asserts the placeholder is GONE.
+  - Tool-agnostic invariant (assertion 2): NO runtime/LLM name (claude|codex|grok|gpt|opus|sonnet|haiku|glm)
+    may appear on any slot binding (prd/arch/task/impl/review/hunt/improve). The pipeline-repo template
+    already satisfies this; do not introduce one during the copy/rewrite.
+  - setup() already calls setup_target gated by SETUP_DO_TARGET — just fill the body (currently ':').
+    Use C2's idempotent-overwrite idiom (render to string, compare, .bak-on-change) — do NOT roll your own.
+  - Step 6 does NOT scaffold a per-feature drive.config (PRD-confirmed non-scope) — only roles.yaml.
+Done when: card 04 verify green on feat/drive-setup + pushed + tasks/04.md -> review on main. Since 04 is
+the LAST card, that makes all 4 review -> pipeline-review (codex): freeze gate + full-verify + semantic +
+HUMAN merge confirm (the driver/impl NEVER merges).
+On failure: attempts++; >=3 -> blocked -> pipeline-hunt.
+<<< END
