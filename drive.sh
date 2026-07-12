@@ -27,6 +27,12 @@
 #                    — install/config diagnosis for the pipeline+dashboard+driver
 #                      trio: prints one line per check with the exact remediation
 #                      command; installs nothing, touches no network.
+#         ./drive.sh setup [--yes|-y]
+#                    — fzf-driven install/config wizard for the trio (the automated
+#                      form of the README §Setup checklist). --yes / SETUP_YES=1 runs
+#                      it headless; each of the 7 steps toggles via SETUP_DO_<STEP>
+#                      (default on). It writes/overwrites config but never declares
+#                      success on its own — it ends on `doctor` (ADR 0002).
 #
 # CONFIG LAYERING: an optional global defaults file
 # (${XDG_CONFIG_HOME:-~/.config}/pipeline-driver/drive.defaults, see
@@ -45,9 +51,23 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 AWK="$HERE/parse-tail.awk"
 
 SUBCMD=""
-case "${1:-}" in doctor) SUBCMD=doctor; shift ;; esac
+case "${1:-}" in
+  doctor) SUBCMD=doctor; shift ;;
+  setup)  SUBCMD=setup;  shift
+          # --yes / -y flips the wizard headless (same as SETUP_YES=1). Setup takes NO
+          # positional config arg — it CREATES config — so a leftover arg is left alone
+          # (and CONF is forced empty below regardless).
+          while [ $# -gt 0 ]; do
+            case "${1:-}" in --yes|-y) export SETUP_YES=1; shift ;; *) break ;; esac
+          done ;;
+esac
 CONF="${1:-$HERE/drive.config}"
-if [ "$SUBCMD" != "doctor" ]; then
+# Setup has no per-feature config to READ (it creates one). Sourcing the operator's
+# real ./drive.config would pollute a config-creator (WORKDIR/BRANCH/FEATURE/handles
+# for an unrelated feature) and break test hermeticity. An empty CONF is never sourced
+# and `doctor` reports it as "no per-feature config" (a warn, never a block).
+[ "$SUBCMD" = "setup" ] && CONF=""
+if [ "$SUBCMD" != "doctor" ] && [ "$SUBCMD" != "setup" ]; then
   [ -f "$CONF" ] || { echo "drive.sh: config not found: $CONF" >&2; exit 2; }
 fi
 # Orca injects ORCA_TERMINAL_HANDLE (among other ORCA_*) into EVERY terminal it
@@ -66,7 +86,10 @@ DEFAULTS="${DRIVE_DEFAULTS:-${XDG_CONFIG_HOME:-$HOME/.config}/pipeline-driver/dr
 [ -f "$CONF" ] && . "$CONF"
 
 # ---- config defaults ----------------------------------------------------------
-if [ "$SUBCMD" != "doctor" ]; then   # doctor diagnoses a missing config instead of dying on it
+# doctor AND setup skip the required-key guard: doctor diagnoses a missing config as
+# a MISS instead of dying on it; setup CREATES config and has no feature context
+# (no WORKDIR/BRANCH/FEATURE) — it must not die on keys it exists to generate.
+if [ "$SUBCMD" != "doctor" ] && [ "$SUBCMD" != "setup" ]; then
   : "${WORKDIR:?set WORKDIR (a local clone of the target repo) in drive.config}"
   : "${BRANCH:?set BRANCH (trunk, e.g. main/master) in drive.config}"
   : "${FEATURE:?set FEATURE (the .pipeline/<feature> name) in drive.config}"
@@ -136,6 +159,67 @@ render_board() {
 
 git_q() { git -C "$WORKDIR" "$@"; }
 show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path from the REMOTE ref
+
+# ---- setup ---------------------------------------------------------------------
+# `drive.sh setup` — an fzf-driven, idempotent, overwrite-safe install/config wizard
+# for the pipeline+dashboard+driver trio. A peer of `doctor()`: same file, same inline-
+# function shape (section headers + a counter + a terminal exit status), same "one line
+# per check with the exact remediation". It orchestrates commands that already work by
+# hand and TERMINATES on `doctor()` as the SOLE success signal (ADR 0002 — setup never
+# prints its own "done": a step it cannot automate prints a `fix:` line and counts
+# bad, so setup's exit is non-zero even when doctor is skipped).
+#
+# One code path serves interactive and headless (ADR 0003): every answer flows through
+# the `ask_*` seam (SETUP_<KEY> env → default → fzf/read); SETUP_YES=1 / --yes runs the
+# whole wizard headless with zero fzf/read calls — the path the freeze test drives.
+# Each of the 7 steps is individually skippable via SETUP_DO_<STEP>=0 (default 1).
+#
+# Card C1 ships the plumbing skeleton (dispatch, headless activation, step gating, the
+# doctor terminal). C2 fills setup_defaults + the ask_* seam; C3 fills setup_pboard_block;
+# C4 fills setup_target. The external-tool steps (deps probe, clone, skills attach, npm
+# build) ride this skeleton and are covered by "review reads" (a hermetic test cannot
+# run a real package manager / network / TUI).
+setup_do_step() {   # <STEP> -> status 0/1: is SETUP_DO_<STEP> enabled? (default 1)
+  local v="SETUP_DO_$1"
+  [ "${!v:-1}" = "1" ]
+}
+
+# Step functions. C1 ships them as gated no-op stubs so the wizard runs end-to-end the
+# moment a real body lands in C2/C3/C4; each is owned by its own SETUP_DO_* toggle.
+setup_preflight()       { :; }   # 1  dep probe (reuses doctor's style) + remediation
+setup_sources()         { :; }   # 2  git clone / opt-in fetch+reset on the 3 source repos
+setup_skills()          { :; }   # 3  cp -r pipeline-* + ln -sfn per runtime (grok impl-only)
+setup_dashboard_build() { :; }   # 4a npm ci && npm run build && npm link
+setup_pboard_block()    { :; }   # 4b marker-delimited pboard() block into $SHELL_RC     (C3)
+setup_defaults()        { :; }   # 5  write $DEFAULTS from the drive.defaults template    (C2)
+setup_target()          { :; }   # 6  target .pipeline/roles.yaml (impl slot rewritten)   (C4)
+
+setup() {
+  local setup_bad=0 doctor_rc=0
+  # Inner helpers mirror doctor()'s d_* shape: dynamic scoping makes setup_bad the
+  # counter they mutate while setup() is the active caller. s_step prints a section
+  # header; s_miss records an un-automatable step (honest-degrade — ADR 0002).
+  s_step() { printf -- '--- %s ----------------------------------------------------------\n' "$1"; }
+  s_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; setup_bad=$((setup_bad+1)); }
+
+  if setup_do_step PREFLIGHT; then s_step preflight; setup_preflight; fi
+  if setup_do_step SOURCES;   then s_step sources;   setup_sources;   fi
+  if setup_do_step SKILLS;    then s_step skills;    setup_skills;    fi
+  if setup_do_step DASHBOARD; then s_step dashboard; setup_dashboard_build; fi
+  if setup_do_step PBOARD;    then s_step pboard;    setup_pboard_block;    fi
+  if setup_do_step DEFAULTS;  then s_step defaults;  setup_defaults;        fi
+  if setup_do_step TARGET;    then s_step target;    setup_target;          fi
+
+  # Terminal verifier (ADR 0002): doctor is the sole success signal. When DO_DOCTOR=1
+  # setup ends on doctor and OR's its rc with the setup-side bad count; when DO_DOCTOR=0
+  # setup returns setup_bad>0 ? 1 : 0. `doctor || doctor_rc=$?` keeps set -e from aborting
+  # on a non-zero doctor (a blocking doctor is the intended non-green, not a crash).
+  if setup_do_step DOCTOR; then
+    doctor_rc=0; doctor || doctor_rc=$?
+    [ "$doctor_rc" -ne 0 ] && setup_bad=$((setup_bad+1))
+  fi
+  return "$((setup_bad > 0 ? 1 : 0))"
+}
 
 # ---- doctor ---------------------------------------------------------------------
 # `drive.sh doctor` — one line per check, with the EXACT remediation command on a
@@ -302,6 +386,7 @@ doctor() {
   [ "$bad" -eq 0 ]
 }
 if [ "$SUBCMD" = "doctor" ]; then doctor; exit $?; fi
+if [ "$SUBCMD" = "setup" ];  then setup;  exit $?; fi
 
 # ---- orca transport helpers -----------------------------------------------------
 # Resolve the impl terminal: explicit handle > (worktree==WORKDIR + connected+writable,

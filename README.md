@@ -191,11 +191,36 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh && bash test/setup-plumbing.sh && bash test/setup-defaults.sh && bash test/setup-pboard.sh && bash test/setup-target.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
    (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
    to pin handles from). Every MISS prints the exact remediation command; it installs nothing
    and touches no network. Re-run until `0 blocking`.
+
+### Setup wizard (`./drive.sh setup`)
+
+`./drive.sh setup` is the automated form of the one-time checklist above — an fzf-driven,
+idempotent, overwrite-safe install/config wizard for the trio. It is a peer of `doctor`
+(reachable only as a `drive.sh` subcommand), and it **ends on `doctor` as the sole success
+signal**: setup never prints its own "done", so it can never report a false green. Any step
+it cannot automate prints the exact `fix:` remediation and counts as blocking.
+
+- **Headless / CI:** `SETUP_YES=1` (or `--yes` / `-y`) runs the whole wizard with no fzf /
+  no `read`; every answer resolves to its `SETUP_<KEY>` env override if set, else its default.
+  One code path serves interactive and headless, so headless is the real flow, not a fork.
+- **Skip a step:** `SETUP_DO_<STEP>=0` for any of `DEPS SOURCES SKILLS DASHBOARD PBOARD
+  DEFAULTS TARGET DOCTOR` (default `1` for each). Run a no-op dry check with
+  `SETUP_YES=1 SETUP_DO_DEPS=0 SETUP_DO_SOURCES=0 SETUP_DO_SKILLS=0 SETUP_DO_DASHBOARD=0 \
+  SETUP_DO_PBOARD=0 SETUP_DO_DEFAULTS=0 SETUP_DO_TARGET=0 SETUP_DO_DOCTOR=1 ./drive.sh setup`.
+- **Idempotent:** generated config (`drive.defaults`, a target repo's `.pipeline/roles.yaml`)
+  is rendered to memory first; if identical to the existing file it is a no-op (no write, no
+  `.bak`); if different, the prior file is copied to `<file>.bak` once, then the new one is
+  written. The `pboard()` shell block is fenced by `# >>> pipeline pboard >>>` …
+  `# <<< pipeline pboard <<<` and replaces only its own marked region.
+- **What it never does:** declare success on its own, `git reset --hard` a source repo
+  unprompted (`SETUP_REFRESH_SOURCES=0` default), or scaffold a per-feature `drive.config`
+  (that is a per-feature act — see *Per-feature flow*). After it runs, re-run `./drive.sh doctor`
+  until `0 blocking`.
 
 ## Per-feature flow
 
