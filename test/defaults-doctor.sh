@@ -109,6 +109,53 @@ if [ "$rc" -eq 0 ] && grep -q "no .pipeline/roles.yaml" <<<"$out" && grep -q "do
   ok "doctor: missing roles.yaml -> warn + full summary (no early exit)"
 else bad "doctor missing roles.yaml (rc=$rc)" "$out"; fi
 
+# --- 11-14. binding checks: TUI slot resolution + review-relay terminal ---
+ln -sf "$(command -v jq)" "$TMP/bin/jq"   # these checks pipe stub-orca JSON through REAL jq
+cat > "$TMP/bin/orca" <<'ORC'
+#!/bin/sh
+case "$2" in
+  list) printf '{"result":{"terminals":[{"handle":"term_a","title":"pipeline","worktreePath":"/x","connected":true,"writable":true},{"handle":"term_b","title":null,"worktreePath":"/y","connected":true,"writable":true}]}}\n' ;;
+esac
+exit 0
+ORC
+chmod +x "$TMP/bin/orca"
+printf 'impl:   goal-x   # test slot\n' > "$TMP/target/.pipeline/roles.yaml"
+mkdir -p "$TMP/tui"
+cat > "$TMP/defaults5" <<EOF
+PIPELINE_REPO=$TMP/pipeline
+DASHBOARD_REPO=$TMP/dashboard
+SKILLS_DIR=$TMP/skills
+IMPL_TRANSPORT=orca
+TUI_SKILLS_DIR=$TMP/tui
+EOF
+
+# 11: orca transport, slot NOT in the TUI dir -> blocking MISS with the ln -s fix
+out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
+if [ "$rc" -eq 1 ] && grep -q "not registered under $TMP/tui" <<<"$out" && grep -q "fix: ln -s" <<<"$out"; then
+  ok "doctor: orca slot missing in TUI dir -> MISS + ln -s fix"
+else bad "doctor orca TUI slot MISS (rc=$rc)" "$out"; fi
+
+# 12: slot registered (frontmatter name, dir name irrelevant) -> ok, rc=0
+mkdir -p "$TMP/tui/whatever-dir" && printf -- '---\nname: goal-x\n---\n' > "$TMP/tui/whatever-dir/SKILL.md"
+out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "resolves in the TUI agent's skill dir" <<<"$out"; then
+  ok "doctor: slot resolves by frontmatter name (dir name irrelevant)"
+else bad "doctor TUI slot ok (rc=$rc)" "$out"; fi
+
+# 13: REVIEW_TERMINAL_TITLE matches NO live terminal -> warn, non-blocking
+printf 'REVIEW_TERMINAL_TITLE=codex\n' >> "$TMP/defaults5"
+out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "NO live terminal title contains 'codex'" <<<"$out"; then
+  ok "doctor: unmatched review title -> warn (agents rename tabs)"
+else bad "doctor review title unmatched (rc=$rc)" "$out"; fi
+
+# 14: title matching exactly one live terminal -> ok
+sed -i '' 's/REVIEW_TERMINAL_TITLE=codex/REVIEW_TERMINAL_TITLE=pipeline/' "$TMP/defaults5"
+out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && grep -q "matches exactly one live terminal" <<<"$out"; then
+  ok "doctor: unique review-title match -> ok"
+else bad "doctor review title unique (rc=$rc)" "$out"; fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
