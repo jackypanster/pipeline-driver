@@ -184,6 +184,62 @@ setup_do_step() {   # <STEP> -> status 0/1: is SETUP_DO_<STEP> enabled? (default
   [ "${!v:-1}" = "1" ]
 }
 
+# ask_* seam (ADR 0003) — ONE code path serves interactive and headless. Each helper
+# resolves SETUP_<KEY> env -> caller DEFAULT (headless: SETUP_YES=1) -> fzf/read (TTY).
+# Headless mode never calls fzf or read — the path the frozen test drives — and the
+# caller's DEFAULT is the hardcoded field default (interactive "last choices" prefill
+# is a review-reads enhancement, NOT used here, so a re-run with SETUP_<KEY> unset always
+# lands the deterministic default; pinned by test/setup-defaults.sh assertion 4).
+ask_value() {   # KEY PROMPT DEFAULT -> echoes the resolved value
+  local envvar="SETUP_$1"
+  local val="${!envvar:-}"
+  local def="$3"
+  if [ -n "$val" ]; then printf '%s\n' "$val"; return; fi
+  if [ "${SETUP_YES:-0}" != "1" ]; then
+    local ans="$def"; read -e -i "$def" -p "$2: " ans || ans="$def"; def="$ans"
+  fi
+  printf '%s\n' "$def"
+}
+ask_confirm() {   # KEY PROMPT DEFAULT(0|1) -> echoes 0 or 1
+  local envvar="SETUP_$1"
+  local val="${!envvar:-}"
+  local def="$3"
+  if [ -n "$val" ]; then
+    case "$val" in 1|y|Y|yes|YES|true|on) echo 1 ;; *) echo 0 ;; esac; return
+  fi
+  if [ "${SETUP_YES:-0}" != "1" ]; then
+    local ans; read -e -i "$def" -p "$2 [y/N]: " ans || ans="$def"
+    case "${ans:-$def}" in y|Y|yes|YES|true|on|1) def=1 ;; *) def=0 ;; esac
+  fi
+  printf '%s\n' "$def"
+}
+ask_choice() {   # KEY PROMPT DEFAULT OPT... -> echoes one of the OPTs
+  local envvar="SETUP_$1"
+  local val="${!envvar:-}"
+  local def="$3"; shift 3
+  if [ -n "$val" ]; then printf '%s\n' "$val"; return; fi
+  if [ "${SETUP_YES:-0}" = "1" ]; then printf '%s\n' "$def"; return; fi
+  if command -v fzf >/dev/null 2>&1; then
+    local ans; ans=$(printf '%s\n' "$@" | fzf --prompt "$2: " --height 40% || true); printf '%s\n' "${ans:-$def}"
+  else
+    local i=1 o ans="$def"
+    for o in "$@"; do printf '%d) %s\n' "$i" "$o" >&2; i=$((i+1)); done
+    read -e -i "$def" -p "$2: " ans || ans="$def"; printf '%s\n' "$ans"
+  fi
+}
+ask_multi() {   # KEY PROMPT DEFAULT_CSV OPT... -> echoes a CSV of the chosen OPTs
+  local envvar="SETUP_$1"
+  local val="${!envvar:-}"
+  local def="$3"; shift 3
+  if [ -n "$val" ]; then printf '%s\n' "$val"; return; fi
+  if [ "${SETUP_YES:-0}" = "1" ]; then printf '%s\n' "$def"; return; fi
+  if command -v fzf >/dev/null 2>&1; then
+    printf '%s\n' "$@" | fzf --multi --prompt "$2: " --height 40% | paste -sd, - || printf '%s\n' "$def"
+  else
+    printf '%s\n' "$def"   # non-fzf multi is clumsy; the env/headless paths above cover the seam
+  fi
+}
+
 # Step functions. C1 ships them as gated no-op stubs so the wizard runs end-to-end the
 # moment a real body lands in C2/C3/C4; each is owned by its own SETUP_DO_* toggle.
 setup_preflight()       { :; }   # 1  dep probe (reuses doctor's style) + remediation
@@ -191,7 +247,54 @@ setup_sources()         { :; }   # 2  git clone / opt-in fetch+reset on the 3 so
 setup_skills()          { :; }   # 3  cp -r pipeline-* + ln -sfn per runtime (grok impl-only)
 setup_dashboard_build() { :; }   # 4a npm ci && npm run build && npm link
 setup_pboard_block()    { :; }   # 4b marker-delimited pboard() block into $SHELL_RC     (C3)
-setup_defaults()        { :; }   # 5  write $DEFAULTS from the drive.defaults template    (C2)
+setup_defaults() {                 # 5  write $DEFAULTS from the drive.defaults template (C2)
+  local out dir \
+    impl_transport impl_slash_cmd impl_model \
+    review_terminal_title review_slash_cmd yolo board_out \
+    pipeline_repo dashboard_repo skills_dir tui_skills_dir
+  # Resolve each field through the ask_* seam (SETUP_<KEY> env -> hardcoded default in
+  # headless). Defaults mirror drive.defaults.example + arch §non-interactive interface;
+  # paths stay literal ($HOME unexpanded) so the file is portable + byte-deterministic.
+  impl_transport=$(ask_value IMPL_TRANSPORT "impl transport (claude|orca)" orca)
+  impl_slash_cmd=$(ask_value IMPL_SLASH_CMD "impl slash command" /skill:pipeline-impl)
+  impl_model=$(ask_value IMPL_MODEL "impl model (claude transport)" haiku)
+  review_terminal_title=$(ask_value REVIEW_TERMINAL_TITLE "review terminal title" codex)
+  review_slash_cmd=$(ask_value REVIEW_SLASH_CMD "review slash command" '$pipeline-review')
+  yolo=$(ask_value YOLO "YOLO grant (0|1)" 0)
+  board_out=$(ask_value BOARD_OUT "board output path (empty=off)" "")
+  pipeline_repo=$(ask_value PIPELINE_REPO "pipeline repo" '$HOME/workspace/pipeline')
+  dashboard_repo=$(ask_value DASHBOARD_REPO "dashboard repo" '$HOME/workspace/pipeline-dashboard')
+  skills_dir=$(ask_value SKILLS_DIR "skills dir" '$HOME/.agents/skills')
+  tui_skills_dir=$(ask_value TUI_SKILLS_DIR "TUI skills dir" '$HOME/.pi/agent/skills')
+  # REVIEW_SLASH_CMD carries a literal '$' -> it MUST be single-quoted in the file or bash
+  # expands $pipeline to empty on source (drive.defaults.example:80). Other fields are
+  # simple values; paths keep a literal $HOME for portability. Content is deterministic
+  # (no timestamps) so the idempotency check is a plain string compare (ADR 0003).
+  out=$(printf '%s\n' \
+    "# drive.defaults - generated by drive.sh setup (idempotent; re-run freely; .bak on change)." \
+    "" \
+    "IMPL_TRANSPORT=$impl_transport" \
+    "IMPL_SLASH_CMD=$impl_slash_cmd" \
+    "IMPL_MODEL=$impl_model" \
+    "REVIEW_TERMINAL_TITLE=$review_terminal_title" \
+    "REVIEW_SLASH_CMD='$review_slash_cmd'" \
+    "YOLO=$yolo" \
+    "BOARD_OUT=$board_out" \
+    "" \
+    "PIPELINE_REPO=$pipeline_repo" \
+    "DASHBOARD_REPO=$dashboard_repo" \
+    "SKILLS_DIR=$skills_dir" \
+    "TUI_SKILLS_DIR=$tui_skills_dir")
+  dir=$(dirname "$DEFAULTS")
+  [ -d "$dir" ] || mkdir -p "$dir"
+  # Idempotent overwrite (ADR 0003): identical content -> no write, no .bak; changed ->
+  # cp existing to <file>.bak (single, overwritten each change), then write the new.
+  if [ -f "$DEFAULTS" ] && [ "$(cat "$DEFAULTS")" = "$out" ]; then
+    return 0
+  fi
+  if [ -f "$DEFAULTS" ]; then cp "$DEFAULTS" "$DEFAULTS.bak"; fi
+  printf '%s\n' "$out" > "$DEFAULTS"
+}
 setup_target()          { :; }   # 6  target .pipeline/roles.yaml (impl slot rewritten)   (C4)
 
 setup() {
