@@ -554,3 +554,87 @@ review, PR #9 updated. On success: run pipeline-review (codex) again — freeze 
 suite + semantic + HUMAN merge confirm. On failure: attempts++; card 01 already at 1, so a 2nd fail = 2,
 3rd ⇒ blocked ⇒ pipeline-hunt.
 <<< END
+
+## seq=11 · 2026-07-12T23:42:44Z · impl→review · completed · by=pi-impl
+done:   Card C1 (plumbing + cross-cutting safety hardening) GREEN on feat/drive-setup,
+        re-spec attempt 2 after review-01. Rebased the in-flight feature branch onto the
+        advanced trunk (it now carries spec-rev 59ad1d8) and force-pushed the BRANCH before
+        coding (sanctioned in-flight-branch exception; trunk untouched). Hardened the shared
+        helpers in drive.sh against all six review-01 findings in card 01's scope:
+        (2) setup_kv/setup_kvq serialize every generated drive.defaults value injection-safe
+        -- a value of shell-safe chars (alphanumerics + _./:@+$-) is emitted BARE (preserves
+        the frozen happy-path asserts AND lets a literal $HOME in the path fields expand at
+        source), and ANY other char (space/newline/quote, or $ in a non-path slot) is wrapped
+        in single quotes with every embedded ' escaped to '\'' so it can neither break the
+        assignment nor inject/execute when the file is sourced. REVIEW_SLASH_CMD is always
+        single-quoted (setup_kvq) so its literal $pipeline stays unexpanded. (3) setup_pboard
+        now guards on a BALANCED marker pair -- an unmatched opener refuses (s_miss, file left
+        untouched) instead of sed-deleting user content to EOF. (4) the rc rewrite writes to
+        the SAME inode (redirect > "$rc", never mv) so an existing 0600 rc keeps its mode and
+        owner. (5) setup() refuses a non-interactive run without --yes/SETUP_YES=1 up front
+        (prompt EOF is not consent; no file written, rc=2), and the ask_* prompts are now
+        Bash-3.2-safe (NO read -e -i; -i needs bash 4). (6) the preflight toggle is renamed
+        SETUP_DO_PREFLIGHT -> SETUP_DO_DEPS so the code matches README + the frozen tests. The
+        four external-step BODIES (preflight/sources/skills/dashboard) stay ':' no-ops -- they
+        are card 05's frozen spec, intentionally still red here.
+verify: bash -n drive.sh (clean) + bash test/setup-plumbing.sh -> passed=3 failed=0 +
+        bash test/setup-safety.sh -> passed=4 failed=0 (injection-safe / unmatched-marker
+        preserved / rc mode 0600 / non-TTY refuses). No regression: C2 setup-defaults 4/4,
+        C3 setup-pboard 3/3, C4 setup-target 3/3 all still green; the existing 8-test suite
+        PASS (run 11 / hook 29 / preflight 7 / e2e 6 / e2e-orca 10 / defaults-doctor 15 /
+        board-relay 7 / review-drive 34). setup-external stays RED (0/4) -- card 05's scope.
+output: feat/drive-setup @ 528e998 (drive.sh only this commit; spec-paths untouched -- freeze
+        gate diff 59ad1d8..HEAD -- test/ empty) · PR #9 updated · main: tasks/01.md
+        status:review + current.json stage:impl + this entry (one commit)
+--- handoff ---
+>>> NEXT
+Run pipeline-impl on a FRESH session (assume you know nothing -- rebuild from repo + CONTRACT.md).
+Card 05 is STILL status:todo (the external installer steps) -- same feat/drive-setup branch /
+PR #9 (all cards accumulate on the ONE feature branch). Do NOT route to pipeline-review yet.
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: capable-local OK (impl only) -- operator assigns the bot (pi, orca transport).
+First: git pull --rebase; no .env in this repo (skip CONTRACT step 2).
+GATE 1 (frozen spec): the feature's single spec-rev is 59ad1d8069f0f75f258b30e93ff1e6cf473515f4.
+Read test/setup-external.sh -- it IS the spec for card 05.
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md -- impl-paths + src ONLY,
+    NEVER edit spec-paths (the freeze gate is review's, vs 59ad1d8)
+  - .pipeline/drive-setup/tasks/05.md -- the NEXT and LAST todo card: external installer steps
+  - .pipeline/drive-setup/reviews/review-01.md -- finding 1 (the 4 steps were no-ops) is card 05's
+  - .pipeline/drive-setup/arch.md + CONTEXT.md + docs/adr/0002 -- honest-degrade (s_miss + non-zero,
+    never a silent no-op)
+  - drive.sh -- the 4 stubs setup_preflight/setup_sources/setup_skills/setup_dashboard_build are
+    ':' no-ops just above setup_pboard_block(); fill them in place. setup_do_step DEPS now gates
+    preflight (card 01 renamed SETUP_DO_PREFLIGHT -> SETUP_DO_DEPS); reuse the s_miss/s_step helpers.
+State of the branch: feat/drive-setup is OPEN (PR #9) with C1(hardened)+C2+C3+C4 landed.
+  git checkout feat/drive-setup && git pull --rebase origin main (picks up this metadata commit),
+  then build C5 ON TOP (same branch, same PR). Do NOT cut a new branch.
+Your task (concrete, numbered):
+  1. On feat/drive-setup, fill the 4 external step bodies (drive.sh only -- impl-paths):
+     preflight (gated by SETUP_DO_DEPS) probes git/node/npm/gh/jq/fzf/orca and honest-degrades
+     (s_miss + the exact install cmd + non-zero) on a miss; sources clones missing / (opt-in
+     SETUP_REFRESH_SOURCES=1) fetch+reset present source repos, honest-degrades on a missing
+     source; skills cp -r $SETUP_PIPELINE_REPO/skills/pipeline-* into SETUP_SKILLS_DIR (the
+     canonical copy MUST happen) then ln -sfn the SETUP_RUNTIMES (empty = canonical only);
+     dashboard npm ci && npm run build + npm link in SETUP_DASHBOARD_REPO, honest-degrade on a
+     missing repo/npm. Never a silent no-op (ADR 0002).
+  2. Run the card's verify: `bash -n drive.sh && bash test/setup-external.sh` until passed=4
+     failed=0. NEVER touch test/setup-external.sh (freeze gate). The hermetic test asserts ACT /
+     honest-degrade via remediation lines + the canonical skills copy, NOT real network/npm.
+  3. When green: push feat/drive-setup (PR #9 auto-updates); on main flip tasks/05.md
+     status:todo->review, append the journal (seq=12, impl->review completed), commit once, push.
+     At that point ALL cards (01-05) are review -> route to pipeline-review (codex): freeze gate
+     (git diff 59ad1d8..HEAD -- test/setup-*.sh empty) + full-verify (all 14 cmds) green +
+     semantic review + HUMAN merge confirm.
+Feature gotchas (card-05-specific):
+  - SETUP_DO_DEPS (NOT SETUP_DO_PREFLIGHT) gates preflight now -- card 01 renamed it. The frozen
+    test's assertion 1b explicitly checks SETUP_DO_DEPS=0 disables the step (no '--- deps' header).
+  - Honest-degrade is the ONLY success path the hermetic test can observe: it cannot run real
+    git clone / npm ci / network, so each step must emit a fix: remediation line and a non-zero
+    exit when its target is absent (ADR 0002). s_miss (defined inside setup()) increments setup_bad.
+  - skills step MUST populate the canonical SKILLS_DIR (assertion 2 greps for pipeline-impl +
+    pipeline-prd copied in) -- it is the one non-degrade assertion; the cp -r is the real action.
+Done when: card 05 verify green on feat/drive-setup + pushed + tasks/05.md -> review on main.
+Since 05 is the LAST card, that makes all 5 review -> pipeline-review (codex). On failure:
+attempts++; card 05 is at 0, so 1st fail = 1, 3rd => blocked => pipeline-hunt.
+<<< END
