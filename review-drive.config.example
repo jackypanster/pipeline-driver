@@ -1,0 +1,22 @@
+# review-drive.config — per-run config for review-drive.sh. Copy to
+# review-drive.config and edit. Sourced by bash AFTER the global defaults file
+# (~/.config/pipeline-driver/drive.defaults), so anything here wins.
+#
+# Most runs need ONLY the two terminal handles below — everything else has a
+# sane default in the script or lives in the defaults file. The PR itself is
+# the command-line argument, never config:
+#   ./review-drive.sh 42                        # PR #42 on REVIEW_REPO
+#   ./review-drive.sh https://github.com/OWNER/REPO/pull/42
+
+# Pin BOTH terminals PER RUN — handles are runtime-issued and die on app restart;
+# titles go stale (TUI agents rename their own tabs). Get them from
+# `orca terminal list --json` right before the run. The two handles must differ.
+# REVIEW_TERMINAL_HANDLE=term_...   # the reviewer TUI (e.g. codex) — same variable drive.sh's relay uses
+# FIX_TERMINAL_HANDLE=term_...      # the fixer TUI (e.g. pi)
+
+# owner/repo used when the PR argument is a bare number (URL arguments carry
+# their own repo). The sanctioned scope is the pipeline toolchain repos only.
+# REVIEW_REPO=jackypanster/pipeline
+
+# Rare per-run overrides (documented in drive.defaults.example §review-drive):
+# MAX_ROUNDS=5  HUNT_AFTER=3  REVIEW_TIMEOUT=2700  FIX_TIMEOUT=2700  POLL_SECS=30

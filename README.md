@@ -26,9 +26,15 @@ You are an agent in or around a `pipeline`-driven repo. When to reach for this d
   a cheap model and stops.
 - **Do NOT use it — or invent another scheduler — for anything else.** `prd`/`arch`/`task`/`review`/`hunt`
   are interview/semantic stages that stay human-relayed by design. The pipeline deliberately has **no
-  scheduler** (see the pipeline `DESIGN.md` rationale); this driver is the single sanctioned exception,
-  scoped to `impl`. If you are tempted to orchestrate the whole pipeline, don't — that was evaluated and
-  rejected because semantic errors compound silently between auto-advanced stages with no human read.
+  scheduler** (see the pipeline `DESIGN.md` rationale); this repo carries the only two sanctioned
+  exceptions, each a bounded span with a human read at both ends: `drive.sh` (the `impl` multi-card
+  loop) and `review-drive.sh` (the review↔fix rounds of a TOOLCHAIN-repo PR — operator policy
+  2026-07-12, see §review-drive). If you are tempted to orchestrate the whole pipeline, don't — that was
+  evaluated and rejected because semantic errors compound silently between auto-advanced stages with no
+  human read. The meta-PR loop is different in kind, not an exemption from that rationale: it is
+  ADVERSARIAL (the reviewer's job each round is to catch the fixer's errors, so nothing advances
+  unchecked), its failure mode is non-convergence, and that is bounded by the round cap, the
+  no-progress halt, and the human merge gate. It never drives the feature pipeline's `review` stage.
 - **GATE 1 is a read-then-bind gate; who reads is the operator's risk-tier call.** Default: a human
   at a terminal reads the frozen red test and echoes its `spec-rev`. Operator policy (2026-07-08):
   choosing the drive paradigm for a LOW-RISK feature (read-only/ergonomics) is itself the ex-ante
@@ -133,7 +139,9 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 
 | file | purpose |
 |------|---------|
-| `drive.sh` | the deterministic loop + the two-gate predicate |
+| `drive.sh` | the deterministic impl loop + the two-gate predicate |
+| `review-drive.sh` | the deterministic meta-PR review↔fix loop (§review-drive) |
+| `review-drive.config.example` | per-run config for it: the two terminal handles + tuning |
 | `parse-tail.awk` | journal-tail parser (ASCII-anchored; ignores the Unicode `·`/`→` separators) |
 | `settings.driver.json` | `--settings` for each driven run: merge `deny` rules + the PreToolUse hook |
 | `deny-merge.sh` | best-effort merge speed-bump (PreToolUse hook); parses the Bash command, denies direct/wrapped merge + trunk-clobber. NOT a boundary — see *Merge safety* |
@@ -148,6 +156,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
 | `test/defaults-doctor.sh` | hermetic tests for the defaults layer + `drive.sh doctor` |
 | `test/board-relay.sh` | hermetic tests for `BOARD_OUT` auto-refresh + the one-key review relay |
+| `test/review-drive.sh` | hermetic e2e for the meta-PR loop (stub `gh` + stub `orca` play GitHub/codex/pi) |
 
 ## Setup (one-time)
 
@@ -182,7 +191,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
    (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
    to pin handles from). Every MISS prints the exact remediation command; it installs nothing
@@ -232,6 +241,69 @@ codex; the review shim rebuilds all state from the journal tail per the CONTRACT
 automates the TYPING of the hand-relay, not the decision: default is N, unconfigured =
 silent no-op, and it is NOT a review scheduler — the halt still fires, the review stage
 and the GATE 2 human merge confirm are untouched.
+
+## review-drive.sh — the meta-PR review↔fix loop
+
+The 8-round review of pipeline PR #39 was relayed by hand: each codex verdict pasted to
+the fixer, each fix pasted back for re-review. `review-drive.sh` automates exactly that
+shuttle for **toolchain-repo PRs** (the `pipeline` repo + siblings — `pipeline-improve`'s
+gated-PR lane) and nothing else. It never merges, never approves via GitHub reviews, and
+never drives the feature pipeline's `review` stage (that gate, including the human merge
+confirm, stays human-relayed by design — see *For agents*).
+
+```
+            ┌──────────────────────────────┐
+            │   the GitHub PR (state bus)  │
+            │  head SHA · comments · state │
+            └───────▲──────────▲───────────┘
+      gh read+post  │          │  gh read · push · evidence comment
+        ┌───────────┴──┐    ┌──┴───────────┐
+        │ reviewer TUI │    │  fixer TUI   │
+        │   (codex)    │    │    (pi)      │
+        └───────▲──────┘    └──────▲───────┘
+   orca send    │                  │   orca send
+   "review PR#N │                  │  "PR#N head X rejected —
+    at head X"  └ review-drive.sh ─┘   read the review via gh, fix"
+                 (deterministic bash: polls gh, types one-line
+                  dispatches, counts rounds — never forwards text)
+```
+
+Same iron rules as `drive.sh`: deterministic bash, forbidden to be smart, zero local
+state (kill+restart safe — it re-reads the PR), and TUI screen text is never a
+completion signal. The two TUIs never talk to each other and the driver never forwards
+review TEXT — each side reads the PR itself via `gh`; orca only types a one-line
+dispatch (a pointer: PR URL + head SHA + comment URL). Verdicts travel as
+machine-readable protocol lines in plain PR comments — `verdict:` / `reviewed-head:` /
+`findings:` from the reviewer, `fixed: <sha>` from the fixer — because both sides share
+one GitHub account, which cannot approve/request-changes on its own PR. The
+`reviewed-head` echo is load-bearing (same family as the spec-rev echo): a verdict
+about any other head halts the loop instead of advancing it.
+
+Per round: dispatch the review → poll `gh` until a verdict comment lands on the CURRENT
+head (new comments are detected by a comment-INDEX baseline, immune to local↔GitHub
+clock skew) → `approved` halts for YOUR merge → otherwise dispatch the fix → poll until
+the head advances **fast-forward** (a diverged compare = force-push/rebase = halt) AND a
+`fixed:` evidence comment lands → next round. Convergence guards, all deterministic:
+
+- `MAX_ROUNDS=5` — pipeline PR #39 needed 8 rounds WITH a human curating each one and a
+  mid-course strategy pivot; an unattended loop past ~5 is more likely ping-pong or
+  reviewer scope-growth than progress, and a PR that genuinely needs more deserves a
+  human read mid-way. Early halt is information, not friction.
+- no-progress halt — `findings:` failed to decrease for 2 consecutive reviews. Biased
+  fail-closed on purpose: a genuinely-deepening review (PR #39 rounds 7→8) also trips
+  it, and that too is a moment a human should look.
+- `HUNT_AFTER=3` — from that fix dispatch on, the fix prompt switches to root-cause
+  mode (reproduce + confirm cause + state the restored invariant before patching): the
+  move that actually closed PR #39.
+
+Every halt prints a per-round digest (verdict, findings count, head, comment URL) — the
+PR thread is the only memory, so the human enters with full context. The full halt
+table lives in stop-points.md §review-drive.
+
+Run: pin the two handles in `review-drive.config` (copy the example; the reviewer
+terminal shares `REVIEW_TERMINAL_HANDLE` with the one-key relay), then
+`./review-drive.sh <pr-number-or-url>` and type the PR number at the start gate.
+Deps: `gh` (authed), `jq`, `orca`, both TUIs live in Orca terminals.
 
 ## Failure / resume / rollback
 

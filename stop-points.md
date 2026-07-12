@@ -1,9 +1,10 @@
-# Stop points — exactly where the driver yields to a human
+# Stop points — exactly where the drivers yield to a human
 
-The driver auto-advances **one** thing: the `pipeline-impl` multi-card loop. Every
+`drive.sh` auto-advances **one** thing: the `pipeline-impl` multi-card loop. Every
 other position is a HALT. These stops are **enumerable from the contract's state
 machine**, not a vibes-based "am I confused?" judgment. This file is both the
 driver's halt specification and a checklist for a human relaying by hand.
+(`review-drive.sh`, the meta-PR loop, has its own halt table at the end.)
 
 ## The halt predicate (the whole brain)
 
@@ -52,3 +53,27 @@ CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  FROM != review  AND  L
    plus you performing the merge; everything else (trunk rulesets, the `permissions.deny`
    rules, the `deny-merge.sh` hook) is hardening, not a boundary. Normative merge-safety
    model: README §Merge safety.
+
+## review-drive.sh — the meta-PR loop's halt table
+
+`review-drive.sh` auto-advances **one** other thing: the review↔fix rounds of a single
+TOOLCHAIN-repo PR (README §review-drive). It starts behind its own gate (type the PR
+number after reading the banner) and every exit is one of these:
+
+| event | meaning | run next (human) |
+|-------|---------|------------------|
+| `verdict: approved` | the reviewer signed off | read the PR, **merge it yourself** (the loop never merges); then `pipeline-update` |
+| round cap (`MAX_ROUNDS`, default 5) | review N still requests changes | read the digest + thread; continue by hand or re-run for another window |
+| no progress: `findings:` did not decrease for 2 consecutive reviews | ping-pong or scope growth | read the last two reviews, decide the direction |
+| no verdict comment within `REVIEW_TIMEOUT` | reviewer TUI stalled or stopped posting to the PR (the loop is blind to TUI text by design) | inspect the reviewer terminal (tail printed) |
+| no pushed fix + `fixed:` comment within `FIX_TIMEOUT` | fixer TUI stalled, or pushed without evidence | inspect the fixer terminal (tail printed) |
+| `reviewed-head` echo ≠ the round's head | stale or misdirected review | read the mismatched comment first |
+| head moved during a review round | someone else is pushing to the PR | find out who; re-run when quiet |
+| head history rewritten during a fix (compare ≠ fast-forward) | force-push/rebase | fresh human read of the branch, then restart |
+| PR merged / closed / conflicts with base mid-loop | a human-level event outside the loop | act on the PR itself |
+| reviewer and fixer resolve to the same terminal / unresolvable terminal | config error | pin two distinct live handles |
+
+Protocol lines (why comments, not GitHub reviews: one account cannot
+approve/request-changes on its own PR): reviewer comments carry `verdict:` +
+`reviewed-head:` + `findings:`; fixer comments carry `fixed: <sha>`. All parsing is
+grep/jq-deterministic — no LLM in the scheduler.
