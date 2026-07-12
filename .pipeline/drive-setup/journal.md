@@ -462,3 +462,41 @@ Do not merge PR #9. Read `.pipeline/drive-setup/reviews/review-01.md`; the seman
 review found blocking completeness and safety issues despite a clean freeze and green suite.
 The rejection disposition and actionable re-spec handoff follow in the next journal entry.
 <<< END
+
+## seq=9 · 2026-07-12T16:25:17Z · review→task · failed · by=codex-review
+done:   Semantic review rejected PR #9; card 01 attempts incremented to 1 and status reset to todo.
+        Existing frozen tests are too narrow and no card owns PRD steps 1–4a, so task must re-spec.
+output: .pipeline/drive-setup/reviews/review-01.md, .pipeline/drive-setup/tasks/01.md
+--- handoff ---
+>>> NEXT
+Run pipeline-task on a FRESH session (assume you know nothing — rebuild from git + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: frontier SOTA required — operator assigns the bot; the pipeline cannot verify the model.
+First: git pull --rebase; no repo-local dotenv file was present during review.
+Read for context (before acting):
+  - /Users/user/workspace/pipeline/CONTRACT.md — normative protocol, especially whole-feature
+    two-commit re-freeze and append-card status preservation
+  - .pipeline/current.json — feature=drive-setup; stage=task; exact full-verify command
+  - .pipeline/drive-setup/reviews/review-01.md — blocking findings and probe evidence
+  - .pipeline/drive-setup/PRD.md + arch.md + CONTEXT.md + docs/adr/0002* + 0003*
+  - .pipeline/drive-setup/tasks/01.md — named retry target (todo, attempts=1)
+  - .pipeline/drive-setup/tasks/02.md,03.md,04.md — preserve their review/0 state
+Your task (concrete, numbered):
+  1. Repair the task decomposition: assign PRD steps 1–4a (preflight/remediation, sources,
+     skills/symlinks, dashboard build/link) to explicit implementation card coverage; append card(s)
+     if needed rather than leaving review-read requirements ownerless.
+  2. Add frozen hermetic regressions for safe shell serialization (spaces/quotes/newlines), balanced
+     pboard markers + rc mode preservation, non-TTY/macOS-Bash prompt failure, and the DEPS toggle.
+     Tests may assert command construction/dry-run seams without performing real network/package work.
+  3. Re-freeze ALL feature tests in one new freeze commit; update EVERY card to the same new spec-rev
+     in the record commit. Preserve existing status/attempts/verify/impl-paths except the named re-spec
+     target and newly appended cards, per CONTRACT. Prove the new tests compile and fail before impl.
+  4. Handoff to pipeline-impl with an explicit instruction to rebase feat/drive-setup onto advanced
+     main and force-push that in-flight feature branch before coding; never force-push main.
+Feature gotchas:
+  - The old spec-rev 4ac12ec is now inadequate; partial re-freeze would recreate false freeze failures.
+  - PR head 4fe87f8 already passes the old full suite, so new tests must fail for the reviewed defects.
+  - Do not edit product code in task; task owns spec-paths/cards only.
+Done when: one new shared spec-rev covers every card, red tests prove the reviewed gaps, and an
+actionable todo card routes to pipeline-impl. On task failure: attempts++; >=3 => pipeline-hunt.
+<<< END
