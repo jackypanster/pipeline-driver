@@ -249,10 +249,111 @@ ask_multi() {   # KEY PROMPT DEFAULT_CSV OPT... -> echoes a CSV of the chosen OP
 
 # Step functions. C1 ships them as gated no-op stubs so the wizard runs end-to-end the
 # moment a real body lands in C2/C3/C4; each is owned by its own SETUP_DO_* toggle.
-setup_preflight()       { :; }   # 1  dep probe (reuses doctor's style) + remediation
-setup_sources()         { :; }   # 2  git clone / opt-in fetch+reset on the 3 source repos
-setup_skills()          { :; }   # 3  cp -r pipeline-* + ln -sfn per runtime (grok impl-only)
-setup_dashboard_build() { :; }   # 4a npm ci && npm run build && npm link
+setup_preflight() {                 # 1  dep probe (mirrors doctor's deps) + remediation
+  # Probes the wizard's system deps; a missing one honest-degrades (s_miss + the EXACT
+  # install cmd). setup_bad accumulates and setup() returns non-zero if any dep is missing.
+  # The public toggle is SETUP_DO_DEPS (review-01 finding 6) — setup() gates this step on
+  # it. s_miss is inherited from setup() via dynamic scope (same as setup_pboard_block).
+  _dep() {   # <name> <install-hint> — ok on PATH, else s_miss
+    if command -v "$1" >/dev/null 2>&1; then printf 'ok    %s on PATH\n' "$1"
+    else s_miss "$1 not on PATH" "$2"; fi
+  }
+  _dep git  "install git (xcode-select --install / your package manager)"
+  _dep node "install node (brew install node) — dashboard rendering needs it"
+  _dep npm  "install npm (ships with node) — dashboard build needs it"
+  _dep gh   "brew install gh — trunk-protection preflight + PR review degrade"
+  _dep jq   "brew install jq — orca transport + terminal listing need it"
+  _dep fzf  "brew install fzf — the interactive wizard needs it (or run with --yes)"
+  case "${IMPL_TRANSPORT:-claude}" in
+    orca)   _dep orca   "install the Orca CLI — IMPL_TRANSPORT=orca" ;;
+    claude) _dep claude "install Claude Code — IMPL_TRANSPORT=claude" ;;
+  esac
+}
+setup_sources() {                   # 2  git clone missing / opt-in fetch+reset (ADR 0002)
+  # Missing source repo ⇒ s_miss with the clone cmd (never a silent no-op). An EXISTING
+  # repo is left UNTOUCHED unless SETUP_REFRESH_SOURCES=1 (opt-in fetch + reset --hard,
+  # the README's "never git reset --hard unprompted" promise). Repo paths resolve through
+  # the ask_* seam like every other step (one code path — ADR 0003).
+  local pipe dash refresh
+  pipe=$(ask_value PIPELINE_REPO "pipeline repo" "$PIPELINE_REPO")
+  dash=$(ask_value DASHBOARD_REPO "dashboard repo" "$DASHBOARD_REPO")
+  refresh="${SETUP_REFRESH_SOURCES:-0}"
+  _src() {   # <path> <clone-url> <name> <env-var>
+    local p="$1" url="$2" name="$3" envvar="$4"
+    if [ -d "$p/.git" ]; then
+      if [ "$refresh" = "1" ]; then
+        if git -C "$p" fetch origin && git -C "$p" reset --hard origin/HEAD; then :
+        else s_miss "refresh $name repo" "git -C $p fetch origin && git -C $p reset --hard origin/HEAD"; fi
+      fi
+    else
+      s_miss "$name repo not found at $p" "git clone $url $p   # or set $envvar"
+    fi
+  }
+  _src "$pipe" "https://github.com/jackypanster/pipeline.git"           "pipeline"  "SETUP_PIPELINE_REPO"
+  _src "$dash" "https://github.com/jackypanster/pipeline-dashboard.git" "dashboard" "SETUP_DASHBOARD_REPO"
+}
+setup_skills() {                    # 3  cp -r pipeline-* into $SKILLS_DIR + ln -sfn per runtime
+  # The canonical copy (cp -r pipeline-* into $SKILLS_DIR) is the ONE non-degrade action —
+  # it MUST happen (pinned by test/setup-external.sh assertion 2). Then each runtime named
+  # in SETUP_RUNTIMES (CSV; empty = canonical copy only) is attached via ln -sfn. The grok
+  # impl-only path selection is a review-reads enhancement (arch §Resolved assumptions).
+  local src dst rt dir sk
+  src=$(ask_value PIPELINE_REPO "pipeline repo (skills source)" "$PIPELINE_REPO")
+  dst=$(ask_value SKILLS_DIR "canonical skills dir" "$SKILLS_DIR")
+  if [ ! -d "$src/skills" ] || ! ls "$src/skills/"pipeline-* >/dev/null 2>&1; then
+    s_miss "skills source" "no pipeline-* skills in $src/skills/ (set SETUP_PIPELINE_REPO to the pipeline repo)"
+    return 0
+  fi
+  if ! mkdir -p "$dst"; then
+    s_miss "skills dir" "could not create $dst (mkdir -p $dst)"
+    return 0
+  fi
+  # Canonical copy — never a silent no-op (ADR 0002). The unquoted pipeline-* glob expands
+  # to every pipeline-* skill dir the source repo ships; guarded so a cp failure degrades.
+  if cp -r "$src/skills/"pipeline-* "$dst"/; then :
+  else s_miss "skills copy" "cp -r $src/skills/pipeline-* $dst/"; fi
+  # Attach each named runtime (SETUP_RUNTIMES CSV; empty ⇒ canonical copy only).
+  for rt in ${SETUP_RUNTIMES//,/ }; do
+    [ -n "$rt" ] || continue
+    case "$rt" in
+      pi|orca) dir="${TUI_SKILLS_DIR:-$HOME/.pi/agent/skills}" ;;
+      claude)  dir="$HOME/.claude/skills" ;;
+      codex)   dir="$HOME/.codex/skills" ;;
+      *) s_miss "skills attach ($rt)" "unknown runtime '$rt' — ln -sfn $dst/pipeline-* into its skills dir"; continue ;;
+    esac
+    if ! mkdir -p "$dir" 2>/dev/null; then
+      s_miss "skills attach ($rt)" "cannot create $dir — ln -sfn $dst/pipeline-* $dir/"
+      continue
+    fi
+    for sk in "$dst/"pipeline-*; do
+      [ -e "$sk" ] || continue
+      if ! ln -sfn "$sk" "$dir/$(basename "$sk")" 2>/dev/null; then
+        s_miss "skills attach ($rt)" "ln -sfn $sk $dir/$(basename "$sk")"
+      fi
+    done
+  done
+}
+setup_dashboard_build() {           # 4a npm ci && npm run build && npm link (ADR 0002)
+  # Absent repo or missing npm ⇒ s_miss with the build cmd (never a silent no-op). A real
+  # build runs npm ci && npm run build (and npm link unless DASHBOARD_LINK=0); a failure
+  # degrades with the exact command rather than faking success.
+  local dash
+  dash=$(ask_value DASHBOARD_REPO "dashboard repo" "$DASHBOARD_REPO")
+  if [ ! -d "$dash" ]; then
+    s_miss "dashboard repo not found at $dash" "git clone https://github.com/jackypanster/pipeline-dashboard.git $dash   # then re-run setup"
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    s_miss "npm not on PATH" "install node+npm, then: (cd $dash && npm ci && npm run build && npm link)"
+    return 0
+  fi
+  if ( cd "$dash" && npm ci && npm run build ); then :
+  else s_miss "dashboard build failed" "(cd $dash && npm ci && npm run build)"; fi
+  if [ "${DASHBOARD_LINK:-1}" = "1" ]; then
+    if ( cd "$dash" && npm link ); then :
+    else s_miss "dashboard npm link failed" "(cd $dash && npm link)"; fi
+  fi
+}
 setup_pboard_block() {              # 4b marker-delimited pboard() block into $SHELL_RC (C3)
   local rc="${SETUP_SHELL_RC:-$HOME/.zshrc}" body="" opens=0 closes=0
   mkdir -p "$(dirname "$rc")"
