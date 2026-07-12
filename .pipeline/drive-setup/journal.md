@@ -450,3 +450,15 @@ current.json.stage per the CONTRACT only after the merge lands (the driver/impl 
 On failure (freeze dirty / full-verify red / semantic reject): per CONTRACT review-reject — do NOT
 merge; report the gate that failed and the exact remediation.
 <<< END
+
+## seq=8 · 2026-07-12T16:24:49Z · impl→review · completed · by=codex-review
+done:   review verdict written; awaiting human confirm
+        Freeze gate empty; all cards review; exact full-verify green on PR head 4fe87f8.
+        Semantic verdict is changes-requested; disposition follows in the next entry.
+output: .pipeline/drive-setup/reviews/review-01.md
+--- handoff ---
+>>> NEXT
+Do not merge PR #9. Read `.pipeline/drive-setup/reviews/review-01.md`; the semantic
+review found blocking completeness and safety issues despite a clean freeze and green suite.
+The rejection disposition and actionable re-spec handoff follow in the next journal entry.
+<<< END
