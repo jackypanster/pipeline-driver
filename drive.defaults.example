@@ -60,6 +60,8 @@ YOLO=0
 # only stable tuning belongs here.
 # FIX_TERMINAL_TITLE=pi        # title fallback only — pin the HANDLE per run
 # REVIEW_REPO=jackypanster/pipeline   # repo for bare-number PR arguments
+# REVIEW_REPO_RE='^jackypanster/pipeline(-driver|-dashboard|-dispatch)?$'  # ENFORCED scope
+# PROTOCOL_AUTHOR=             # protocol-comment identity; default: the gh-authenticated login
 # MAX_ROUNDS=5                 # hard cap on review rounds (PR #39 took 8 WITH a human curating)
 # HUNT_AFTER=3                 # fix dispatch >= this switches to the root-cause template
 # REVIEW_TIMEOUT=2700          # max seconds to wait for one verdict comment

@@ -62,18 +62,25 @@ number after reading the banner) and every exit is one of these:
 
 | event | meaning | run next (human) |
 |-------|---------|------------------|
-| `verdict: approved` | the reviewer signed off | read the PR, **merge it yourself** (the loop never merges); then `pipeline-update` |
-| round cap (`MAX_ROUNDS`, default 5) | review N still requests changes | read the digest + thread; continue by hand or re-run for another window |
-| no progress: `findings:` did not decrease for 2 consecutive reviews | ping-pong or scope growth | read the last two reviews, decide the direction |
-| no verdict comment within `REVIEW_TIMEOUT` | reviewer TUI stalled or stopped posting to the PR (the loop is blind to TUI text by design) | inspect the reviewer terminal (tail printed) |
-| no pushed fix + `fixed:` comment within `FIX_TIMEOUT` | fixer TUI stalled, or pushed without evidence | inspect the fixer terminal (tail printed) |
+| `verdict: approved` | the reviewer signed off | read the PR, then perform the **operator merge** (the loop merges nothing; toolchain-PR merge authority is the operator's, as in `pipeline-improve`); then `pipeline-update` |
+| thread already ends in `verdict: approved` at start | a resumed run has nothing to drive | same operator merge gate |
+| round cap (`MAX_ROUNDS`, default 5) — live or already consumed by the resumed thread | review N still requests changes; a restart cannot mint a fresh budget | read the digest + thread; continue by hand or re-run for another window |
+| no progress: `findings:` did not **provably** decrease for 2 consecutive reviews (a missing/unparseable count counts as no progress) | ping-pong, scope growth, or protocol drift | read the last two reviews, decide the direction |
+| no verdict comment within `REVIEW_TIMEOUT` | reviewer TUI stalled or stopped posting to the PR (the loop is blind to TUI text by design; unauthenticated comments are inert) | inspect the reviewer terminal (tail printed) |
+| no pushed fix + `fixed:` comment within `FIX_TIMEOUT` | fixer TUI stalled, pushed without evidence, or its `fixed:` echo never matched the live head | inspect the fixer terminal (tail printed) |
 | `reviewed-head` echo ≠ the round's head | stale or misdirected review | read the mismatched comment first |
 | head moved during a review round | someone else is pushing to the PR | find out who; re-run when quiet |
+| base moved during a review round | the verdict would bind a stale merge-base | re-run when the repo is quiet; the next round reviews against the new base |
 | head history rewritten during a fix (compare ≠ fast-forward) | force-push/rebase | fresh human read of the branch, then restart |
 | PR merged / closed / conflicts with base mid-loop | a human-level event outside the loop | act on the PR itself |
+| PR's repo outside `REVIEW_REPO_RE`, or a fork (cross-repository) PR | outside the sanctioned toolchain scope — refused at preflight, nothing dispatched | feature work goes through the 5-stage pipeline; fork PRs are reviewed by hand |
 | reviewer and fixer resolve to the same terminal / unresolvable terminal | config error | pin two distinct live handles |
 
 Protocol lines (why comments, not GitHub reviews: one account cannot
 approve/request-changes on its own PR): reviewer comments carry `verdict:` +
-`reviewed-head:` + `findings:`; fixer comments carry `fixed: <sha>`. All parsing is
-grep/jq-deterministic — no LLM in the scheduler.
+`reviewed-head:` + `findings:`; fixer comments carry `fixed: <sha>`, which must echo
+the live head to be accepted. Only comments authored by the gh-authenticated login
+(override: `PROTOCOL_AUTHOR`) parse as protocol — anyone else's comment is inert
+text, silently ignored rather than a halt. All parsing is grep/jq-deterministic — no
+LLM in the scheduler. Restart resumes: rounds, findings history and the digest are
+rebuilt from the thread's authenticated verdict comments.

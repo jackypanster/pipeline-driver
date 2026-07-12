@@ -246,10 +246,18 @@ and the GATE 2 human merge confirm are untouched.
 
 The 8-round review of pipeline PR #39 was relayed by hand: each codex verdict pasted to
 the fixer, each fix pasted back for re-review. `review-drive.sh` automates exactly that
-shuttle for **toolchain-repo PRs** (the `pipeline` repo + siblings — `pipeline-improve`'s
-gated-PR lane) and nothing else. It never merges, never approves via GitHub reviews, and
-never drives the feature pipeline's `review` stage (that gate, including the human merge
-confirm, stays human-relayed by design — see *For agents*).
+shuttle for **toolchain-repo PRs** and nothing else — enforced in code, not just
+documented: the PR's repo must match `REVIEW_REPO_RE` (default: `jackypanster/pipeline`
+and the `-driver`/`-dashboard`/`-dispatch` siblings) and fork (cross-repository) PRs are
+refused at preflight. The lane it serves is the operator's **gated-PR convention** on
+those repos — topic branch → PR → independent bot review → operator merge — of which
+`pipeline-improve` is the pipeline-repo instance; the siblings run the same convention
+for their own PRs (this repo's entire PR history included). It never merges, never
+approves via GitHub reviews, and never drives the feature pipeline's `review` stage:
+CONTRACT.md's "only `pipeline-review` merges" governs the `feat/<feature>` squash-merge
+inside a target repo's 5-stage state machine and is untouched here — toolchain repos
+have no `.pipeline/`, and their merge authority is (and stays) the operator's explicit
+act (see *For agents*).
 
 ```
             ┌──────────────────────────────┐
@@ -269,15 +277,23 @@ confirm, stays human-relayed by design — see *For agents*).
 ```
 
 Same iron rules as `drive.sh`: deterministic bash, forbidden to be smart, zero local
-state (kill+restart safe — it re-reads the PR), and TUI screen text is never a
-completion signal. The two TUIs never talk to each other and the driver never forwards
+state, and TUI screen text is never a completion signal. Kill+restart **resumes**
+rather than resets: prior rounds, the findings history and the per-round digest are
+rebuilt from the thread's verdict comments, so a restart cannot mint a fresh round
+budget. The two TUIs never talk to each other and the driver never forwards
 review TEXT — each side reads the PR itself via `gh`; orca only types a one-line
 dispatch (a pointer: PR URL + head SHA + comment URL). Verdicts travel as
 machine-readable protocol lines in plain PR comments — `verdict:` / `reviewed-head:` /
 `findings:` from the reviewer, `fixed: <sha>` from the fixer — because both sides share
-one GitHub account, which cannot approve/request-changes on its own PR. The
-`reviewed-head` echo is load-bearing (same family as the spec-rev echo): a verdict
-about any other head halts the loop instead of advancing it.
+one GitHub account, which cannot approve/request-changes on its own PR. Protocol
+comments are **authenticated**: only comments authored by the gh-authenticated login
+(override: `PROTOCOL_AUTHOR`) parse as protocol, so a drive-by `verdict: approved` from
+any other account is inert text. The `reviewed-head` echo is load-bearing (same family
+as the spec-rev echo): a verdict about any other head halts the loop instead of
+advancing it. The `fixed:` echo is equally load-bearing — a fix is accepted only when
+its echoed sha IS the live head. And each review round pins the **base OID** it
+dispatched against: a base that moves mid-review halts the round, so a verdict can
+never silently bind a stale merge-base.
 
 Per round: dispatch the review → poll `gh` until a verdict comment lands on the CURRENT
 head (new comments are detected by a comment-INDEX baseline, immune to local↔GitHub
@@ -289,9 +305,11 @@ the head advances **fast-forward** (a diverged compare = force-push/rebase = hal
   mid-course strategy pivot; an unattended loop past ~5 is more likely ping-pong or
   reviewer scope-growth than progress, and a PR that genuinely needs more deserves a
   human read mid-way. Early halt is information, not friction.
-- no-progress halt — `findings:` failed to decrease for 2 consecutive reviews. Biased
-  fail-closed on purpose: a genuinely-deepening review (PR #39 rounds 7→8) also trips
-  it, and that too is a moment a human should look.
+- no-progress halt — `findings:` failed to **provably** decrease for 2 consecutive
+  reviews; a missing or unparseable count also counts as no progress, so protocol
+  drift cannot smuggle convergence. Biased fail-closed on purpose: a
+  genuinely-deepening review (PR #39 rounds 7→8) also trips it, and that too is a
+  moment a human should look.
 - `HUNT_AFTER=3` — from that fix dispatch on, the fix prompt switches to root-cause
   mode (reproduce + confirm cause + state the restored invariant before patching): the
   move that actually closed PR #39.
@@ -299,6 +317,13 @@ the head advances **fast-forward** (a diverged compare = force-push/rebase = hal
 Every halt prints a per-round digest (verdict, findings count, head, comment URL) — the
 PR thread is the only memory, so the human enters with full context. The full halt
 table lives in stop-points.md §review-drive.
+
+**Merge safety, precisely** (same posture as §Merge safety above): the durable gate is
+control flow — the loop contains no merge call, `approved` halts for the operator, and
+a PR merged/closed behind its back halts on detection. The dispatch prompts forbid
+merging, but a prompt is a speed-bump, not a boundary: the TUI agents run under the
+operator's own `gh` auth, so the hard lines remain the trunk rulesets (§Setup step 5)
+and the operator reading the PR before performing the merge.
 
 Run: pin the two handles in `review-drive.config` (copy the example; the reviewer
 terminal shares `REVIEW_TERMINAL_HANDLE` with the one-key relay), then

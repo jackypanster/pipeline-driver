@@ -26,12 +26,23 @@
 #   fixer comment:      fixed: <new head sha>
 #                       ...then per-finding evidence
 #
+# Protocol comments are AUTHENTICATED: only comments authored by the
+# gh-authenticated login (override: PROTOCOL_AUTHOR) are parsed as protocol —
+# anyone else's comment is inert text, so a drive-by "verdict: approved" cannot
+# steer the loop. The scope is ENFORCED, not just documented: the PR's repo must
+# match REVIEW_REPO_RE (default: the pipeline toolchain repos) and fork
+# (cross-repository) PRs are refused at preflight.
+#
 # The TUIs never talk to each other and the driver never forwards review TEXT —
 # each side reads the PR itself via gh; orca only types the dispatch line
 # (medium is git, per the operator's SOP). Completion signals are PR facts:
 # a new protocol comment (scanned by comment-INDEX baseline, immune to clock skew
-# between this machine and GitHub) and an advanced head SHA whose history still
-# CONTAINS the reviewed head (a diverged compare = force-push/rebase = halt).
+# between this machine and GitHub), an advanced head SHA whose history still
+# CONTAINS the reviewed head (a diverged compare = force-push/rebase = halt) and
+# whose value the fixer's `fixed:` line must echo, and a base OID pinned per
+# review round (a moved base = the verdict binds a stale merge-base = halt).
+# Kill+restart RESUMES: prior rounds, the findings history and the digest are
+# rebuilt from the PR thread itself, so a restart cannot mint a fresh round budget.
 #
 # HALT PREDICATE (the whole brain — halt table: stop-points.md §review-drive):
 #     CONTINUE iff verdict == changes-requested AND round < MAX_ROUNDS
@@ -67,6 +78,9 @@ DEFAULTS="${DRIVE_DEFAULTS:-${XDG_CONFIG_HOME:-$HOME/.config}/pipeline-driver/dr
 
 # ---- config defaults ------------------------------------------------------------
 REVIEW_REPO="${REVIEW_REPO:-jackypanster/pipeline}"  # owner/repo for a bare PR number
+# The sanctioned scope, enforced at preflight: the PR's owner/repo must match this ERE.
+REVIEW_REPO_RE="${REVIEW_REPO_RE:-^jackypanster/pipeline(-driver|-dashboard|-dispatch)?$}"
+PROTOCOL_AUTHOR="${PROTOCOL_AUTHOR:-}"  # login whose comments carry protocol; default: the gh-authenticated user
 MAX_ROUNDS="${MAX_ROUNDS:-5}"          # hard cap on REVIEW rounds (so at most MAX_ROUNDS-1 fixes)
 HUNT_AFTER="${HUNT_AFTER:-3}"          # fix dispatch >= this switches to the root-cause template
 REVIEW_TIMEOUT="${REVIEW_TIMEOUT:-2700}"   # max seconds to wait for one verdict comment
@@ -87,9 +101,15 @@ case "$PR_ARG" in
   *) REPO_SLUG="$REVIEW_REPO"; PR="$PR_ARG" ;;
 esac
 [ -n "$PR" ] || { echo "review-drive: cannot parse a PR number from: $PR_ARG" >&2; exit 2; }
+printf '%s' "$REPO_SLUG" | grep -Eq "$REVIEW_REPO_RE" || {
+  echo "review-drive: $REPO_SLUG is outside the sanctioned toolchain scope (REVIEW_REPO_RE=$REVIEW_REPO_RE)" >&2
+  echo "              feature work goes through the 5-stage pipeline, never this loop" >&2
+  exit 2
+}
 PR_URL="https://github.com/$REPO_SLUG/pull/$PR"
 
 note() { printf '%s\n' "$*" >&2; }
+is_num() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 DIGEST=""   # one row per review round, printed on every halt
 
 halt() { # <reason> <what-the-human-should-run-next> [exit-code]
@@ -103,18 +123,22 @@ halt() { # <reason> <what-the-human-should-run-next> [exit-code]
 
 # ---- gh/jq helpers (the PR is the only state bus) ----------------------------------
 pr_snap() {   # one JSON snapshot; empty output on a transient gh failure (caller keeps polling)
-  gh pr view "$PR" -R "$REPO_SLUG" --json state,mergeable,headRefOid,headRefName,baseRefName,title,comments 2>/dev/null || true
+  gh pr view "$PR" -R "$REPO_SLUG" --json state,mergeable,headRefOid,headRefName,baseRefName,baseRefOid,isCrossRepository,title,comments 2>/dev/null || true
 }
 snap_field() { printf '%s' "$1" | jq -r ".$2"; }
 comment_count() { printf '%s' "$1" | jq -r '.comments | length'; }
 
-# Last comment at index >= $2 whose body carries a line-leading "verdict:" protocol
-# line. TSV: verdict, reviewed-head (or "none"), findings (or "-"), url. Empty if
-# none. NOTE jq regexes anchor ^ to the STRING start only (its "m" flag is dotall,
+# Protocol scans are AUTHENTICATED: only comments authored by $WHO count — any
+# other author's "verdict:"/"fixed:" line is inert text, never a signal.
+# NOTE jq regexes anchor ^ to the STRING start only (its "m" flag is dotall,
 # not multiline anchors) — line-leading is spelled (?:^|\n) throughout.
+
+# Last authenticated comment at index >= $2 with a "verdict:" protocol line.
+# TSV: verdict, reviewed-head (or "none"), findings (or "-"), url. Empty if none.
 scan_verdict() {
-  printf '%s' "$1" | jq -r --argjson idx "$2" '
+  printf '%s' "$1" | jq -r --argjson idx "$2" --arg who "$WHO" '
     .comments[$idx:]
+    | map(select((.author.login // "") == $who))
     | map(select(.body | test("(?:^|\\n)verdict: *(approved|changes-requested)")))
     | last // empty
     | [ (.body | capture("(?:^|\\n)verdict: *(?<v>approved|changes-requested)").v),
@@ -123,10 +147,25 @@ scan_verdict() {
         .url ]
     | @tsv'
 }
-# Last comment at index >= $2 whose body carries a line-leading "fixed:" line. TSV: sha, url.
+# EVERY authenticated verdict comment on the thread (index 0), one TSV row each —
+# the resume path rebuilds round count, findings history and the digest from this.
+scan_all_verdicts() {
+  printf '%s' "$1" | jq -r --arg who "$WHO" '
+    .comments
+    | map(select((.author.login // "") == $who))
+    | map(select(.body | test("(?:^|\\n)verdict: *(approved|changes-requested)")))
+    | .[]
+    | [ (.body | capture("(?:^|\\n)verdict: *(?<v>approved|changes-requested)").v),
+        ((.body | capture("(?:^|\\n)reviewed-head: *(?<h>[0-9a-fA-F]{6,40})").h) // "none"),
+        ((.body | capture("(?:^|\\n)findings: *(?<n>[0-9]+)").n) // "-"),
+        .url ]
+    | @tsv'
+}
+# Last authenticated comment at index >= $2 with a "fixed:" line. TSV: sha, url.
 scan_fixed() {
-  printf '%s' "$1" | jq -r --argjson idx "$2" '
+  printf '%s' "$1" | jq -r --argjson idx "$2" --arg who "$WHO" '
     .comments[$idx:]
+    | map(select((.author.login // "") == $who))
     | map(select(.body | test("(?:^|\\n)fixed: *[0-9a-fA-F]{6,40}")))
     | last // empty
     | [ ((.body | capture("(?:^|\\n)fixed: *(?<s>[0-9a-fA-F]{6,40})").s) // "none"), .url ]
@@ -181,6 +220,11 @@ tail_of() { orca terminal read --terminal "$1" 2>/dev/null | tail -20 >&2 || tru
 for dep in gh jq orca; do
   command -v "$dep" >/dev/null 2>&1 || halt "$dep not on PATH" "install $dep, then re-run" 2
 done
+# The identity whose comments carry protocol — reviewer and fixer both post through
+# the operator's gh auth, so the default is the authenticated login itself.
+WHO="${PROTOCOL_AUTHOR:-$(gh api user 2>/dev/null | jq -r '.login // empty')}"
+[ -n "$WHO" ] || halt "cannot resolve the gh-authenticated login (protocol-comment authentication needs it)" \
+  "check 'gh auth status', or set PROTOCOL_AUTHOR" 2
 REVIEWER=$(resolve_terminal "reviewer" "$REVIEW_TERMINAL_HANDLE" "$REVIEW_TERMINAL_TITLE") \
   || halt "cannot resolve the REVIEWER terminal" "open the reviewer TUI in Orca; pin REVIEW_TERMINAL_HANDLE" 2
 FIXER=$(resolve_terminal "fixer" "$FIX_TERMINAL_HANDLE" "$FIX_TERMINAL_TITLE") \
@@ -191,6 +235,9 @@ FIXER=$(resolve_terminal "fixer" "$FIX_TERMINAL_HANDLE" "$FIX_TERMINAL_TITLE") \
 SNAP=$(pr_snap)
 [ -n "$SNAP" ] || halt "cannot read PR #$PR on $REPO_SLUG via gh" "check gh auth / the PR number" 2
 assert_open "$SNAP"
+[ "$(snap_field "$SNAP" isCrossRepository)" != "true" ] \
+  || halt "PR #$PR is a FORK (cross-repository) PR — foreign head, no fixer push path" \
+          "review fork PRs by hand; this loop only drives same-repo toolchain branches" 2
 HEAD_REF=$(snap_field "$SNAP" headRefName)
 BASE_REF=$(snap_field "$SNAP" baseRefName)
 
@@ -204,11 +251,41 @@ printf 'GATE — type the PR number above to start the loop: ' >&2
 read -r ACK || halt "the start gate needs an interactive terminal (stdin closed)" "run attached to a TTY" 2
 [ "$ACK" = "$PR" ] || halt "PR number not confirmed (got '$ACK')" "re-run with the intended PR" 2
 
-# ---- the loop ------------------------------------------------------------------------
+# ---- resume: rebuild loop state from the PR thread itself -----------------------------
+# Kill+restart must not mint a fresh round budget or forget the findings history:
+# every prior AUTHENTICATED verdict comment counts as a consumed round, and the
+# digest + no-progress streak are recomputed exactly as the live loop would have.
 round=1
-prev_findings=""      # last numeric findings count
-nondrop_streak=0      # consecutive reviews where findings did not decrease
+prev_findings=""      # findings value from the previous review ("-" = unparseable)
+have_prior=0          # 1 once any verdict has been consumed (resumed or live)
+nondrop_streak=0      # consecutive reviews without a PROVEN decrease in findings
+last_verdict=""
+while IFS=$(printf '\t') read -r v h n u; do
+  [ -n "$v" ] || continue
+  DIGEST="$DIGEST$(printf '%-6s %-18s %-9s %-14s %s' "$round" "$v" "$n" "$(printf '%s' "$h" | cut -c1-7)" "$u")
+"
+  if [ "$have_prior" = 1 ]; then
+    if is_num "$n" && is_num "$prev_findings" && [ "$n" -lt "$prev_findings" ]; then nondrop_streak=0
+    else nondrop_streak=$((nondrop_streak + 1)); fi
+  fi
+  have_prior=1; prev_findings="$n"; last_verdict="$v"; round=$((round + 1))
+done <<EOF
+$(scan_all_verdicts "$SNAP")
+EOF
+if [ "$round" -gt 1 ]; then
+  note "resume: $((round - 1)) prior review round(s) found on the PR thread"
+  [ "$last_verdict" != "approved" ] \
+    || halt "the thread's last verdict is already 'approved' — nothing to drive" \
+            "read the PR, then perform the operator merge" 0
+  [ "$round" -le "$MAX_ROUNDS" ] \
+    || halt "round cap: the thread already carries $MAX_ROUNDS review round(s) — a restart cannot mint a fresh budget" \
+            "read the digest above and the PR thread; continue by hand" 0
+  [ "$nondrop_streak" -lt 2 ] \
+    || halt "no convergence on the resumed thread: no proven decrease in findings for 2 consecutive reviews" \
+            "read the last two reviews; decide the direction yourself" 0
+fi
 
+# ---- the loop ------------------------------------------------------------------------
 while : ; do
   SNAP=$(pr_snap)
   [ -n "$SNAP" ] || halt "gh stopped answering at round $round start" "check connectivity, re-run" 1
@@ -216,6 +293,7 @@ while : ; do
   [ "$(snap_field "$SNAP" mergeable)" != "CONFLICTING" ] \
     || halt "PR conflicts with $BASE_REF — rebasing is a human decision" "resolve/rebase by hand, re-run" 0
   head=$(snap_field "$SNAP" headRefOid)
+  base_oid=$(snap_field "$SNAP" baseRefOid)   # the verdict binds THIS merge-base
   base_idx=$(comment_count "$SNAP")
 
   # --- dispatch the reviewer -------------------------------------------------------
@@ -235,6 +313,10 @@ while : ; do
       if [ "$(snap_field "$SNAP" headRefOid)" != "$head" ]; then
         halt "head moved during review round $round — someone else is pushing to this PR" \
              "find out who/what pushed; re-run when the PR is quiet" 1
+      fi
+      if [ "$(snap_field "$SNAP" baseRefOid)" != "$base_oid" ]; then
+        halt "base $BASE_REF moved during review round $round — the verdict would bind a stale merge-base" \
+             "re-run when the repo is quiet; the next round reviews against the new base" 1
       fi
       row=$(scan_verdict "$SNAP" "$base_idx")
       if [ -n "$row" ]; then
@@ -262,19 +344,24 @@ EOF
 
   # --- verdict routing ----------------------------------------------------------------
   if [ "$verdict" = "approved" ]; then
-    halt "verdict: approved at round $round — human merge gate ahead (the loop never merges)" \
-         "read the PR, then merge it yourself; optionally run pipeline-update after" 0
+    halt "verdict: approved at round $round — operator merge gate ahead (this loop merges nothing; in the gated-PR lane the merge is the operator's explicit act, as in pipeline-improve)" \
+         "read the PR yourself, then perform the operator merge; optionally run pipeline-update after" 0
   fi
 
-  # no-progress detector: findings failed to DECREASE across 2 consecutive reviews
-  if [ "$findings" != "-" ] && [ -n "$prev_findings" ]; then
-    if [ "$findings" -ge "$prev_findings" ]; then nondrop_streak=$((nondrop_streak + 1))
-    else nondrop_streak=0; fi
+  # No-progress detector, fail-closed: only a PROVEN numeric decrease resets the
+  # streak — a missing/unparseable findings count can never smuggle progress.
+  if [ "$have_prior" = 1 ]; then
+    if is_num "$findings" && is_num "$prev_findings" && [ "$findings" -lt "$prev_findings" ]; then
+      nondrop_streak=0
+    else
+      nondrop_streak=$((nondrop_streak + 1))
+    fi
     [ "$nondrop_streak" -lt 2 ] \
-      || halt "no convergence: findings did not decrease for 2 consecutive reviews ($prev_findings -> $findings)" \
-              "read the last two reviews — likely ping-pong or scope growth; decide the direction yourself" 0
+      || halt "no convergence: no proven decrease in findings for 2 consecutive reviews ($prev_findings -> $findings)" \
+              "read the last two reviews — ping-pong, scope growth, or protocol drift; decide the direction yourself" 0
   fi
-  [ "$findings" = "-" ] || prev_findings="$findings"
+  have_prior=1
+  prev_findings="$findings"
 
   [ "$round" -lt "$MAX_ROUNDS" ] \
     || halt "round cap: review $MAX_ROUNDS still requests changes" \
@@ -299,14 +386,25 @@ EOF
       new_head=$(snap_field "$SNAP" headRefOid)
       row=$(scan_fixed "$SNAP" "$base_idx")
       if [ "$new_head" != "$head" ] && [ -n "$row" ]; then
-        # "ahead" is the only clean continuation; a transient compare failure
-        # ("unknown"/empty) keeps polling — only PROVEN divergence halts.
-        case "$(compare_status "$head" "$new_head")" in
-          ahead) note "<<< round $round fixed: head -> $(printf '%s' "$new_head" | cut -c1-7)"; break ;;
-          diverged|behind)
-            halt "PR head history was rewritten during fix round $round ($(printf '%s' "$head" | cut -c1-7) -> $(printf '%s' "$new_head" | cut -c1-7) is not fast-forward)" \
-                 "a force-push/rebase needs a fresh human read; restart the loop after reading the branch" 1 ;;
-          *) : ;;
+        fsha=$(printf '%s' "$row" | cut -f1)
+        # The evidence must ECHO the head it claims to have produced (same family
+        # as the reviewed-head echo) — an unrelated push cannot ride a stale comment.
+        case "$new_head" in
+          "$fsha"*)
+            # "ahead" is the only clean continuation; a transient compare failure
+            # ("unknown"/empty) keeps polling — only PROVEN divergence halts.
+            case "$(compare_status "$head" "$new_head")" in
+              ahead) note "<<< round $round fixed: head -> $(printf '%s' "$new_head" | cut -c1-7)"; break ;;
+              diverged|behind)
+                halt "PR head history was rewritten during fix round $round ($(printf '%s' "$head" | cut -c1-7) -> $(printf '%s' "$new_head" | cut -c1-7) is not fast-forward)" \
+                     "a force-push/rebase needs a fresh human read; restart the loop after reading the branch" 1 ;;
+              *) : ;;
+            esac ;;
+          *)
+            [ "${fix_echo_seen:-}" = "$fsha" ] || {
+              note "fix round $round: 'fixed: $fsha' does not echo the live head $(printf '%s' "$new_head" | cut -c1-7) — waiting for a matching evidence comment"
+              fix_echo_seen="$fsha"
+            } ;;
         esac
       fi
     fi

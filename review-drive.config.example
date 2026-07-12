@@ -15,8 +15,15 @@
 # FIX_TERMINAL_HANDLE=term_...      # the fixer TUI (e.g. pi)
 
 # owner/repo used when the PR argument is a bare number (URL arguments carry
-# their own repo). The sanctioned scope is the pipeline toolchain repos only.
+# their own repo). The sanctioned scope — pipeline toolchain repos only — is
+# ENFORCED: whatever repo the PR resolves to must match REVIEW_REPO_RE, and
+# fork (cross-repository) PRs are refused at preflight.
 # REVIEW_REPO=jackypanster/pipeline
+# REVIEW_REPO_RE='^jackypanster/pipeline(-driver|-dashboard|-dispatch)?$'
+
+# Only comments authored by this login parse as protocol (verdict:/fixed: lines);
+# default: the gh-authenticated user. Everyone else's comments are inert text.
+# PROTOCOL_AUTHOR=
 
 # Rare per-run overrides (documented in drive.defaults.example §review-drive):
 # MAX_ROUNDS=5  HUNT_AFTER=3  REVIEW_TIMEOUT=2700  FIX_TIMEOUT=2700  POLL_SECS=30
