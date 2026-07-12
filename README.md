@@ -316,8 +316,10 @@ fresh review rather than trusted as a fix instruction. And because the fixer is 
 terminal that receives WRITE-and-push instructions, its identity is **proven, not
 assumed**: both pinned handles must be live+writable in the current orca listing, and
 the fixer's `worktreePath` must be a git checkout whose `origin` IS the PR's repo —
-re-proven to be sitting on the PR's topic branch before EVERY fix dispatch. Anything
-unprovable fails closed before a single character is typed.
+re-proven before EVERY fix dispatch to be sitting on the PR's topic branch, **clean**
+(no uncommitted or untracked state to leak into pushed commits), and with `HEAD`
+**equal to the round's live PR head** (a stale checkout would build the fix on the
+wrong base). Anything unprovable fails closed before a single character is typed.
 
 Per round: dispatch the review → poll `gh` until a verdict comment lands on the CURRENT
 head (new comments are detected by a comment-INDEX baseline, immune to local↔GitHub
@@ -330,10 +332,12 @@ the head advances **fast-forward** (a diverged compare = force-push/rebase = hal
   reviewer scope-growth than progress, and a PR that genuinely needs more deserves a
   human read mid-way. Early halt is information, not friction.
 - no-progress halt — `findings:` failed to **provably** decrease for 2 consecutive
-  reviews; a missing or unparseable count also counts as no progress, so protocol
-  drift cannot smuggle convergence. Biased fail-closed on purpose: a
-  genuinely-deepening review (PR #39 rounds 7→8) also trips it, and that too is a
-  moment a human should look.
+  reviews. A decrease is proven only between two LIVE nonce-bound verdicts: a
+  missing or unparseable count, and any comparison against an unauthenticated
+  historical value, count as no progress — so neither protocol drift nor forged
+  history can smuggle convergence (history can only GROW the streak, never reset
+  it). Biased fail-closed on purpose: a genuinely-deepening review (PR #39 rounds
+  7→8) also trips it, and that too is a moment a human should look.
 - `HUNT_AFTER=3` — from that fix dispatch on, the fix prompt switches to root-cause
   mode (reproduce + confirm cause + state the restored invariant before patching): the
   move that actually closed PR #39.

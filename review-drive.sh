@@ -47,7 +47,8 @@
 # toolchain repos), fork (cross-repository) PRs are refused at preflight, the
 # review dispatch's first token must invoke pipeline-review (REVIEW_SLASH_CMD,
 # required non-empty), and WRITE instructions go to the fixer terminal only
-# after its worktree is PROVEN to be this PR's repo on the PR's topic branch.
+# after its worktree is PROVEN to be this PR's repo on the PR's topic branch,
+# CLEAN, and synced to exactly the round's live head.
 #
 # The TUIs never talk to each other and the driver never forwards review TEXT —
 # each side reads the PR itself via gh; orca only types the dispatch line
@@ -60,8 +61,10 @@
 # Kill+restart RESUMES fail-closed: prior same-author verdicts are folded ONLY
 # into quantities they can TIGHTEN (round budget, no-progress streak, digest) —
 # never into approval or phase, because a prior session's nonces are unknowable
-# and an unauthenticated history must not steer anything. A restart therefore
-# always re-reviews the live head/base with a fresh nonce.
+# and an unauthenticated history must not steer anything. The streak only ever
+# GROWS from history: a findings decrease is proven — and resets it — solely
+# between two LIVE nonce-bound verdicts. A restart therefore always re-reviews
+# the live head/base with a fresh nonce.
 #
 # HALT PREDICATE (the whole brain — halt table: stop-points.md §review-drive):
 #     CONTINUE iff verdict == changes-requested AND round < MAX_ROUNDS
@@ -268,10 +271,13 @@ handle_live() {   # <handle>
 # Strong identity for the FIXER — the terminal that receives WRITE-and-push
 # instructions: its orca worktreePath must be a git checkout whose origin IS this
 # PR's repo — and, when $1=1 (re-proved before EVERY fix dispatch), sitting on the
-# PR's topic branch. Any unprovable step fails closed; a stale or mistyped handle
-# must never be typed write instructions for an unrelated checkout.
-verify_fixer_worktree() {   # <check_branch: 0|1>
-  local wt url slug_re br
+# PR's topic branch with a CLEAN working tree whose HEAD IS the live PR head ($2):
+# a stale checkout would build the fix on the wrong base, a dirty one would mix
+# unrelated state into pushed commits. Any unprovable step fails closed; a stale
+# or mistyped handle must never be typed write instructions for an unrelated or
+# unsynced checkout.
+verify_fixer_worktree() {   # <check_branch: 0|1> [expected_head]
+  local wt url slug_re br st hd
   wt=$(orca terminal list --json 2>/dev/null \
        | jq -r --arg h "$FIXER" '[.result.terminals[]? | select(.handle==$h)][0].worktreePath // ""' 2>/dev/null) || wt=""
   [ -n "$wt" ] || { note "fixer worktree: terminal $FIXER has no worktreePath in the live orca listing"; return 1; }
@@ -284,6 +290,12 @@ verify_fixer_worktree() {   # <check_branch: 0|1>
     br=$(git -C "$wt" symbolic-ref --short -q HEAD 2>/dev/null) || br=""
     [ "$br" = "$HEAD_REF" ] \
       || { note "fixer worktree: $wt is on '${br:-<detached>}', not the PR branch '$HEAD_REF'"; return 1; }
+    st=$(git -C "$wt" status --porcelain 2>/dev/null) || st="<unreadable>"
+    [ -z "$st" ] \
+      || { note "fixer worktree: $wt is not clean (uncommitted/untracked changes) — a fix would mix unrelated state"; return 1; }
+    hd=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || hd=""
+    [ "$hd" = "${2:-}" ] \
+      || { note "fixer worktree: $wt HEAD ${hd:-<none>} is not the live PR head ${2:-<unset>} — sync the checkout first"; return 1; }
   fi
   return 0
 }
@@ -357,6 +369,7 @@ read -r ACK || halt "the start gate needs an interactive terminal (stdin closed)
 # steer a new session.
 rounds_done=0
 prev_findings=""      # findings value from the previous review ("-" = unparseable)
+prev_auth=0           # 1 iff prev_findings came from a LIVE nonce-bound verdict
 have_prior=0          # 1 once any verdict has been consumed (resumed or live)
 nondrop_streak=0      # consecutive reviews without a PROVEN decrease in findings
 last_verdict=""
@@ -366,8 +379,11 @@ while IFS=$(printf '\t') read -r v h n u; do
   DIGEST="$DIGEST$(printf '%-6s %-18s %-9s %-14s %s' "$rounds_done" "$v" "$n" "$(printf '%s' "$h" | cut -c1-7)" "$u")
 "
   if [ "$have_prior" = 1 ]; then
-    if is_num "$n" && is_num "$prev_findings" && [ "$n" -lt "$prev_findings" ]; then nondrop_streak=0
-    else nondrop_streak=$((nondrop_streak + 1)); fi
+    if is_num "$n" && is_num "$prev_findings" && [ "$n" -lt "$prev_findings" ]; then
+      : # an UNAUTHENTICATED decrease proves nothing — it must never RESET the streak
+    else
+      nondrop_streak=$((nondrop_streak + 1))
+    fi
   fi
   have_prior=1; prev_findings="$n"; last_verdict="$v"
 done <<EOF
@@ -379,7 +395,7 @@ if [ "$rounds_done" -gt 0 ]; then
     || note "resume: the thread ends in 'approved', but a historical verdict cannot terminate a NEW session — re-reviewing the live head fail-closed"
   [ "$rounds_done" -lt "$MAX_ROUNDS" ] \
     || halt "round cap: the thread already carries $MAX_ROUNDS review round(s) — a restart cannot mint a fresh budget" \
-            "read the digest above and the PR thread; continue by hand" 0
+            "read the digest and the thread, then continue by hand; a new window requires deliberately raising MAX_ROUNDS in config" 0
   [ "$nondrop_streak" -lt 2 ] \
     || halt "no convergence on the resumed thread: no proven decrease in findings for 2 consecutive reviews" \
             "read the last two reviews; decide the direction yourself" 0
@@ -457,33 +473,36 @@ EOF
          "read the PR, then confirm the merge through the review lane; optionally run pipeline-update after" 0
   fi
 
-  # No-progress detector, fail-closed: only a PROVEN numeric decrease resets the
-  # streak — a missing/unparseable findings count can never smuggle progress.
+  # No-progress detector, fail-closed: a decrease is PROVEN only between two LIVE,
+  # nonce-bound verdicts — a missing/unparseable count, or a comparison against an
+  # unauthenticated historical value, can never smuggle progress or reset the streak.
   if [ "$have_prior" = 1 ]; then
-    if is_num "$findings" && is_num "$prev_findings" && [ "$findings" -lt "$prev_findings" ]; then
+    if [ "$prev_auth" = 1 ] && is_num "$findings" && is_num "$prev_findings" && [ "$findings" -lt "$prev_findings" ]; then
       nondrop_streak=0
     else
       nondrop_streak=$((nondrop_streak + 1))
     fi
     [ "$nondrop_streak" -lt 2 ] \
-      || halt "no convergence: no proven decrease in findings for 2 consecutive reviews ($prev_findings -> $findings)" \
+      || halt "no convergence: no PROVEN decrease in findings for 2 consecutive reviews ($prev_findings -> $findings)" \
               "read the last two reviews — ping-pong, scope growth, or protocol drift; decide the direction yourself" 0
   fi
   have_prior=1
+  prev_auth=1
   prev_findings="$findings"
 
   [ "$round" -lt "$MAX_ROUNDS" ] \
     || halt "round cap: review $MAX_ROUNDS still requests changes" \
-            "read the digest above and the PR thread; continue by hand or re-run for another window" 0
+            "read the digest and the thread, then continue by hand — a re-run halts here again (the budget is thread-bound); a new window requires deliberately raising MAX_ROUNDS in config" 0
 
   base_idx=$(comment_count "$SNAP")
 
   # --- dispatch the fixer --------------------------------------------------------------
   # A pinned handle is not an identity: before WRITE instructions go anywhere, prove
-  # the fixer terminal's worktree IS this PR's repo checked out on the PR branch.
-  verify_fixer_worktree 1 \
-    || halt "cannot prove the fixer terminal's worktree is $REPO_SLUG on branch '$HEAD_REF' — refusing to dispatch write instructions" \
-            "point the fixer TUI's checkout at the PR branch (git checkout $HEAD_REF), re-pin FIX_TERMINAL_HANDLE from the live listing, re-run" 2
+  # the fixer terminal's worktree IS this PR's repo, on the PR branch, CLEAN, and
+  # synced to exactly this round's live head.
+  verify_fixer_worktree 1 "$head" \
+    || halt "cannot prove the fixer terminal's worktree is $REPO_SLUG on branch '$HEAD_REF', clean, at the live head $(printf '%s' "$head" | cut -c1-7) — refusing to dispatch write instructions" \
+            "sync the fixer TUI's checkout (git checkout $HEAD_REF && git pull, stash/clean local noise), re-pin FIX_TERMINAL_HANDLE, re-run" 2
   FNONCE=$(nonce)
   [ -n "$FNONCE" ] || halt "cannot generate a fix dispatch nonce (od / /dev/urandom)" "fix the environment, re-run" 2
   hunt=""

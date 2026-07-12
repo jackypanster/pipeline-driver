@@ -63,8 +63,8 @@ number after reading the banner) and every exit is one of these:
 | event | meaning | run next (human) |
 |-------|---------|------------------|
 | `verdict: approved` (echoing the live head, the live base tip AND this dispatch's nonce) | the meta-PR review signed off | read the PR, then the meta-PR merge gate: **human-confirm + reviewer-only squash-merge** (the loop merges nothing, the proposer never merges); then `pipeline-update` |
-| round cap (`MAX_ROUNDS`, default 5) — live or already consumed by the resumed thread | review N still requests changes; a restart cannot mint a fresh budget | read the digest + thread; continue by hand or re-run for another window |
-| no progress: `findings:` did not **provably** decrease for 2 consecutive reviews (a missing/unparseable count counts as no progress) | ping-pong, scope growth, or protocol drift | read the last two reviews, decide the direction |
+| round cap (`MAX_ROUNDS`, default 5) — live or already consumed by the resumed thread | review N still requests changes; the budget is thread-bound, so a re-run halts here again | read the digest + thread; continue by hand, or deliberately raise `MAX_ROUNDS` in config for a new window |
+| no progress: `findings:` did not **provably** decrease for 2 consecutive reviews (a decrease is proven only between two LIVE nonce-bound verdicts; missing/unparseable counts and comparisons against unauthenticated history count as no progress) | ping-pong, scope growth, protocol drift, or forged history | read the last two reviews, decide the direction |
 | no verdict comment within `REVIEW_TIMEOUT` | reviewer TUI stalled or stopped posting to the PR (the loop is blind to TUI text by design; unauthenticated or nonce-less comments are inert) | inspect the reviewer terminal (tail printed) |
 | no pushed fix + `fixed:` comment within `FIX_TIMEOUT` | fixer TUI stalled, pushed without evidence, or its `fixed:`/`fix-nonce:` echo never matched | inspect the fixer terminal (tail printed) |
 | `reviewed-head` echo ≠ the round's head, or `reviewed-base` echo ≠ the round's base tip (full-40 string equality; a prefix never parses) | stale or misdirected review | read the mismatched comment first |
@@ -73,7 +73,7 @@ number after reading the banner) and every exit is one of these:
 | head history rewritten during a fix (compare ≠ fast-forward) | force-push/rebase | fresh human read of the branch, then restart |
 | PR merged / closed / conflicts with base mid-loop | a human-level event outside the loop | act on the PR itself |
 | PR's repo outside `REVIEW_REPO_RE`, or a fork (cross-repository) PR | outside the sanctioned toolchain scope — refused at preflight, nothing dispatched | feature work goes through the 5-stage pipeline; fork PRs are reviewed by hand |
-| fixer worktree unprovable — pinned handle not live, `worktreePath` missing, `origin` ≠ the PR's repo (preflight), or not on the PR branch (re-proven before EVERY fix dispatch) | write instructions must never reach an unrelated checkout | point the fixer TUI at the PR checkout; re-pin the handle from the live listing |
+| fixer worktree unprovable — pinned handle not live, `worktreePath` missing, `origin` ≠ the PR's repo (preflight), or — re-proven before EVERY fix dispatch — not on the PR branch, not CLEAN, or `HEAD` ≠ the round's live PR head | write instructions must never reach an unrelated, dirty, or unsynced checkout | sync the fixer checkout (`git checkout <branch> && git pull`, stash/clean local noise); re-pin the handle from the live listing |
 | shared/unresolvable terminals, non-numeric loop config, or empty `REVIEW_SLASH_CMD` | config error, refused at preflight (the relayed review must invoke `pipeline-review`, never generic prose) | pin two distinct live handles / fix the named value |
 
 Resume never trusts history: prior same-author verdicts are folded FAIL-CLOSED into
