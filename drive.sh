@@ -246,7 +246,35 @@ setup_preflight()       { :; }   # 1  dep probe (reuses doctor's style) + remedi
 setup_sources()         { :; }   # 2  git clone / opt-in fetch+reset on the 3 source repos
 setup_skills()          { :; }   # 3  cp -r pipeline-* + ln -sfn per runtime (grok impl-only)
 setup_dashboard_build() { :; }   # 4a npm ci && npm run build && npm link
-setup_pboard_block()    { :; }   # 4b marker-delimited pboard() block into $SHELL_RC     (C3)
+setup_pboard_block() {              # 4b marker-delimited pboard() block into $SHELL_RC (C3)
+  local rc="${SETUP_SHELL_RC:-$HOME/.zshrc}" tmp
+  mkdir -p "$(dirname "$rc")"
+  # Idempotent + own-only-your-markers (ADR 0003): delete any existing delimited block
+  # (sed range, inclusive) then append the fresh one. Portable temp-file sed (no -i flag,
+  # so BSD + GNU sed agree). Unmarked lines — including a legacy pboard() — are untouched.
+  if [ -f "$rc" ]; then
+    tmp="${rc}.tmp.$$"
+    if sed '/# >>> pipeline pboard >>>/,/# <<< pipeline pboard <<</d' "$rc" > "$tmp"; then
+      mv "$tmp" "$rc"
+    else
+      rm -f "$tmp"
+    fi
+  fi
+  # Quoted heredoc: the body is written LITERALLY (vars expand when pboard runs, not now).
+  cat >> "$rc" <<'PBOARD'
+# >>> pipeline pboard >>>
+pboard() {   # render + open the read-only pipeline dashboard (see drive.sh §Board)
+  local repo="${DASHBOARD_REPO:-$HOME/workspace/pipeline-dashboard}"
+  local out="${BOARD_OUT:-/tmp/pipeline-board.html}"
+  if [ -f "$repo/dist/cli.js" ] && command -v node >/dev/null 2>&1; then
+    node "$repo/dist/cli.js" "${WORKDIR:-$PWD}" --out "$out" 2>/dev/null
+  fi
+  if command -v open >/dev/null 2>&1; then open "$out" 2>/dev/null
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$out" 2>/dev/null; fi
+}
+# <<< pipeline pboard <<<
+PBOARD
+}
 setup_defaults() {                 # 5  write $DEFAULTS from the drive.defaults template (C2)
   local out dir \
     impl_transport impl_slash_cmd impl_model \
