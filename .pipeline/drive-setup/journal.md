@@ -170,3 +170,75 @@ run pipeline-review (codex) — freeze gate (git diff 4ac12ec..HEAD -- test/setu
 full-verify green + semantic review + HUMAN merge confirm.
 On failure: attempts++; >=3 ⇒ blocked ⇒ run pipeline-hunt.
 <<< END
+
+## seq=4 · 2026-07-12T14:56:42Z · impl→review · completed · by=pi-impl
+done:   Card C1 (plumbing) green on feat/drive-setup. Added `drive.sh setup` as a real
+        subcommand peer of doctor: dispatch + --yes/-y headless activation; config-guard
+        bypass (setup CREATES config, so the config-not-found + WORKDIR/BRANCH/FEATURE
+        guards skip for SUBCMD=setup, and CONF is forced empty so the operator's real
+        ./drive.config is never sourced — keeps the wizard hermetic and feature-agnostic);
+        a setup() skeleton that runs the 7 steps each gated by SETUP_DO_<STEP> (default on)
+        with gated no-op stubs for C2/C3/C4 to fill; and the doctor terminal (ADR 0002 —
+        setup ends on doctor, final rc = DO_DOCTOR ? (doctor_rc | setup_bad>0) : (setup_bad>0?1:0),
+        never its own success). Usage header + a README §Setup wizard section added; the
+        README run-all line now lists the 4 setup tests. Honest-degrade wired (s_miss ->
+        setup_bad) for the bodies C2/C3/C4 land.
+verify: bash -n drive.sh (clean) + bash test/setup-plumbing.sh -> passed=3 failed=0
+        (dispatch / doctor-terminal-healthy / honest-degrade-bare). Existing 8-test suite
+        unchanged (run/hook/preflight/e2e/e2e-orca/defaults-doctor/board-relay/review-drive
+        all PASS) — no regression to doctor or the impl loop.
+output: feat/drive-setup @ 342871c (drive.sh + README.md, impl-paths only; spec-paths
+        test/setup-*.sh untouched — freeze gate diff 4ac12ec..HEAD -- test/ is empty) ·
+        PR #9 (feat/drive-setup -> main) · main: tasks/01.md status:review + current.json
+        stage:impl + this entry (one commit)
+--- handoff ---
+>>> NEXT
+Run pipeline-impl on a FRESH session (assume you know nothing — rebuild from repo + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: capable-local OK (impl only) — operator assigns the bot (pi, orca transport).
+First: git pull --rebase; no .env in this repo (skip CONTRACT step 2).
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md — normative protocol (read FIRST;
+    esp. §Test ownership: make the frozen test green via impl-paths + src ONLY, NEVER edit spec-paths)
+  - .pipeline/drive-setup/tasks/02.md — the NEXT card (oldest todo): defaults gen + ask_* seam
+  - .pipeline/drive-setup/tasks/03.md, 04.md — the remaining todo cards (pboard, target)
+  - .pipeline/drive-setup/arch.md — the SETUP_* interface table + the ask_* resolution rule + step-5
+    anchors; the C1 plumbing now in drive.sh is the skeleton you build on
+  - .pipeline/drive-setup/CONTEXT.md + docs/adr/0002,0003 — honest-degrade + idempotency invariants
+  - drive.sh (setup() + setup_do_step + the 7 step stubs, immediately above doctor()) — YOUR target;
+    fill setup_defaults + the ask_value/ask_confirm/ask_choice/ask_multi helpers it depends on
+  - test/setup-defaults.sh — the frozen test that is YOUR spec (card-scoped verify)
+GATE 1 (frozen spec): the feature's single spec-rev is still 4ac12ec905adab2da59666447e8a264245fc3cd3
+  (shared across all 4 cards). Read test/setup-defaults.sh — it IS the spec for card 02.
+State of the branch: feat/drive-setup is OPEN (PR #9) with C1 landed. git checkout feat/drive-setup &&
+git pull --rebase origin main to pick up trunk metadata, then build C2 ON TOP of C1 (same branch, same
+PR — all 4 cards accumulate on feat/drive-setup). Do NOT cut a new branch.
+Your task (concrete, numbered):
+  1. On feat/drive-setup, fill the ask_* seam (ask_value/ask_confirm/ask_choice/ask_multi: SETUP_<KEY>
+     env -> default (headless, SETUP_YES=1) -> fzf/read (TTY); ONE path) and setup_defaults (writes
+     $DEFAULTS from the drive.defaults.example template: IMPL_TRANSPORT IMPL_SLASH_CMD IMPL_MODEL
+     REVIEW_TERMINAL_TITLE REVIEW_SLASH_CMD YOLO BOARD_OUT + sibling/skills paths; mkdir -p its dir;
+     REVIEW_SLASH_CMD='$pipeline-review' SINGLE-QUOTED). Idempotent: render to string, no write + no
+     .bak if identical, else cp -> .bak then write (ADR 0003).
+  2. Editing ONLY impl-paths (drive.sh). Run the card's verify: `bash -n drive.sh && bash
+     test/setup-defaults.sh` until passed=4 failed=0. NEVER touch test/setup-*.sh (freeze gate).
+  3. When green: push feat/drive-setup (PR #9 auto-updates); on main flip tasks/02.md status:todo->review,
+     append this journal (seq=5, impl->review completed), commit once, push. Then route to pipeline-impl
+     for card 03 (pboard), then 04 (target) — same branch/PR. Only when all 4 are review -> pipeline-review.
+Feature gotchas (project-specific traps the next node MUST know):
+  - setup() already runs setup_defaults gated by SETUP_DO_DEFAULTS — just fill the function body (the
+    skeleton dispatches it; the stub is currently `:`). setup_do_step PREFLIGHT/SOURCES/SKILLS/DASHBOARD/
+    PBOARD/DEFAULTS/TARGET/DOCTOR already gate each step.
+  - CONF is forced empty for setup (C1) — setup reads ONLY $DEFAULTS (DRIVE_DEFAULTS seam) for prefill,
+    never a per-feature drive.config. drive.sh:62-64 sources $DEFAULTS before dispatch, so its values
+    are already in scope as prefill.
+  - The frozen test pins DRIVE_DEFAULTS to the output path and HOME to a temp dir; SETUP_<KEY> is the
+    override (SETUP_IMPL_TRANSPORT, SETUP_YOLO, SETUP_REVIEW_TERMINAL_TITLE, ...). Note the SETUP_ prefix
+    on the env vars vs. the bare keys written into the file (ask_value maps SETUP_YOLO -> YOLO=...).
+  - Honest-degrade: the wizard never declares success; setup_bad++ on any un-automatable step, and setup
+    ends on doctor when DO_DOCTOR=1 (already wired in C1).
+Done when: card 02 verify green on feat/drive-setup + pushed + tasks/02.md -> review on main. On success:
+route to pipeline-impl for card 03. When 03 AND 04 are also review (all 4 review) -> pipeline-review (codex):
+freeze gate (git diff 4ac12ec..HEAD -- test/setup-*.sh empty) + full-verify green + semantic + HUMAN merge.
+On failure: attempts++; >=3 -> blocked -> pipeline-hunt.
+<<< END
