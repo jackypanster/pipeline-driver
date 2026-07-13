@@ -826,3 +826,55 @@ review, PR #9 updated. On success: run pipeline-review (codex) — freeze gate v
 semantic (now a much smaller, hardened surface) + HUMAN merge confirm.
 On failure: attempts++ (=>3 blocked => pipeline-hunt).
 <<< END
+
+## seq=16 · 2026-07-13T14:30:43Z · impl→review · completed · by=claude (pi)
+done:   Card C1 green on its frozen tests (test/setup-plumbing.sh 3/3, test/setup-safety.sh 5/5
+        incl. the re-spec'd mis-ordered-marker case) and the WHOLE current.json.full-verify suite
+        (bash -n + 13 tests). ADR 0004 cut the external installer steps (setup_preflight/sources/
+        skills/dashboard_build) + the ask_multi runtime picker + SETUP_RUNTIMES/grok logic. Fixed
+        the kept-core review-02 defects: finding 1 (pboard requires exactly one correctly-ORDERED
+        marker pair; mis-ordered/malformed layouts refused, file untouched), finding 2 (setup_target
+        REFUSES a symlinked .pipeline/roles.yaml or its dir; never follows it out of the repo),
+        finding 5 (a prompt read failure/EOF incl. TTY Ctrl-D flips setup_abort; setup stops before
+        any later write, non-green). Review-reads implemented: finding 6 (_atomic_write — same-dir
+        temp, original mode copied, atomic rename; dest never truncated mid-write), finding 8 (README
+        run-all lists every setup test, adds test/setup-safety.sh). feat/drive-setup rebased onto
+        a0148cd/739ae50 + force-pushed. ask_choice/ask_confirm wired into setup_defaults so the
+        documented seam is live (no dead code).
+output: drive.sh · README.md · PR #9 (feat/drive-setup, tip a76f838, rebased onto main a0148cd)
+--- handoff ---
+>>> NEXT
+Run pipeline-review on a FRESH session (assume you know nothing — rebuild from the repo + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: frontier SOTA required (review is a reasoning stage) — operator assigns the bot; the pipeline can't verify the model.
+First: git pull --rebase; no .env in this repo.
+GATE 1 (frozen spec): the feature's single spec-rev is a0148cdc359192b64a68aaebce7ca5d2e205bc8c
+  (re-scope freeze: test/setup-safety.sh + test/setup-target.sh gained cases; test/setup-external.sh REMOVED).
+  Run FIRST: git diff a0148cd feat/drive-setup -- test/setup-plumbing.sh test/setup-defaults.sh test/setup-pboard.sh test/setup-target.sh test/setup-safety.sh   # MUST be empty.
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md  (§Test ownership re-freeze + §Freeze coverage + §Forge adapter)
+  - .pipeline/drive-setup/docs/adr/0004-narrow-scope-to-config-gen-core.md  (WHAT is cut vs kept — read FIRST)
+  - .pipeline/drive-setup/reviews/review-02.md  (the 8 findings + probe evidence: 1,2,5 FIXED; 3,4,7 CUT with the external steps; 6,8 implemented as review-reads)
+  - .pipeline/drive-setup/tasks/01.md (C1, the retried card) and tasks/02.md..04.md (unchanged)
+Your task (concrete, numbered):
+  1. Freeze gate: the diff in GATE 1 must be EMPTY (impl touched ONLY drive.sh + README.md — spec-paths untouched).
+  2. Full suite: run current.json.full-verify verbatim on feat/drive-setup HEAD (bash -n + the 13-test chain incl. test/setup-safety.sh) — must be GREEN.
+  3. Semantic review (much smaller hardened surface than review-02): verify the kept-core fixes —
+     setup_pboard_block validates exactly ONE ordered marker pair and refuses malformed layouts (finding 1);
+     setup_target refuses a symlinked destination and a symlinked .pipeline dir (finding 2); setup() and
+     the ask_* helpers treat any read failure / EOF / non-TTY as refusal, not consent (finding 5);
+     _atomic_write does a mode-preserving atomic rename and never truncates dest mid-write (finding 6).
+     Confirm the CUT code is GONE: no setup_preflight / setup_sources / setup_skills / setup_dashboard_build,
+     no ask_multi, no SETUP_RUNTIMES / grok / DASHBOARD_LINK / SETUP_REFRESH_SOURCES refs in code (comments
+     documenting the cut are fine). Review-read: README §Setup run-all lists every setup test incl.
+     setup-safety (finding 8) and the step list is narrowed to PBOARD/DEFAULTS/TARGET/DOCTOR.
+  4. Card guard: all of 01–04 are status: review. Green + semantic OK ⇒ get an explicit HUMAN merge
+     confirm, squash-merge feat/drive-setup (#9), flip the cards → done, set current.json.stage = done.
+Feature gotchas:
+  - feat/drive-setup was REBASED onto main (a0148cd/739ae50) and force-pushed — it carries the current frozen tests; PR #9 head is a76f838.
+  - Card 01 was attempts=2 (the last retry before blocked); the re-spec cut the un-convergent external steps to converge — do NOT re-introduce them.
+  - Bash 3.2: ask_value/ask_confirm/ask_choice use SEPARATE local lines — a single "local a=.. b=$a" expands the RHS before assigning, so the indirect expansion must be on its own line (a latent footgun).
+  - SETUP_DO_DEPS/SOURCES/SKILLS/DASHBOARD are accepted but ignored (the frozen OFF prefix still sets them — harmless).
+Done when: freeze gate empty, full suite green, semantic pass, explicit HUMAN merge confirm. Then cards → done + stage = done; NO further pipeline-impl (every card is review).
+On rejection: attempts++ on the offending card; route pipeline-impl (or pipeline-hunt at attempts>=3).
+<<< END
