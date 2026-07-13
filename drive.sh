@@ -28,9 +28,9 @@
 #                      trio: prints one line per check with the exact remediation
 #                      command; installs nothing, touches no network.
 #         ./drive.sh setup [--yes|-y]
-#                    — fzf-driven install/config wizard for the trio (the automated
+#                    — idempotent, overwrite-safe install/config wizard for the trio (the automated
 #                      form of the README §Setup checklist). --yes / SETUP_YES=1 runs
-#                      it headless; each of the 7 steps toggles via SETUP_DO_<STEP>
+#                      it headless; each step toggles via SETUP_DO_<STEP> (PBOARD/DEFAULTS/TARGET/DOCTOR)
 #                      (default on). It writes/overwrites config but never declares
 #                      success on its own — it ends on `doctor` (ADR 0002).
 #
@@ -161,7 +161,7 @@ git_q() { git -C "$WORKDIR" "$@"; }
 show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path from the REMOTE ref
 
 # ---- setup ---------------------------------------------------------------------
-# `drive.sh setup` — an fzf-driven, idempotent, overwrite-safe install/config wizard
+# `drive.sh setup` — an idempotent, overwrite-safe install/config wizard
 # for the pipeline+dashboard+driver trio. A peer of `doctor()`: same file, same inline-
 # function shape (section headers + a counter + a terminal exit status), same "one line
 # per check with the exact remediation". It orchestrates commands that already work by
@@ -172,13 +172,13 @@ show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path fr
 # One code path serves interactive and headless (ADR 0003): every answer flows through
 # the `ask_*` seam (SETUP_<KEY> env → default → fzf/read); SETUP_YES=1 / --yes runs the
 # whole wizard headless with zero fzf/read calls — the path the freeze test drives.
-# Each of the 7 steps is individually skippable via SETUP_DO_<STEP>=0 (default 1).
+# Each step is individually skippable via SETUP_DO_<STEP>=0 (default 1).
 #
-# Card C1 ships the plumbing skeleton (dispatch, headless activation, step gating, the
-# doctor terminal). C2 fills setup_defaults + the ask_* seam; C3 fills setup_pboard_block;
-# C4 fills setup_target. The external-tool steps (deps probe, clone, skills attach, npm
-# build) ride this skeleton and are covered by "review reads" (a hermetic test cannot
-# run a real package manager / network / TUI).
+# ADR 0004 narrowed the wizard to the three hermetic config artifacts (drive.defaults,
+# the pboard() block, a target repo's .pipeline/roles.yaml) + the doctor terminal. The
+# external-tool steps (deps probe, clone, skills attach, npm build) and the interactive
+# runtime picker are CUT — they could not converge under a hermetic freeze. Their
+# SETUP_DO_* toggles are accepted but ignored (the frozen OFF prefix still sets them).
 setup_do_step() {   # <STEP> -> status 0/1: is SETUP_DO_<STEP> enabled? (default 1)
   local v="SETUP_DO_$1"
   [ "${!v:-1}" = "1" ]
@@ -191,18 +191,18 @@ setup_do_step() {   # <STEP> -> status 0/1: is SETUP_DO_<STEP> enabled? (default
 # is a review-reads enhancement, NOT used here, so a re-run with SETUP_<KEY> unset always
 # lands the deterministic default; pinned by test/setup-defaults.sh assertion 4).
 ask_value() {   # KEY PROMPT DEFAULT -> echoes the resolved value
-  local envvar="SETUP_$1"
-  local val="${!envvar:-}"
+  local envvar="SETUP_$1"    # NB: separate `local` lines — bash expands a single
+  local val="${!envvar:-}"   # `local a=.. b=$a` RHS before assigning, so $a would be empty
   local def="$3"
   if [ -n "$val" ]; then printf '%s\n' "$val"; return; fi
-  if [ "${SETUP_YES:-0}" != "1" ]; then
-    # Bash-3.2-safe prompt (NO `read -e -i` — -i needs bash 4; review-01 finding 5).
-    # setup()'s non-TTY refusal means this branch only runs on a real TTY; an empty
-    # answer keeps the caller default (prompt EOF is never re-interpreted as consent).
-    local ans=""
-    read -e -p "$2 [$def]: " ans || true
-    [ -n "$ans" ] && def="$ans"
-  fi
+  if [ "${SETUP_YES:-0}" = "1" ]; then printf '%s\n' "$def"; return; fi
+  # Interactive TTY prompt only (Bash-3.2-safe: NO `read -i`, which needs bash 4). setup()'s
+  # non-TTY refusal means this branch runs only on a real TTY. A read FAILURE or EOF is
+  # refusal, not consent (review-02 finding 5): flip setup_abort so setup() stops before
+  # any later step mutates a file. An empty Enter keeps the caller default.
+  local ans=""
+  if ! read -e -p "$2 [$def]: " ans; then setup_abort=1
+  elif [ -n "$ans" ]; then def="$ans"; fi
   printf '%s\n' "$def"
 }
 ask_confirm() {   # KEY PROMPT DEFAULT(0|1) -> echoes 0 or 1
@@ -212,11 +212,10 @@ ask_confirm() {   # KEY PROMPT DEFAULT(0|1) -> echoes 0 or 1
   if [ -n "$val" ]; then
     case "$val" in 1|y|Y|yes|YES|true|on) echo 1 ;; *) echo 0 ;; esac; return
   fi
-  if [ "${SETUP_YES:-0}" != "1" ]; then
-    local ans=""
-    read -e -p "$2 [y/N]: " ans || true
-    case "${ans:-$def}" in y|Y|yes|YES|true|on|1) def=1 ;; *) def=0 ;; esac
-  fi
+  if [ "${SETUP_YES:-0}" = "1" ]; then printf '%s\n' "$def"; return; fi
+  local ans=""
+  if ! read -e -p "$2 [y/N]: " ans; then setup_abort=1
+  else case "${ans:-$def}" in y|Y|yes|YES|true|on|1) def=1 ;; *) def=0 ;; esac; fi
   printf '%s\n' "$def"
 }
 ask_choice() {   # KEY PROMPT DEFAULT OPT... -> echoes one of the OPTs
@@ -226,159 +225,74 @@ ask_choice() {   # KEY PROMPT DEFAULT OPT... -> echoes one of the OPTs
   if [ -n "$val" ]; then printf '%s\n' "$val"; return; fi
   if [ "${SETUP_YES:-0}" = "1" ]; then printf '%s\n' "$def"; return; fi
   if command -v fzf >/dev/null 2>&1; then
-    local ans; ans=$(printf '%s\n' "$@" | fzf --prompt "$2: " --height 40% || true); printf '%s\n' "${ans:-$def}"
+    local ans; ans=$(printf '%s\n' "$@" | fzf --prompt "$2: " --height 40% || true)
+    printf '%s\n' "${ans:-$def}"
   else
     local i=1 o ans=""
     for o in "$@"; do printf '%d) %s\n' "$i" "$o" >&2; i=$((i+1)); done
-    read -e -p "$2 [$def]: " ans || true
+    if ! read -e -p "$2 [$def]: " ans; then setup_abort=1; ans="$def"; fi
     [ -n "$ans" ] || ans="$def"; printf '%s\n' "$ans"
   fi
 }
-ask_multi() {   # KEY PROMPT DEFAULT_CSV OPT... -> echoes a CSV of the chosen OPTs
-  local envvar="SETUP_$1"
-  local val="${!envvar:-}"
-  local def="$3"; shift 3
-  if [ -n "$val" ]; then printf '%s\n' "$val"; return; fi
-  if [ "${SETUP_YES:-0}" = "1" ]; then printf '%s\n' "$def"; return; fi
-  if command -v fzf >/dev/null 2>&1; then
-    printf '%s\n' "$@" | fzf --multi --prompt "$2: " --height 40% | paste -sd, - || printf '%s\n' "$def"
-  else
-    printf '%s\n' "$def"   # non-fzf multi is clumsy; the env/headless paths above cover the seam
-  fi
-}
-
-# Step functions. C1 ships them as gated no-op stubs so the wizard runs end-to-end the
-# moment a real body lands in C2/C3/C4; each is owned by its own SETUP_DO_* toggle.
-setup_preflight() {                 # 1  dep probe (mirrors doctor's deps) + remediation
-  # Probes the wizard's system deps; a missing one honest-degrades (s_miss + the EXACT
-  # install cmd). setup_bad accumulates and setup() returns non-zero if any dep is missing.
-  # The public toggle is SETUP_DO_DEPS (review-01 finding 6) — setup() gates this step on
-  # it. s_miss is inherited from setup() via dynamic scope (same as setup_pboard_block).
-  _dep() {   # <name> <install-hint> — ok on PATH, else s_miss
-    if command -v "$1" >/dev/null 2>&1; then printf 'ok    %s on PATH\n' "$1"
-    else s_miss "$1 not on PATH" "$2"; fi
-  }
-  _dep git  "install git (xcode-select --install / your package manager)"
-  _dep node "install node (brew install node) — dashboard rendering needs it"
-  _dep npm  "install npm (ships with node) — dashboard build needs it"
-  _dep gh   "brew install gh — trunk-protection preflight + PR review degrade"
-  _dep jq   "brew install jq — orca transport + terminal listing need it"
-  _dep fzf  "brew install fzf — the interactive wizard needs it (or run with --yes)"
-  case "${IMPL_TRANSPORT:-claude}" in
-    orca)   _dep orca   "install the Orca CLI — IMPL_TRANSPORT=orca" ;;
-    claude) _dep claude "install Claude Code — IMPL_TRANSPORT=claude" ;;
-  esac
-}
-setup_sources() {                   # 2  git clone missing / opt-in fetch+reset (ADR 0002)
-  # Missing source repo ⇒ s_miss with the clone cmd (never a silent no-op). An EXISTING
-  # repo is left UNTOUCHED unless SETUP_REFRESH_SOURCES=1 (opt-in fetch + reset --hard,
-  # the README's "never git reset --hard unprompted" promise). Repo paths resolve through
-  # the ask_* seam like every other step (one code path — ADR 0003).
-  local pipe dash refresh
-  pipe=$(ask_value PIPELINE_REPO "pipeline repo" "$PIPELINE_REPO")
-  dash=$(ask_value DASHBOARD_REPO "dashboard repo" "$DASHBOARD_REPO")
-  refresh="${SETUP_REFRESH_SOURCES:-0}"
-  _src() {   # <path> <clone-url> <name> <env-var>
-    local p="$1" url="$2" name="$3" envvar="$4"
-    if [ -d "$p/.git" ]; then
-      if [ "$refresh" = "1" ]; then
-        if git -C "$p" fetch origin && git -C "$p" reset --hard origin/HEAD; then :
-        else s_miss "refresh $name repo" "git -C $p fetch origin && git -C $p reset --hard origin/HEAD"; fi
-      fi
-    else
-      s_miss "$name repo not found at $p" "git clone $url $p   # or set $envvar"
-    fi
-  }
-  _src "$pipe" "https://github.com/jackypanster/pipeline.git"           "pipeline"  "SETUP_PIPELINE_REPO"
-  _src "$dash" "https://github.com/jackypanster/pipeline-dashboard.git" "dashboard" "SETUP_DASHBOARD_REPO"
-}
-setup_skills() {                    # 3  cp -r pipeline-* into $SKILLS_DIR + ln -sfn per runtime
-  # The canonical copy (cp -r pipeline-* into $SKILLS_DIR) is the ONE non-degrade action —
-  # it MUST happen (pinned by test/setup-external.sh assertion 2). Then each runtime named
-  # in SETUP_RUNTIMES (CSV; empty = canonical copy only) is attached via ln -sfn. The grok
-  # impl-only path selection is a review-reads enhancement (arch §Resolved assumptions).
-  local src dst rt dir sk
-  src=$(ask_value PIPELINE_REPO "pipeline repo (skills source)" "$PIPELINE_REPO")
-  dst=$(ask_value SKILLS_DIR "canonical skills dir" "$SKILLS_DIR")
-  if [ ! -d "$src/skills" ] || ! ls "$src/skills/"pipeline-* >/dev/null 2>&1; then
-    s_miss "skills source" "no pipeline-* skills in $src/skills/ (set SETUP_PIPELINE_REPO to the pipeline repo)"
-    return 0
-  fi
-  if ! mkdir -p "$dst"; then
-    s_miss "skills dir" "could not create $dst (mkdir -p $dst)"
-    return 0
-  fi
-  # Canonical copy — never a silent no-op (ADR 0002). The unquoted pipeline-* glob expands
-  # to every pipeline-* skill dir the source repo ships; guarded so a cp failure degrades.
-  if cp -r "$src/skills/"pipeline-* "$dst"/; then :
-  else s_miss "skills copy" "cp -r $src/skills/pipeline-* $dst/"; fi
-  # Attach each named runtime (SETUP_RUNTIMES CSV; empty ⇒ canonical copy only).
-  for rt in ${SETUP_RUNTIMES//,/ }; do
-    [ -n "$rt" ] || continue
-    case "$rt" in
-      pi|orca) dir="${TUI_SKILLS_DIR:-$HOME/.pi/agent/skills}" ;;
-      claude)  dir="$HOME/.claude/skills" ;;
-      codex)   dir="$HOME/.codex/skills" ;;
-      *) s_miss "skills attach ($rt)" "unknown runtime '$rt' — ln -sfn $dst/pipeline-* into its skills dir"; continue ;;
-    esac
-    if ! mkdir -p "$dir" 2>/dev/null; then
-      s_miss "skills attach ($rt)" "cannot create $dir — ln -sfn $dst/pipeline-* $dir/"
-      continue
-    fi
-    for sk in "$dst/"pipeline-*; do
-      [ -e "$sk" ] || continue
-      if ! ln -sfn "$sk" "$dir/$(basename "$sk")" 2>/dev/null; then
-        s_miss "skills attach ($rt)" "ln -sfn $sk $dir/$(basename "$sk")"
-      fi
-    done
-  done
-}
-setup_dashboard_build() {           # 4a npm ci && npm run build && npm link (ADR 0002)
-  # Absent repo or missing npm ⇒ s_miss with the build cmd (never a silent no-op). A real
-  # build runs npm ci && npm run build (and npm link unless DASHBOARD_LINK=0); a failure
-  # degrades with the exact command rather than faking success.
-  local dash
-  dash=$(ask_value DASHBOARD_REPO "dashboard repo" "$DASHBOARD_REPO")
-  if [ ! -d "$dash" ]; then
-    s_miss "dashboard repo not found at $dash" "git clone https://github.com/jackypanster/pipeline-dashboard.git $dash   # then re-run setup"
-    return 0
-  fi
-  if ! command -v npm >/dev/null 2>&1; then
-    s_miss "npm not on PATH" "install node+npm, then: (cd $dash && npm ci && npm run build && npm link)"
-    return 0
-  fi
-  if ( cd "$dash" && npm ci && npm run build ); then :
-  else s_miss "dashboard build failed" "(cd $dash && npm ci && npm run build)"; fi
-  if [ "${DASHBOARD_LINK:-1}" = "1" ]; then
-    if ( cd "$dash" && npm link ); then :
-    else s_miss "dashboard npm link failed" "(cd $dash && npm link)"; fi
-  fi
+# ADR 0004 narrowed the wizard to the three hermetic config artifacts (drive.defaults,
+# the pboard() shell block, a target repo's .pipeline/roles.yaml) + the doctor terminal.
+# The external installer steps (deps probe, git clone, skills attach, npm build/link) and
+# the interactive runtime picker (ask_multi) are CUT — they could not converge under a
+# hermetic freeze, and every review-02 defect in them (partial-build npm link, nested-link
+# skills attach, PTY cancel) left with them. SETUP_DO_DEPS/SOURCES/SKILLS/DASHBOARD are
+# accepted but ignored (harmless — the frozen OFF prefix still sets them).
+# _atomic_write <dest>: stream-safe, mode-preserving, atomic file replacement (review-02
+# finding 6). stdin is written to a same-dir temp, the original mode is copied onto it,
+# then it is renamed over dest — dest is never truncated mid-write, so a signal / ENOSPC /
+# write error leaves the prior file intact (that intact prior IS the recoverable backup;
+# no .bak churn on success). `mv` acts on the directory entry, so it never follows a dest
+# symlink (callers refuse symlinks explicitly anyway — setup_target's frozen case).
+_atomic_write() {   # <dest>   (stdin -> dest, atomically, mode preserved)
+  local dest="$1" dir tmp mode=""
+  dir=$(dirname "$dest")
+  [ -d "$dir" ] || mkdir -p "$dir"
+  tmp="$dir/.setup-aw.$$.$RANDOM.tmp"
+  if [ -e "$dest" ]; then mode=$(stat -f '%Lp' "$dest" 2>/dev/null || stat -c '%a' "$dest" 2>/dev/null || true); fi
+  if ! cat > "$tmp"; then rm -f "$tmp"; return 1; fi
+  if [ -n "$mode" ]; then chmod "$mode" "$tmp" 2>/dev/null || true; fi
+  mv -f "$tmp" "$dest"
 }
 setup_pboard_block() {              # 4b marker-delimited pboard() block into $SHELL_RC (C3)
-  local rc="${SETUP_SHELL_RC:-$HOME/.zshrc}" body="" opens=0 closes=0
+  local rc="${SETUP_SHELL_RC:-$HOME/.zshrc}" body="" opens=0 closes=0 first_open=0 first_close=0
   mkdir -p "$(dirname "$rc")"
-  # Balanced-marker guard (review-01 finding 3): an UNMATCHED opening marker must NOT
-  # sed-delete following user content through EOF. Refuse (s_miss, leave the file untouched)
-  # unless the markers balance; only then delete complete blocks. Own ONLY our markers —
-  # unmarked lines (incl. a legacy pboard()) are carried through verbatim (ADR 0003).
+  # Refuse an rc that is itself a symlink (review-02 finding 2, applied to the rc too):
+  # setup never follows a symlinked rc out of the operator's home — leave it untouched.
+  if [ -L "$rc" ]; then
+    s_miss "pboard rc" "$rc is a symlink — setup never follows an rc symlink; remove it and re-run"
+    return 0
+  fi
   if [ -f "$rc" ]; then
-    opens=$(grep -c '^# >>> pipeline pboard >>>$' "$rc" 2>/dev/null) || opens=0
-    closes=$(grep -c '^# <<< pipeline pboard <<<$' "$rc" 2>/dev/null) || closes=0
-    if [ "$opens" -ne "$closes" ]; then
-      s_miss "pboard marker block" "unbalanced pboard markers in $rc (open=$opens close=$closes); repair the rc and re-run"
+    opens=$(grep -c '^# >>> pipeline pboard >>>$' "$rc" 2>/dev/null || true)
+    closes=$(grep -c '^# <<< pipeline pboard <<<$' "$rc" 2>/dev/null || true)
+    # Exactly ONE correctly-ORDERED marker pair, or ZERO markers (review-02 finding 1:
+    # equal counts are insufficient — a closer-before-opener passed the old guard and the
+    # awk filter then deleted trailing content). Any other layout is malformed -> refuse,
+    # file untouched. Own ONLY our markers — unmarked lines ride through verbatim (ADR 0003).
+    if [ "$opens" -eq 1 ] && [ "$closes" -eq 1 ]; then
+      first_open=$(grep -n  '^# >>> pipeline pboard >>>$' "$rc" | head -1 | cut -d: -f1)
+      first_close=$(grep -n '^# <<< pipeline pboard <<<$' "$rc" | head -1 | cut -d: -f1)
+      if [ "${first_open:-0}" -ge "${first_close:-0}" ]; then
+        s_miss "pboard marker block" "mis-ordered pboard markers in $rc (closer before opener); repair the rc and re-run"
+        return 0
+      fi
+      body=$(awk '/^# >>> pipeline pboard >>>$/{f=1;next} /^# <<< pipeline pboard <<<$/{f=0;next} !f' "$rc")
+    elif [ "$opens" -eq 0 ] && [ "$closes" -eq 0 ]; then
+      body=$(cat "$rc")
+    else
+      s_miss "pboard marker block" "malformed pboard markers in $rc (open=$opens close=$closes); repair the rc and re-run"
       return 0
     fi
-    if [ "$opens" -gt 0 ]; then
-      body=$(awk '/^# >>> pipeline pboard >>>$/{f=1;next} f && /^# <<< pipeline pboard <<<$/{f=0;next} !f' "$rc")
-    else
-      body=$(cat "$rc")
-    fi
   fi
-  # Write to the SAME inode (`> "$rc"`, never `mv`) so an existing rc keeps its mode and
-  # owner — a 0600 rc must NOT widen to 0644 (review-01 finding 4). Quoted heredoc: the
-  # pboard() body is written LITERALLY (vars expand when pboard runs, not now).
+  # Atomic, mode-preserving install (review-02 finding 6): the fully-rendered replacement
+  # is piped to _atomic_write, which never truncates the rc mid-write. Quoted heredoc: the
+  # pboard() body is written LITERALLY (its vars expand when pboard runs, not now).
   {
-    if [ -n "$body" ]; then printf '%s\n' "$body"; fi
+    [ -n "$body" ] && printf '%s\n' "$body"
     cat <<'PBOARD'
 # >>> pipeline pboard >>>
 pboard() {   # render + open the read-only pipeline dashboard (see drive.sh §Board)
@@ -392,7 +306,7 @@ pboard() {   # render + open the read-only pipeline dashboard (see drive.sh §Bo
 }
 # <<< pipeline pboard <<<
 PBOARD
-  } > "$rc"
+  } | _atomic_write "$rc" || s_miss "pboard rc write" "could not atomically write $rc (check $(dirname "$rc") is writable)"
 }
 # setup_kv serializes one KEY=VALUE line for the generated defaults, injection-safe
 # (review-01 finding 2). A value made only of shell-safe chars (alphanumerics and
@@ -423,17 +337,18 @@ setup_defaults() {                 # 5  write $DEFAULTS from the drive.defaults 
   # Resolve each field through the ask_* seam (SETUP_<KEY> env -> hardcoded default in
   # headless). Defaults mirror drive.defaults.example + arch §non-interactive interface;
   # paths stay literal ($HOME unexpanded) so the file is portable + byte-deterministic.
-  impl_transport=$(ask_value IMPL_TRANSPORT "impl transport (claude|orca)" orca)
+  impl_transport=$(ask_choice IMPL_TRANSPORT "impl transport" orca claude orca)
   impl_slash_cmd=$(ask_value IMPL_SLASH_CMD "impl slash command" /skill:pipeline-impl)
   impl_model=$(ask_value IMPL_MODEL "impl model (claude transport)" haiku)
   review_terminal_title=$(ask_value REVIEW_TERMINAL_TITLE "review terminal title" codex)
   review_slash_cmd=$(ask_value REVIEW_SLASH_CMD "review slash command" '$pipeline-review')
-  yolo=$(ask_value YOLO "YOLO grant (0|1)" 0)
+  yolo=$(ask_confirm YOLO "YOLO grant" 0)
   board_out=$(ask_value BOARD_OUT "board output path (empty=off)" "")
   pipeline_repo=$(ask_value PIPELINE_REPO "pipeline repo" '$HOME/workspace/pipeline')
   dashboard_repo=$(ask_value DASHBOARD_REPO "dashboard repo" '$HOME/workspace/pipeline-dashboard')
   skills_dir=$(ask_value SKILLS_DIR "skills dir" '$HOME/.agents/skills')
   tui_skills_dir=$(ask_value TUI_SKILLS_DIR "TUI skills dir" '$HOME/.pi/agent/skills')
+  if [ "$setup_abort" = 1 ]; then return 0; fi   # a prompt EOF aborts before any write (review-02 finding 5)
   # Each field is serialized via setup_kv (bare-when-safe, else single-quote-escaped) so
   # a hostile SETUP_* value can never inject/execute on source. REVIEW_SLASH_CMD always
   # single-quoted (setup_kvq) — its literal '$pipeline' must not expand. Content is
@@ -467,19 +382,28 @@ setup_target() {                    # 6  target .pipeline/roles.yaml (impl slot 
   # Copy $SETUP_PIPELINE_REPO/roles.yaml -> $SETUP_TARGET_REPO/.pipeline/roles.yaml,
   # rewriting the impl-slot placeholder <autonomous-coding-skill> -> goal-driven-implementation
   # (the real installed name; CONTRACT §roles.yaml invariant). The file stays tool-agnostic:
-  # NO runtime/LLM name is introduced on any slot (prd/arch/task/impl/review/hunt/improve) — the
-  # source template already satisfies this and the only rewrite is the placeholder substitution.
-  # Overwrite policy = .bak-on-change-only, the same idiom as setup_defaults (ADR 0003).
+  # NO runtime/LLM name is introduced on any slot — the source template already satisfies
+  # this and the only rewrite is the placeholder substitution. Overwrite policy is
+  # .bak-on-change-only (ADR 0003); the write is atomic + symlink-refused (review-02 2/6).
   local src dst out rf
   src=$(ask_value PIPELINE_REPO "pipeline repo (roles.yaml source)" "$PIPELINE_REPO")
   dst=$(ask_value TARGET_REPO "target repo (roles.yaml dest; empty=skip)" "")
   [ -n "$dst" ] || return 0
+  if [ "$setup_abort" = 1 ]; then return 0; fi
   if [ ! -f "$src/roles.yaml" ]; then
     s_miss "target roles.yaml source" "no roles.yaml at $src/roles.yaml (set SETUP_PIPELINE_REPO to the pipeline repo)"
     return 0
   fi
   mkdir -p "$dst/.pipeline"
   rf="$dst/.pipeline/roles.yaml"
+  # Refuse a symlinked destination (review-02 finding 2): a repo-controlled
+  # .pipeline/roles.yaml -> /victim must NOT be followed — setup would overwrite the
+  # external file. Refuse + leave the victim intact (non-zero via setup_bad). A symlinked
+  # .pipeline dir is refused for the same reason.
+  if [ -L "$rf" ] || [ -L "$dst/.pipeline" ]; then
+    s_miss "target roles.yaml dest" "$rf (or $dst/.pipeline) is a symlink — setup never follows a destination symlink; remove it and re-run"
+    return 0
+  fi
   # Literal substitution on the copied content — the ONLY rewrite (ADR 0003 file-gen idempotency).
   out=$(sed 's/<autonomous-coding-skill>/goal-driven-implementation/g' "$src/roles.yaml")
   # Idempotent overwrite (ADR 0003): identical -> no write, no .bak; changed -> cp to .bak, write.
@@ -487,11 +411,11 @@ setup_target() {                    # 6  target .pipeline/roles.yaml (impl slot 
     return 0
   fi
   if [ -f "$rf" ]; then cp "$rf" "$rf.bak"; fi
-  printf '%s\n' "$out" > "$rf"
+  printf '%s\n' "$out" | _atomic_write "$rf" || s_miss "target roles.yaml write" "could not atomically write $rf"
 }
 
 setup() {
-  # Non-interactive refusal (review-01 finding 5): the wizard is interactive by nature.
+  # Non-interactive refusal (review-01/02 finding 5): the wizard is interactive by nature.
   # Without an explicit --yes/SETUP_YES=1 AND without a TTY on stdin, REFUSE up front — a
   # read error/EOF is not consent and must not mutate files. The frozen happy-path tests
   # run headless via SETUP_YES=1; an operator on a real TTY is never blocked.
@@ -500,20 +424,27 @@ setup() {
     echo "  re-run with --yes (or SETUP_YES=1) for headless, or from an interactive terminal." >&2
     return 2
   fi
-  local setup_bad=0 doctor_rc=0
-  # Inner helpers mirror doctor()'s d_* shape: dynamic scoping makes setup_bad the
-  # counter they mutate while setup() is the active caller. s_step prints a section
-  # header; s_miss records an un-automatable step (honest-degrade — ADR 0002).
+  local setup_bad=0 setup_abort=0 doctor_rc=0
+  # Inner helpers mirror doctor()'s d_* shape: dynamic scoping makes setup_bad / setup_abort
+  # visible to the step functions while setup() is the active caller. s_step prints a section
+  # header; s_miss records an un-automatable step (honest-degrade — ADR 0002). setup_abort
+  # flips when an interactive prompt read fails / hits EOF (refusal, not consent).
   s_step() { printf -- '--- %s ----------------------------------------------------------\n' "$1"; }
   s_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; setup_bad=$((setup_bad+1)); }
 
-  if setup_do_step DEPS; then s_step deps; setup_preflight; fi
-  if setup_do_step SOURCES;   then s_step sources;   setup_sources;   fi
-  if setup_do_step SKILLS;    then s_step skills;    setup_skills;    fi
-  if setup_do_step DASHBOARD; then s_step dashboard; setup_dashboard_build; fi
-  if setup_do_step PBOARD;    then s_step pboard;    setup_pboard_block;    fi
-  if setup_do_step DEFAULTS;  then s_step defaults;  setup_defaults;        fi
-  if setup_do_step TARGET;    then s_step target;    setup_target;          fi
+  # ADR 0004: the wizard generates ONLY the three hermetic config artifacts (pboard block,
+  # drive.defaults, target roles.yaml) and ends on doctor. The external installer steps
+  # (deps/sources/skills/dashboard) are CUT; their SETUP_DO_* toggles are accepted but ignored.
+  if [ "$setup_abort" = 0 ] && setup_do_step PBOARD;   then s_step pboard;   setup_pboard_block; fi
+  if [ "$setup_abort" = 0 ] && setup_do_step DEFAULTS; then s_step defaults; setup_defaults;     fi
+  if [ "$setup_abort" = 0 ] && setup_do_step TARGET;   then s_step target;   setup_target;       fi
+
+  # A prompt EOF aborts the whole run (review-02 finding 5): stop before doctor and fail —
+  # a non-green, never a silent default that mutates files.
+  if [ "$setup_abort" = 1 ]; then
+    echo "drive.sh setup: aborted — a prompt read failed/EOF (refusal, not consent); no further files written." >&2
+    return 1
+  fi
 
   # Terminal verifier (ADR 0002): doctor is the sole success signal. When DO_DOCTOR=1
   # setup ends on doctor and OR's its rc with the setup-side bad count; when DO_DOCTOR=0
