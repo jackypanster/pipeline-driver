@@ -60,6 +60,16 @@ if [ ! -f "$DD2" ] && [ "$rc4" -ne 0 ]; then
   ok "non-TTY without --yes refuses (no write, non-zero exit — prompt error is not consent)"
 else bad "non-TTY silent default" "rc=$rc4 file_exists=$([ -f "$DD2" ] && echo yes || echo no)"; fi
 
+# --- 5. a COUNT-BALANCED but MIS-ORDERED marker layout (closer before opener) must NOT
+#        delete trailing content (review-02 finding 1: equal-count validation is insufficient).
+RC3="$TMP/zshrc3"
+printf '%s\n' 'keep-head' '# <<< pipeline pboard <<<' 'keep-mid' '# >>> pipeline pboard >>>' 'keep-TAIL-DANGER' > "$RC3"
+env HOME="$TMP" SETUP_SHELL_RC="$RC3" SETUP_YES=1 $OFF SETUP_DO_PBOARD=1 \
+  PATH="/usr/bin:/bin" bash "$DRIVE" setup >/dev/null 2>&1
+if grep -q 'keep-TAIL-DANGER' "$RC3"; then
+  ok "mis-ordered (closer-before-opener) markers preserve trailing content (require one ORDERED pair)"
+else bad "malformed marker ordering deletes content" "$(cat "$RC3" 2>&1)"; fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

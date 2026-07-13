@@ -50,6 +50,18 @@ if grep -qE '^impl:[[:space:]]+goal-driven-implementation' "$RF" \
   ok "existing roles.yaml backed up to .bak before overwrite"
 else bad "target roles.yaml backup" "$(cat "$RF" "$RF.bak" 2>&1)"; fi
 
+# --- 4. a destination symlink must NOT be followed (review-02 finding 2: a repo-controlled
+#        .pipeline/roles.yaml -> ../victim overwrote an external file). Refuse + leave victim intact.
+VIC="$TMP/victim.txt"; printf 'PRECIOUS-DO-NOT-OVERWRITE\n' > "$VIC"
+mkdir -p "$TMP/evil/.pipeline"; ln -s "$VIC" "$TMP/evil/.pipeline/roles.yaml"
+env HOME="$TMP" SETUP_YES=1 SETUP_PIPELINE_REPO="$TMP/pipeline" \
+  SETUP_DO_DEPS=0 SETUP_DO_SOURCES=0 SETUP_DO_SKILLS=0 SETUP_DO_DASHBOARD=0 \
+  SETUP_DO_PBOARD=0 SETUP_DO_DEFAULTS=0 SETUP_DO_TARGET=1 SETUP_TARGET_REPO="$TMP/evil" \
+  SETUP_DO_DOCTOR=0 PATH="/usr/bin:/bin" bash "$DRIVE" setup >/dev/null 2>&1; rc=$?
+if grep -q 'PRECIOUS-DO-NOT-OVERWRITE' "$VIC" && [ "$rc" -ne 0 ]; then
+  ok "destination symlink refused — external victim untouched (no symlink-follow escape)"
+else bad "target symlink escape" "rc=$rc victim=[$(cat "$VIC" 2>&1)]"; fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
