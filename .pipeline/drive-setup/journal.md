@@ -59,6 +59,7 @@ then run pipeline-task.
 On failure: attempts++; >=3 ⇒ blocked ⇒ run pipeline-hunt.
 <<< END
 
+
 ## seq=2 · 2026-07-12T14:21:04Z · arch→task · completed · by=claude-opus-4-8 (cc)
 done:   Walked drive.sh setup against the real drive.sh. Pinned it as a THIRD subcommand mirroring
         doctor(); named the exact non-interactive interface (SETUP_* env + 4 ask_* helpers, ONE code
@@ -877,4 +878,45 @@ Feature gotchas:
   - SETUP_DO_DEPS/SOURCES/SKILLS/DASHBOARD are accepted but ignored (the frozen OFF prefix still sets them — harmless).
 Done when: freeze gate empty, full suite green, semantic pass, explicit HUMAN merge confirm. Then cards → done + stage = done; NO further pipeline-impl (every card is review).
 On rejection: attempts++ on the offending card; route pipeline-impl (or pipeline-hunt at attempts>=3).
+<<< END
+
+## seq=17 · 2026-07-13T14:42:52Z · impl→review · completed · by=codex-review
+done:   review verdict written; awaiting human confirm
+        Freeze gate empty; all four cards review; exact full-verify green on PR head a76f838.
+        Semantic verdict is changes-requested; disposition follows in the next entry.
+output: .pipeline/drive-setup/reviews/review-03.md
+--- handoff ---
+>>> NEXT
+Do not merge PR #9. Read `.pipeline/drive-setup/reviews/review-03.md`; semantic review reproduced
+blocking PTY EOF and backup-symlink escapes in the narrowed core despite the clean freeze and green
+suite. The rejection disposition follows in the next journal entry.
+<<< END
+
+## seq=18 · 2026-07-13T14:48:11Z · review→hunt · blocked · by=codex-review (trunk I/O completed by cc — codex was tool-interrupted before commit)
+done:   Third semantic rejection (reviews/review-03.md). Blocking in the narrowed core: (1) interactive
+        EOF/Ctrl-D/fzf-cancel STILL writes defaults + exits 0 — the ask_* helpers run in command-substitution
+        SUBSHELLS so their setup_abort never reaches setup(); (2) the BACKUP path (roles.yaml.bak /
+        drive.defaults.bak) bypasses the symlink guard and overwrote an external victim; (3) _atomic_write
+        uses a predictable non-exclusive temp (symlink pre-creation). card 01 attempts 2 -> 3 => BLOCKED.
+        codex routes to pipeline-hunt (NOT a blind retry): the common design fault is that stateful prompt
+        helpers cannot signal through command substitution, and the write transaction guards only the final
+        destination while backup/temp stay symlink-following sinks. (codex wrote review-03.md + seq=17, then
+        hit a GPT cybersecurity refusal before committing; cc completed the trunk I/O and repaired an
+        out-of-order seq=17 append.)
+output: .pipeline/drive-setup/reviews/review-03.md, .pipeline/drive-setup/tasks/01.md
+--- handoff ---
+>>> NEXT
+Run pipeline-hunt on card 01 (blocked, attempts=3) — root-cause the DESIGN fault; do NOT blind-retry.
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: frontier SOTA required.
+Read: reviews/review-03.md (3 findings + probes) + review-01/02 (convergence history) + arch.md §ask_*
+  seam + docs/adr/0003,0004.
+Design faults to root-cause + fix (codex's diagnosis — arch-level, not an impl patch):
+  1. ask_* echoes its result via $(...) → helpers run in a SUBSHELL → setup_abort is lost → EOF/cancel
+     falls through to the default and mutates files. Re-architect abort signalling across the subshell
+     boundary (exit-status convention / sentinel file / move the mutating step out of $()).
+  2. The write transaction guards only the final destination; backup (.bak) + temp paths follow symlinks.
+     Apply no-symlink-follow + exclusive mktemp + fail-closed to EVERY artifact path.
+Hunt output: a root-cause report + a re-arch/re-scope recommendation routed to pipeline-task/arch. Human
+  decides whether to continue. On success cc surfaces it; the merge gate stays human.
 <<< END
