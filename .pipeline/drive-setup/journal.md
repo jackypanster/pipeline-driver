@@ -724,3 +724,15 @@ driver/impl does not touch it here). On failure (freeze dirty / full-verify red 
 semantic reject): per CONTRACT review-reject -- do NOT merge; report the gate that failed
 and the exact remediation.
 <<< END
+
+## seq=13 · 2026-07-13T00:08:34Z · impl→review · completed · by=codex-review
+done:   review verdict written; awaiting human confirm
+        Freeze gate empty; all five cards review; exact full-verify green on PR head 0e474f3.
+        Semantic verdict is changes-requested; disposition follows in the next entry.
+output: .pipeline/drive-setup/reviews/review-02.md
+--- handoff ---
+>>> NEXT
+Do not merge PR #9. Read `.pipeline/drive-setup/reviews/review-02.md`; semantic review found
+blocking malformed-state, symlink, partial-failure, and installed-runtime defects despite the
+clean freeze and green suite. The rejection disposition follows in the next journal entry.
+<<< END
