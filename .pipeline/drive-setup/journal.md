@@ -775,3 +775,54 @@ Feature gotchas:
 Done when: one new shared spec-rev turns every review-02 defect red, all card metadata is preserved,
 and an actionable card 01 todo routes to pipeline-impl. On task failure: attempts++; >=3 => hunt.
 <<< END
+
+## seq=15 · 2026-07-13T13:33:28Z · task→impl · completed · by=claude-opus-4-8 (cc)
+done:   Operator narrowed scope (ADR 0004): cut the un-convergent external installer steps + interactive
+        picker (removed test/setup-external.sh + card 05). Re-froze the reduced core with the two
+        hermetically-freezable review-02 defects — mis-ordered pboard markers (setup-safety.sh) and
+        target symlink escape (setup-target.sh). New shared spec-rev a0148cd; verified both new
+        assertions RED against PR #9 head. Cards 01(todo/attempts=2)/02/03/04 bumped; card 05 gone;
+        full-verify drops setup-external. (Note: the freeze commit was first mis-placed on feat, then
+        moved to main via cherry-pick — trunk is authoritative.)
+output: freeze a0148cd · docs/adr/0004 · tasks/{01,02,03,04}.md · current.json · (removed tasks/05.md, test/setup-external.sh)
+--- handoff ---
+>>> NEXT
+Run pipeline-impl on a FRESH session (assume you know nothing — rebuild from the repo + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: capable-local OK (impl only) — operator assigns the bot (pi, orca transport).
+First: git pull --rebase; no .env in this repo.
+GATE 1 (frozen spec): the feature's NEW single spec-rev is a0148cdc359192b64a68aaebce7ca5d2e205bc8c
+  (the re-scope freeze commit modifying test/setup-safety.sh + test/setup-target.sh and REMOVING
+  test/setup-external.sh). Old 59ad1d8 / 4ac12ec are dead.
+Read for context (before acting):
+  - https://github.com/jackypanster/pipeline/blob/main/CONTRACT.md — §Test ownership (re-freeze) +
+    §State authority (rebase in-flight branch onto advanced trunk BEFORE coding)
+  - .pipeline/drive-setup/docs/adr/0004-narrow-scope-to-config-gen-core.md — WHAT is cut vs kept (read FIRST)
+  - .pipeline/drive-setup/reviews/review-02.md — the 8 findings + probe evidence (1,2,5 you FIX; 3,4,7 CUT)
+  - .pipeline/drive-setup/tasks/01.md (todo, attempts=2 — LAST attempt before blocked) — your only target
+  - test/setup-safety.sh + test/setup-target.sh — the NEW frozen spec (the mis-ordered-marker + symlink cases)
+Your task (concrete, numbered):
+  1. REBASE FIRST: rebase `feat/drive-setup` onto advanced `main` (now a0148cd) and force-push YOUR
+     feature branch only (never main) — else review's freeze gate diffs a stale tip and false-rejects.
+  2. REMOVE the cut code from drive.sh (ADR 0004): setup_sources / setup_skills / setup_dashboard_build /
+     setup_preflight and their step dispatch, the `ask_multi` runtime picker + grok/SETUP_RUNTIMES logic.
+     The wizard keeps ONLY: plumbing + doctor, and the three file-gen steps (defaults, pboard, target).
+  3. Fix the KEPT-core defects (make the 5 setup tests green): finding 1 — pboard requires exactly ONE
+     correctly-ORDERED marker pair, refuse mis-ordered/malformed layouts (test/setup-safety.sh); finding
+     2 — target roles.yaml write REFUSES a symlinked destination, never follows it out of the repo
+     (test/setup-target.sh); finding 5 — treat any read-failure/EOF incl. TTY Ctrl-D as refuse (non-zero,
+     no write). Review-reads (no frozen test, reviewer verifies): finding 6 — rc write via same-dir temp
+     + atomic rename with recoverable backup; finding 8 — README:194 run-all lists every setup test.
+  4. Run each verify; when green, ensure the FULL suite (current.json.full-verify — 13 commands, no
+     setup-external now) is green on the branch HEAD. Flip card 01 → review, push metadata to trunk.
+Feature gotchas:
+  - impl writes ZERO spec tests; edit ONLY drive.sh + README.md. Do NOT touch test/setup-*.sh.
+  - Removing the external steps must not break the other frozen tests (their OFF prefixes set toggles
+    for now-removed steps — harmless).
+  - Card 01 is attempts=2: another review rejection = attempts=3 => blocked => pipeline-hunt. Get the
+    ordered-marker + symlink-refuse + EOF-refuse exactly right.
+Done when: all 13 full-verify commands green on feat/drive-setup HEAD (rebased onto a0148cd), card 01
+review, PR #9 updated. On success: run pipeline-review (codex) — freeze gate vs a0148cd + full suite +
+semantic (now a much smaller, hardened surface) + HUMAN merge confirm.
+On failure: attempts++ (=>3 blocked => pipeline-hunt).
+<<< END
