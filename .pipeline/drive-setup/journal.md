@@ -736,3 +736,42 @@ Do not merge PR #9. Read `.pipeline/drive-setup/reviews/review-02.md`; semantic 
 blocking malformed-state, symlink, partial-failure, and installed-runtime defects despite the
 clean freeze and green suite. The rejection disposition follows in the next journal entry.
 <<< END
+
+## seq=14 · 2026-07-13T00:09:46Z · review→task · failed · by=codex-review
+done:   Semantic review rejected PR #9 again; card 01 attempts incremented to 2 and reset to todo.
+        Missing regressions require a whole-feature re-freeze before product code is retried.
+output: .pipeline/drive-setup/reviews/review-02.md, .pipeline/drive-setup/tasks/01.md
+--- handoff ---
+>>> NEXT
+Run pipeline-task on a FRESH session (assume you know nothing — rebuild from git + CONTRACT.md).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: frontier SOTA required — operator assigns the bot; the pipeline cannot verify the model.
+First: git pull --rebase; no repo-local dotenv file was present during review.
+Read for context (before acting):
+  - /Users/user/workspace/pipeline/CONTRACT.md — normative whole-feature re-freeze protocol
+  - .pipeline/current.json — feature=drive-setup; stage=task; exact 14-command full-verify
+  - .pipeline/drive-setup/reviews/review-02.md — eight findings + direct probe evidence
+  - .pipeline/drive-setup/PRD.md + arch.md + CONTEXT.md + docs/adr/0002* + 0003*
+  - .pipeline/drive-setup/tasks/01.md — named retry target (todo, attempts=2)
+  - .pipeline/drive-setup/tasks/02.md..05.md — preserve their review/attempt state
+Your task (concrete, numbered):
+  1. Extend the frozen spec targets explicitly: `test/setup-safety.sh` must cover malformed marker
+     ordering, failure-atomic rc replacement, and TTY EOF/cancel; `test/setup-target.sh` must prove
+     destination symlinks cannot escape; `test/setup-external.sh` must cover build-fail/no-link,
+     existing runtime directories, the interactive runtime picker, and grok impl-only attachment.
+     Update the README run-all expectation in the appropriate card; do not edit product code.
+  2. Re-freeze ALL feature tests in one new freeze commit and update EVERY card to that same new
+     spec-rev in the record commit. Preserve cards 02–05 status/attempts/verify/impl-paths and preserve
+     card 01 attempts=2; only the named re-spec target remains todo.
+  3. Prove the new tests compile and fail against PR head 0e474f3. Then hand off to pipeline-impl with
+     an explicit instruction to rebase feat/drive-setup onto advanced main and force-push only that
+     in-flight feature branch before coding; never force-push main.
+Feature gotchas:
+  - Equal marker counts are insufficient: closer-before-opener deleted trailing rc content in review.
+  - A repo-controlled `.pipeline/roles.yaml` symlink overwrote an external victim file.
+  - `npm ci` failure still called `npm link`; `ln -sfn` nested inside a real runtime directory and
+    returned success; Ctrl-D in a PTY still wrote defaults.
+  - Card 01 is now attempts=2. Another review rejection makes attempts=3 => blocked => pipeline-hunt.
+Done when: one new shared spec-rev turns every review-02 defect red, all card metadata is preserved,
+and an actionable card 01 todo routes to pipeline-impl. On task failure: attempts++; >=3 => hunt.
+<<< END
