@@ -14,11 +14,15 @@
 # --- impl transport + model (stable across features) ---------------------------
 # claude: spawn a headless `claude` child per card. orca: type IMPL_SLASH_CMD into a
 # live Orca-managed TUI (e.g. pi) and poll the remote journal (use when the impl
-# model's plan only allows interactive coding tools).
+# model's plan only allows interactive coding tools). herdr: same driven-TUI shape
+# through a Herdr pane (`herdr pane run`; read-first {done,idle} guard; fails closed
+# unless Herdr's agent detection is hook/manifest-authoritative).
 IMPL_TRANSPORT=orca
 IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
 # ORCA_RESET_CMD=/new                 # per-card TUI reset; empty = off
 # ORCA_TERMINAL_TITLE=impl            # title fallback only — pin the HANDLE per run in drive.config
+# HERDR_RESET_CMD=/new                # herdr: per-card TUI reset (both sides guarded); empty = off
+# HERDR_PANE_CWD_MATCH=               # herdr: cwd SUBSTRING replacing the ==WORKDIR pane filter (TUI in a subdir)
 # TUI_SKILLS_DIR=$HOME/.pi/agent/skills   # where the TUI agent loads skills; doctor checks the impl slot resolves THERE
 # IMPL_MODEL=haiku                    # claude transport only; floor haiku, any alias or model id
 # Gateway (claude transport, non-Anthropic Anthropic-compatible model, e.g. GLM):
@@ -27,9 +31,10 @@ IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
 # IMPL_AUTH_TOKEN_ENV=
 
 # --- loop tuning ----------------------------------------------------------------
-# CARD_TIMEOUT=2700          # orca transport: max seconds to wait for one card
-# POLL_SECS=30               # orca transport: journal poll interval
-# ORCA_IDLE_TIMEOUT_MS=60000 # wait-for-tui-idle budget before each send
+# CARD_TIMEOUT=2700          # orca/herdr transports: max seconds to wait for one card
+# POLL_SECS=30               # orca/herdr transports: journal poll interval
+# ORCA_IDLE_TIMEOUT_MS=60000 # orca: wait-for-tui-idle budget before each send
+# HERDR_IDLE_TIMEOUT_MS=60000 # herdr: status-guard budget before each send
 # MAX_CONSEC_FAIL=2          # circuit breaker: consecutive failed impl runs
 # RETRY_ON_FAIL=1            # 1 = auto-retry informed failures (attempts<3); 0 = halt each
 # SETTINGS=/abs/path/to/settings.driver.json   # claude transport --settings template
