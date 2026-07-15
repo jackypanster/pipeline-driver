@@ -393,43 +393,90 @@ resolve_herdr_pane() {
 # matched_rule null) is NOT authority: on an unrecognized screen Herdr 0.7.3
 # reports exactly that plus fallback_reason=default_known_agent_idle_fallback and
 # state idle — the always-idle trap this guard exists to reject.
-herdr_agent_sample() {   # echoes "<state> <1|0 authority flag>"; empty on read failure
-  herdr agent explain "$1" --json 2>/dev/null | jq -r \
+herdr_agent_sample() {   # <pane> <timeout_ms> — echoes "<state> <1|0 authority flag>"; empty on failure/timeout
+  run_with_timeout_ms "$2" herdr agent explain "$1" --json 2>/dev/null | jq -r \
     '[(.state // "unknown"),
       (if (((.screen_detection_skip_reason == "full_lifecycle_hook_authority") or (.matched_rule != null))
            and (.fallback_reason == null)) then "1" else "0" end)]
      | join(" ")' 2>/dev/null
 }
 
-sleep_ms() { sleep "$(awk "BEGIN{printf \"%.3f\", $1/1000}")"; }
-now_ms() {   # wall clock in ms — perl Time::HiRes (macOS + Linux both ship perl); date-seconds fallback
-  perl -MTime::HiRes=time -e 'printf("%.0f", time()*1000)' 2>/dev/null || date +%s000
+# NB: single-quoted awk program + -v, deliberately — bash 3.2 (macOS /bin/bash)
+# mangles escaped quotes nested inside $(): `"$(awk "…\"…\"…")"` brace-expands the
+# program into garbage (field-hit 2026-07-15: the watchdog slept 0ms and killed
+# every sample at birth).
+sleep_ms() { sleep "$(awk -v ms="$1" 'BEGIN{printf "%.3f", ms/1000}')"; }
+
+# Clock for guard deadlines: MONOTONIC when available (perl Time::HiRes
+# clock_gettime — wall-clock steps from NTP/manual adjustment must not stretch or
+# shrink a timeout), else HiRes wall time, else whole-second date. The source is
+# probed and PINNED once (herdr transport only) — mixing epochs across calls
+# would corrupt deadline arithmetic (CLOCK_MONOTONIC counts from boot).
+NOW_MS_MODE=date
+if [ "$IMPL_TRANSPORT" = "herdr" ]; then
+  if perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'clock_gettime(CLOCK_MONOTONIC)' >/dev/null 2>&1; then
+    NOW_MS_MODE=mono
+  elif perl -MTime::HiRes=time -e 'time()' >/dev/null 2>&1; then
+    NOW_MS_MODE=wall
+  fi
+fi
+now_ms() {
+  case "$NOW_MS_MODE" in
+    mono) perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf("%.0f", clock_gettime(CLOCK_MONOTONIC)*1000)' ;;
+    wall) perl -MTime::HiRes=time -e 'printf("%.0f", time()*1000)' ;;
+    *)    date +%s000 ;;
+  esac
+}
+
+# Run <cmd…> with a hard kill after <ms> — a wedged herdr daemon must not hang the
+# guard past its budget. Portable (macOS ships neither `timeout` nor `setsid`):
+# background the child in its OWN process group (perl setpgrp+exec) and kill the
+# GROUP — killing only the direct child would leave grandchildren holding the
+# stdout pipe, and the consumer (jq) would block until they exit. Watchdog armed
+# alongside; the child's rc propagates; stdout passes through.
+run_with_timeout_ms() {   # <ms> <cmd…>
+  local ms=$1; shift
+  if command -v perl >/dev/null 2>&1; then
+    ( perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- "$@" & c=$!
+      ( sleep_ms "$ms"; kill -TERM -- -"$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!
+      rc=0; wait "$c" || rc=$?
+      kill -TERM "$w" 2>/dev/null
+      exit "$rc" )
+  else
+    ( "$@" & c=$!   # best effort without perl: direct-child kill only
+      ( sleep_ms "$ms"; kill -TERM "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!
+      rc=0; wait "$c" || rc=$?
+      kill -TERM "$w" 2>/dev/null
+      exit "$rc" )
+  fi
 }
 
 # Status guard, read-first: proceed iff the SAME sample is authoritative AND its
 # state ∈ {done,idle}; authoritative blocked halts fast; anything else (working /
-# unknown / non-authoritative / unreadable) re-polls until a REAL-CLOCK deadline
-# of HERDR_IDLE_TIMEOUT_MS from guard start. The deadline is checked BEFORE any
-# subsequent sample is taken, so slow `agent explain` calls and sleep overshoot
-# cannot stretch the budget; only the FIRST sample is unconditional (read-first —
-# an already-ready pane is accepted immediately). Herdr's done = finished-unviewed
-# vs idle = finished-viewed — an idle pane never re-fires done, so a bare
+# unknown / non-authoritative / unreadable) re-polls until a MONOTONIC deadline of
+# HERDR_IDLE_TIMEOUT_MS from guard start. The budget binds for real: the deadline
+# is checked before every sample, each `agent explain` call is itself KILLED at
+# the remaining budget (a wedged daemon cannot hang the guard), and a ready state
+# is accepted only when the sample also RETURNED within the deadline — nothing
+# authorizes a send past the budget. Herdr's done = finished-unviewed vs idle =
+# finished-viewed — an idle pane never re-fires done, so a bare
 # `herdr wait agent-status --status done` would hang (live-verified; PRD note).
 herdr_status_guard() {
-  local pane="$1" sample st auth="" now deadline first=1 step_ms=500 rem sl
+  local pane="$1" sample st auth="" deadline rem step_ms=500 sl
   deadline=$(( $(now_ms) + HERDR_IDLE_TIMEOUT_MS ))
   while :; do
-    now=$(now_ms)
-    if [ -z "$first" ] && [ "$now" -ge "$deadline" ]; then
+    rem=$(( deadline - $(now_ms) ))
+    if [ "$rem" -le 0 ]; then
       [ "$auth" = "1" ] || note "herdr: agent state for pane $pane is NOT authoritative (no lifecycle hook / no MATCHED manifest rule — the always-idle fallback). Fail closed: pin HERDR_PANE_ID to a pane with hook authority, or install that agent's Herdr integration (herdr agent explain $pane)"
       return 1
     fi
-    first=""
-    sample=$(herdr_agent_sample "$pane") || sample=""
+    sample=$(herdr_agent_sample "$pane" "$rem") || sample=""
     st="${sample%% *}"; auth="${sample##* }"
     if [ "$auth" = "1" ]; then
       case "$st" in
-        done|idle) return 0 ;;
+        done|idle)
+          [ "$(now_ms)" -le "$deadline" ] && return 0
+          return 1 ;;   # sample returned past the deadline — timeout, not consent
         blocked)   note "herdr: pane $pane agent is BLOCKED — halting fast (needs a human look)"; return 1 ;;
       esac
     fi
@@ -449,12 +496,12 @@ herdr_status_guard() {
 # tick on content in Herdr 0.7.3 — live-verified — so time is the only remaining
 # bound).
 herdr_reset_settle() {
-  local pane="$1" sample st now deadline step_ms=250 rem sl
+  local pane="$1" sample st deadline step_ms=250 rem sl
   deadline=$(( $(now_ms) + HERDR_RESET_SETTLE_MS ))
   while :; do
-    now=$(now_ms)
-    [ "$now" -ge "$deadline" ] && return 0
-    sample=$(herdr_agent_sample "$pane") || sample=""
+    rem=$(( deadline - $(now_ms) ))
+    [ "$rem" -le 0 ] && return 0
+    sample=$(herdr_agent_sample "$pane" "$rem") || sample=""
     st="${sample%% *}"
     case "$st" in done|idle|"") ;; *) return 0 ;; esac
     rem=$(( deadline - $(now_ms) ))

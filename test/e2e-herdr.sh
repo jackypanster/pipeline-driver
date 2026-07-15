@@ -67,6 +67,7 @@ sub="${1:-} ${2:-}"; shift 2 2>/dev/null || true
 case "$sub" in
   "pane list") cat "$HERDR_STUB_LIST_JSON" ;;
   "agent explain")
+    [ -n "${HERDR_STUB_HANG:-}" ] && sleep 60   # wedged daemon: never answers
     st="${HERDR_STUB_STATUS:-idle}"
     if [ -n "${HERDR_STUB_BUSY_AFTER_RUN:-}" ] && [ -s "${HERDR_STUB_RUN_LOG:-/dev/null}" ]; then st="working"; fi
     if [ -n "${HERDR_STUB_FLIP_FILE:-}" ]; then
@@ -271,6 +272,20 @@ echo "$out" | grep -q 'ok    herdr on PATH (IMPL_TRANSPORT=herdr)' || bad "docto
 out=$(DRIVE_DEFAULTS=/nonexistent PATH=/usr/bin:/bin bash "$DRIVER/drive.sh" doctor "$R/cfg" 2>&1)
 echo "$out" | grep -q 'herdr not on PATH but IMPL_TRANSPORT=herdr' \
   && ok "doctor: herdr present=ok / absent=MISS with remediation" || bad "doctor herdr miss: $out"
+rm -rf "$R"
+
+# 15) wedged daemon: `agent explain` hangs (60s) — every sample is KILLED at the
+#     remaining budget, so the guard gives up within ~HERDR_IDLE_TIMEOUT_MS instead
+#     of hanging, and nothing is sent
+R=$(mktemp -d); seed_repo "$R" 1; stub_herdr "$R"
+export HERDR_STUB_LIST_JSON="$R/list.json" HERDR_STUB_HANG=1 HERDR_STUB_RUN_LOG="$R/runs.log"
+t0=$SECONDS
+out=$(run "$R")
+dur=$((SECONDS - t0))
+unset HERDR_STUB_HANG HERDR_STUB_RUN_LOG
+echo "$out" | grep -q 'not ready within' && [ ! -s "$R/runs.log" ] && [ "$dur" -lt 30 ] \
+  && ok "hung explain -> sample killed at budget, guard fails in ${dur}s, zero sends" \
+  || bad "hung explain: dur=${dur}s $out $(cat "$R/runs.log" 2>/dev/null)"
 rm -rf "$R"
 
 unset HERDR_STUB_LIST_JSON 2>/dev/null || true
