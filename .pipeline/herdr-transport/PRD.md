@@ -38,9 +38,11 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
    (read `agent_status`, proceed iff `done`/`idle`), then one atomic submit
    `herdr pane run <id> "$IMPL_SLASH_CMD repo=$WORKDIR branch=$BRANCH"`. With `HERDR_RESET_CMD` set,
    the order is guard → `pane run <id> "$HERDR_RESET_CMD"` → guard → card submit (the Orca ordering,
-   `drive.sh:487-498` — never reset into a busy TUI, never submit before the reset settles). A failed
-   guard is fatal and sends NOTHING (zero `pane run` calls in the stub's argv). All asserted from the
-   stub's recorded argv, mirroring the orca send assertions.
+   `drive.sh:487-498` — never reset into a busy TUI, never submit before the reset settles). Every
+   guard failure is fatal and stops further sends at that point: a PRE-reset guard failure means
+   zero `pane run` calls; a POST-reset guard failure means exactly one `pane run` call (the reset)
+   and no card submission. Both failure paths asserted from the stub's recorded argv, alongside
+   the happy-path order — mirroring the orca send assertions.
 4. **Completion signal unchanged.** `run_impl_herdr` returns success only when `remote_seq` on
    `origin/<BRANCH>` advances (the same git-poll loop as `run_impl_orca`, `drive.sh:501-509`), never on
    a terminal signal; a stubbed no-progress run dumps the pane tail and returns 1 within `CARD_TIMEOUT`.
@@ -190,5 +192,9 @@ field setup.
   session's own environment; capture/unset + discovery exclusion + pinned==self rejection, new
   criterion 6) and P2 reset double-guard (guard → reset → guard → card, mirroring
   `run_impl_orca` `drive.sh:487-498`; failed guard sends nothing — folded into criterion 3).
+- Review round 3 (meta-PR relay, 2026-07-15): 1 finding applied — criterion 3's failure assertion
+  split by guard position: PRE-reset guard failure ⇒ zero `pane run` calls; POST-reset guard
+  failure ⇒ exactly one call (the reset) and no card submission. The blanket "zero calls" wording
+  was impossible to satisfy on the post-reset path.
 - Related KB notes: `86.116` (Herdr), `86.117` (Orca vs Herdr), `41.100`/`41.101` (pipeline two-track SOP).
 - `drive.sh` anchors cited above verified against `origin/main` @ `f960793`.
