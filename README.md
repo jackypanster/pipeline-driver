@@ -11,6 +11,11 @@ It is **forbidden to be smart**. The scheduler is deterministic bash; all LLM wo
 happens inside the per-stage `claude` child. It holds **zero authoritative state** —
 the target repo's `.pipeline/<feature>/journal.md` on the remote is the only truth.
 
+> **Approved design, not implemented:** [coordinator-design.md](coordinator-design.md) specifies an
+> opt-in, Git-driven CC → Pi → Codex coordinator. The current code and contract remain impl-only until
+> both the `pipeline` contract changes and the coordinator implementation land; do not treat the design
+> document as an available command or as permission to bypass the current gates.
+
 ## For agents (read this first)
 
 You are an agent in or around a `pipeline`-driven repo. When to reach for this driver, and when not:
