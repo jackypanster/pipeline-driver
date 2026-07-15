@@ -437,16 +437,22 @@ now_ms() {
 # (a) killing only the direct child would leave grandchildren holding the stdout
 # pipe — the consumer (jq) would block until they exit — and (b) disarming only the
 # watchdog shell would orphan its in-flight external `sleep` (one per poll: ~120
-# strays over a 60s budget). The watchdog escalates TERM → 200ms grace → KILL to
-# the child's group, so a TERM-trapping descendant cannot stretch the deadline
-# beyond that grace; the disarm is a group-KILL + reap. The child's rc propagates;
-# stdout passes through.
+# strays over a 60s budget). The watchdog sends TERM at max(0, ms-200) and KILL AT
+# the deadline — the 200ms grace is carved out of the budget, not appended, so a
+# TERM-trapping descendant still dies ON the deadline (budgets ≤200ms skip the
+# TERM phase: a straight deadline KILL beats TERMing a healthy sample at t=0).
+# The disarm is a group-KILL + reap. The child's rc propagates; stdout passes
+# through.
 run_with_timeout_ms() {   # <ms> <cmd…>
   local ms=$1; shift
-  ( secs=$(awk -v ms="$ms" 'BEGIN{printf "%.3f", ms/1000}')
+  ( term_ms=$(( ms > 200 ? ms - 200 : 0 ))
+    grace_ms=$(( ms - term_ms ))
+    term_s=$(awk -v ms="$term_ms" 'BEGIN{printf "%.3f", ms/1000}')
+    grace_s=$(awk -v ms="$grace_ms" 'BEGIN{printf "%.3f", ms/1000}')
     perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- "$@" & c=$!
     perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- bash -c \
-      'sleep "$1"; kill -TERM -- "-$2" 2>/dev/null; sleep 0.2; kill -KILL -- "-$2" 2>/dev/null' watchdog "$secs" "$c" \
+      '[ "$1" = "0.000" ] || { sleep "$1"; kill -TERM -- "-$3" 2>/dev/null; }; sleep "$2"; kill -KILL -- "-$3" 2>/dev/null' \
+      watchdog "$term_s" "$grace_s" "$c" \
       >/dev/null 2>&1 & w=$!
     rc=0; wait "$c" || rc=$?
     kill -KILL -- -"$w" 2>/dev/null || true

@@ -305,5 +305,20 @@ echo "$out" | grep -q 'not ready within' && [ ! -s "$R/runs.log" ] && [ "$dur" -
   || bad "TERM-immune explain: dur=${dur}s $out $(cat "$R/runs.log" 2>/dev/null)"
 rm -rf "$R"
 
+# 17) hard-deadline precision (unit-level, ms resolution — case 16's whole-run
+#     seconds bound cannot catch a deadline+grace overshoot): a TERM-immune child
+#     under run_with_timeout_ms 500 must die AT the ~500ms deadline (TERM is sent
+#     at budget-200ms; the grace is carved out of the budget, not appended). The
+#     pre-fix implementation measured ~750ms here and must fail this bound.
+eval "$(grep '^sleep_ms()' "$DRIVER/drive.sh")"
+eval "$(sed -n '/^run_with_timeout_ms()/,/^}/p' "$DRIVER/drive.sh")"
+t0=$(perl -MTime::HiRes=time -e 'printf("%.0f", time()*1000)')
+run_with_timeout_ms 500 bash -c 'trap "" TERM; while :; do sleep 1; done' >/dev/null 2>&1 || true
+t1=$(perl -MTime::HiRes=time -e 'printf("%.0f", time()*1000)')
+dur=$((t1 - t0))
+[ "$dur" -ge 450 ] && [ "$dur" -le 680 ] \
+  && ok "hard deadline: TERM-immune child killed at ~500ms budget (${dur}ms)" \
+  || bad "hard deadline: TERM-immune child took ${dur}ms on a 500ms budget (expected 450-680)"
+
 unset HERDR_STUB_LIST_JSON 2>/dev/null || true
 echo "----"; echo "passed=$pass failed=$fail"; [ "$fail" -eq 0 ]
