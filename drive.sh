@@ -402,17 +402,29 @@ herdr_agent_sample() {   # echoes "<state> <1|0 authority flag>"; empty on read 
 }
 
 sleep_ms() { sleep "$(awk "BEGIN{printf \"%.3f\", $1/1000}")"; }
+now_ms() {   # wall clock in ms — perl Time::HiRes (macOS + Linux both ship perl); date-seconds fallback
+  perl -MTime::HiRes=time -e 'printf("%.0f", time()*1000)' 2>/dev/null || date +%s000
+}
 
 # Status guard, read-first: proceed iff the SAME sample is authoritative AND its
 # state ∈ {done,idle}; authoritative blocked halts fast; anything else (working /
-# unknown / non-authoritative / unreadable) re-polls until HERDR_IDLE_TIMEOUT_MS —
-# the budget is honored exactly (the last sleep shrinks to the remaining budget;
-# no sample taken past the deadline is accepted). Herdr's done = finished-unviewed
+# unknown / non-authoritative / unreadable) re-polls until a REAL-CLOCK deadline
+# of HERDR_IDLE_TIMEOUT_MS from guard start. The deadline is checked BEFORE any
+# subsequent sample is taken, so slow `agent explain` calls and sleep overshoot
+# cannot stretch the budget; only the FIRST sample is unconditional (read-first —
+# an already-ready pane is accepted immediately). Herdr's done = finished-unviewed
 # vs idle = finished-viewed — an idle pane never re-fires done, so a bare
 # `herdr wait agent-status --status done` would hang (live-verified; PRD note).
 herdr_status_guard() {
-  local pane="$1" sample st auth elapsed_ms=0 step_ms=500 rem sl
+  local pane="$1" sample st auth="" now deadline first=1 step_ms=500 rem sl
+  deadline=$(( $(now_ms) + HERDR_IDLE_TIMEOUT_MS ))
   while :; do
+    now=$(now_ms)
+    if [ -z "$first" ] && [ "$now" -ge "$deadline" ]; then
+      [ "$auth" = "1" ] || note "herdr: agent state for pane $pane is NOT authoritative (no lifecycle hook / no MATCHED manifest rule — the always-idle fallback). Fail closed: pin HERDR_PANE_ID to a pane with hook authority, or install that agent's Herdr integration (herdr agent explain $pane)"
+      return 1
+    fi
+    first=""
     sample=$(herdr_agent_sample "$pane") || sample=""
     st="${sample%% *}"; auth="${sample##* }"
     if [ "$auth" = "1" ]; then
@@ -421,13 +433,10 @@ herdr_status_guard() {
         blocked)   note "herdr: pane $pane agent is BLOCKED — halting fast (needs a human look)"; return 1 ;;
       esac
     fi
-    if [ "$elapsed_ms" -ge "$HERDR_IDLE_TIMEOUT_MS" ]; then
-      [ "$auth" = "1" ] || note "herdr: agent state for pane $pane is NOT authoritative (no lifecycle hook / no MATCHED manifest rule — the always-idle fallback). Fail closed: pin HERDR_PANE_ID to a pane with hook authority, or install that agent's Herdr integration (herdr agent explain $pane)"
-      return 1
-    fi
-    rem=$((HERDR_IDLE_TIMEOUT_MS - elapsed_ms)); [ "$rem" -lt "$step_ms" ] && sl=$rem || sl=$step_ms
+    rem=$(( deadline - $(now_ms) ))
+    [ "$rem" -le 0 ] && continue
+    sl=$step_ms; [ "$rem" -lt "$sl" ] && sl=$rem
     sleep_ms "$sl"
-    elapsed_ms=$((elapsed_ms + sl))
   done
 }
 
@@ -435,20 +444,24 @@ herdr_status_guard() {
 # guard could read the PRE-reset ready state and submit the card before the reset is
 # processed. Watch for an observable transition (any non-ready sample = the TUI
 # visibly took the reset) and hand over to the guard the moment one shows; if none
-# shows within HERDR_RESET_SETTLE_MS, fall through to the guard after the window
-# (fast TUIs can finish a reset between polls, and pane `revision` does NOT tick on
-# content in Herdr 0.7.3 — live-verified — so time is the only remaining bound).
+# shows before a real-clock deadline of HERDR_RESET_SETTLE_MS, fall through to the
+# guard (fast TUIs can finish a reset between polls, and pane `revision` does NOT
+# tick on content in Herdr 0.7.3 — live-verified — so time is the only remaining
+# bound).
 herdr_reset_settle() {
-  local pane="$1" sample st elapsed_ms=0 step_ms=250 rem sl
-  while [ "$elapsed_ms" -lt "$HERDR_RESET_SETTLE_MS" ]; do
+  local pane="$1" sample st now deadline step_ms=250 rem sl
+  deadline=$(( $(now_ms) + HERDR_RESET_SETTLE_MS ))
+  while :; do
+    now=$(now_ms)
+    [ "$now" -ge "$deadline" ] && return 0
     sample=$(herdr_agent_sample "$pane") || sample=""
     st="${sample%% *}"
     case "$st" in done|idle|"") ;; *) return 0 ;; esac
-    rem=$((HERDR_RESET_SETTLE_MS - elapsed_ms)); [ "$rem" -lt "$step_ms" ] && sl=$rem || sl=$step_ms
+    rem=$(( deadline - $(now_ms) ))
+    [ "$rem" -le 0 ] && continue
+    sl=$step_ms; [ "$rem" -lt "$sl" ] && sl=$rem
     sleep_ms "$sl"
-    elapsed_ms=$((elapsed_ms + sl))
   done
-  return 0
 }
 
 remote_seq() {   # seq of the LAST journal entry on origin/<BRANCH>; empty output on parse failure

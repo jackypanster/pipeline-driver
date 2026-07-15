@@ -39,7 +39,7 @@ FEATURE=f
 IMPL_TRANSPORT=herdr
 CARD_TIMEOUT=5
 POLL_SECS=0
-HERDR_IDLE_TIMEOUT_MS=500
+HERDR_IDLE_TIMEOUT_MS=1500
 HERDR_RESET_SETTLE_MS=100
 EOF
   # default: ONE agent-bearing pane for the worktree (socket envelope — `pane list`
