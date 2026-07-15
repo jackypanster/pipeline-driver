@@ -35,6 +35,7 @@ IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
 # POLL_SECS=30               # orca/herdr transports: journal poll interval
 # ORCA_IDLE_TIMEOUT_MS=60000 # orca: wait-for-tui-idle budget before each send
 # HERDR_IDLE_TIMEOUT_MS=60000 # herdr: status-guard budget before each send
+# HERDR_RESET_SETTLE_MS=2000  # herdr: post-reset window to observe the TUI taking the reset
 # MAX_CONSEC_FAIL=2          # circuit breaker: consecutive failed impl runs
 # RETRY_ON_FAIL=1            # 1 = auto-retry informed failures (attempts<3); 0 = halt each
 # SETTINGS=/abs/path/to/settings.driver.json   # claude transport --settings template

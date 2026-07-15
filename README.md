@@ -87,10 +87,13 @@ semantics, GATE 1/2, the spec-rev protocol and every guard are transport-indepen
   `origin/<BRANCH>` identically. Deltas vs orca: the pre-send guard READS
   `agent_status` and proceeds on `done`/`idle` (Herdr's `done` = finished-unviewed
   never re-fires on an already-idle pane, so the driver never bare-waits on `done`),
-  halts fast on `blocked`, and is only trusted when Herdr's agent detection is
-  authoritative (lifecycle hook / manifest rule) — otherwise the transport **fails
-  closed** instead of typing into a pane whose always-idle fallback cannot see a
-  busy TUI. Pane discovery filters `herdr pane list` by pane `.cwd == WORKDIR`
+  halts fast on `blocked`, and validates readiness AND detection authority from the
+  SAME `agent explain` sample on every poll (lifecycle hook / MATCHED manifest rule,
+  no fallback — a merely loaded manifest on an unrecognized screen is the always-idle
+  fallback) — otherwise the transport **fails closed** instead of typing into a pane
+  whose always-idle fallback cannot see a busy TUI. A reset is followed by a settle
+  window (`HERDR_RESET_SETTLE_MS`) before the second guard, since `pane run` only
+  acknowledges enqueueing. Pane discovery filters `herdr pane list` by pane `.cwd == WORKDIR`
   (or the `HERDR_PANE_CWD_MATCH` substring, e.g. a TUI opened in a subdir),
   targets only agent-bearing panes, and excludes the driver's own pane; pin with
   `HERDR_PANE_ID`. Needs `herdr` + `jq`. Spec: `.pipeline/herdr-transport/PRD.md`.

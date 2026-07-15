@@ -40,6 +40,7 @@ IMPL_TRANSPORT=herdr
 CARD_TIMEOUT=5
 POLL_SECS=0
 HERDR_IDLE_TIMEOUT_MS=500
+HERDR_RESET_SETTLE_MS=100
 EOF
   # default: ONE agent-bearing pane for the worktree (socket envelope — `pane list`
   # prints it verbatim; there is no --json flag)
@@ -53,24 +54,36 @@ stub_herdr() { mkdir -p "$1/bin"; cp "$STUB_HERDR" "$1/bin/herdr"; chmod +x "$1/
 # DRIVE_DEFAULTS pinned: the operator's real global defaults must not leak in.
 run() { printf '%s\n' "${2:-AAA}" | DRIVE_DEFAULTS=/nonexistent PATH="$1/bin:$PATH" bash "$DRIVER/drive.sh" "$1/cfg" 2>&1; }
 
-# --- stub herdr CLI: list/get/explain/read canned; `pane run` logs + optionally
-# --- runs the coder hook. `pane get` flips to working after any run when
-# --- HERDR_STUB_BUSY_AFTER_RUN=1 (simulates a reset keeping the TUI busy).
+# --- stub herdr CLI: list/explain/read canned; `pane run` logs + optionally runs
+# --- the coder hook. `agent explain` is the guard's single sample source (state +
+# --- authority together): state flips to working after any run when
+# --- HERDR_STUB_BUSY_AFTER_RUN=1 (simulates a reset keeping the TUI busy);
+# --- HERDR_STUB_NO_AUTHORITY=1 serves the exact 0.7.3 unmatched-screen shape
+# --- (manifest LOADED, rule NOT matched, always-idle fallback in effect).
 STUB_HERDR=$(mktemp)
 cat > "$STUB_HERDR" <<'S'
 #!/usr/bin/env bash
 sub="${1:-} ${2:-}"; shift 2 2>/dev/null || true
 case "$sub" in
   "pane list") cat "$HERDR_STUB_LIST_JSON" ;;
-  "pane get")
+  "agent explain")
     st="${HERDR_STUB_STATUS:-idle}"
     if [ -n "${HERDR_STUB_BUSY_AFTER_RUN:-}" ] && [ -s "${HERDR_STUB_RUN_LOG:-/dev/null}" ]; then st="working"; fi
-    printf '{"id":"cli:pane:get","result":{"pane":{"pane_id":"%s","agent":"pi","agent_status":"%s"},"type":"pane"}}\n' "${1:-}" "$st" ;;
-  "agent explain")
+    if [ -n "${HERDR_STUB_FLIP_FILE:-}" ]; then
+      # first call: authoritative WORKING (matched rule); later calls: the pane
+      # drifted to an unmatched screen — fallback idle (authority lost mid-poll)
+      if [ -f "$HERDR_STUB_FLIP_FILE" ]; then
+        echo '{"agent":"codex","state":"idle","matched_rule":null,"manifest_source":"remote:codex.toml","screen_detection_skip_reason":null,"fallback_reason":"default_known_agent_idle_fallback"}'
+      else
+        : > "$HERDR_STUB_FLIP_FILE"
+        echo '{"agent":"codex","state":"working","matched_rule":{"id":"osc_title_working","region":"osc_title","state":"working"},"manifest_source":"remote:codex.toml","screen_detection_skip_reason":null,"fallback_reason":null}'
+      fi
+      exit 0
+    fi
     if [ -n "${HERDR_STUB_NO_AUTHORITY:-}" ]; then
-      echo '{"agent":"pi","state":"idle","matched_rule":null,"manifest_source":null,"screen_detection_skip_reason":null,"fallback_reason":"default_known_agent_idle_fallback"}'
+      echo '{"agent":"codex","state":"idle","matched_rule":null,"manifest_source":"remote:codex.toml","screen_detection_skip_reason":null,"fallback_reason":"default_known_agent_idle_fallback"}'
     else
-      echo '{"agent":"pi","state":"idle","matched_rule":null,"manifest_source":null,"screen_detection_skip_reason":"full_lifecycle_hook_authority"}'
+      printf '{"agent":"pi","state":"%s","matched_rule":null,"manifest_source":null,"screen_detection_skip_reason":"full_lifecycle_hook_authority","fallback_reason":null}\n' "$st"
     fi ;;
   "pane read") echo "stub tui tail line" ;;
   "pane run")
@@ -225,17 +238,31 @@ echo "$out" | grep -q 'all cards in review' && grep -q "^/skill:pipeline-impl re
   && ok "IMPL_SLASH_CMD override submitted verbatim" || bad "IMPL_SLASH_CMD override: $out $(cat "$R/runs.log" 2>/dev/null)"
 unset HERDR_STUB_ON_RUN HERDR_STUB_RUN_LOG; rm -rf "$R"
 
-# 12) FAIL CLOSED: agent state is NOT authoritative (always-idle fallback) -> fatal
-#     before any guard or send — zero pane run calls (PRD §Most fragile assumption)
+# 12) FAIL CLOSED: state=idle but NOT authoritative — the exact Herdr 0.7.3
+#     unmatched-screen shape (manifest_source SET, matched_rule null, always-idle
+#     fallback in effect). A loaded-but-unmatched manifest must NOT count as
+#     authority: the guard rejects every sample -> fatal, zero pane run calls.
 R=$(mktemp -d); seed_repo "$R" 1; stub_herdr "$R"
 export HERDR_STUB_LIST_JSON="$R/list.json" HERDR_STUB_NO_AUTHORITY=1 HERDR_STUB_RUN_LOG="$R/runs.log"
 out=$(run "$R")
 unset HERDR_STUB_NO_AUTHORITY HERDR_STUB_RUN_LOG
-echo "$out" | grep -q 'no authoritative agent detection' && [ ! -s "$R/runs.log" ] \
-  && ok "non-authoritative agent state -> fail closed, zero sends" || bad "fail closed: $out $(cat "$R/runs.log" 2>/dev/null)"
+echo "$out" | grep -q 'NOT authoritative' && [ ! -s "$R/runs.log" ] \
+  && ok "loaded-but-unmatched manifest (fallback idle) -> fail closed, zero sends" || bad "fail closed: $out $(cat "$R/runs.log" 2>/dev/null)"
 rm -rf "$R"
 
-# 13) doctor: IMPL_TRANSPORT=herdr -> herdr checked on PATH (ok with stub, MISS without).
+# 13) mid-poll authority loss: first sample is authoritative WORKING (matched rule),
+#     then the pane drifts to an unmatched screen and Herdr serves fallback idle.
+#     Readiness + authority are validated from the SAME sample — the fallback idle
+#     must NOT be accepted: fatal, zero sends.
+R=$(mktemp -d); seed_repo "$R" 1; stub_herdr "$R"
+export HERDR_STUB_LIST_JSON="$R/list.json" HERDR_STUB_FLIP_FILE="$R/flip" HERDR_STUB_RUN_LOG="$R/runs.log"
+out=$(run "$R")
+unset HERDR_STUB_FLIP_FILE HERDR_STUB_RUN_LOG
+echo "$out" | grep -q 'NOT authoritative' && [ ! -s "$R/runs.log" ] \
+  && ok "mid-poll authority loss -> fallback idle rejected, zero sends" || bad "authority loss: $out $(cat "$R/runs.log" 2>/dev/null)"
+rm -rf "$R"
+
+# 14) doctor: IMPL_TRANSPORT=herdr -> herdr checked on PATH (ok with stub, MISS without).
 #     PATH is RESTRICTED both times: doctor's info sections shell the real `orca`
 #     when present, which hangs without a running Orca app — keep it hermetic.
 R=$(mktemp -d); seed_repo "$R" 1; stub_herdr "$R"

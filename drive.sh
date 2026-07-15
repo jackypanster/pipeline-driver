@@ -92,6 +92,7 @@ HERDR_PANE_ID="${HERDR_PANE_ID:-}"                  # explicit w1:p1 pane id (wi
 HERDR_PANE_CWD_MATCH="${HERDR_PANE_CWD_MATCH:-}"    # cwd substring filter REPLACING the ==WORKDIR match (e.g. TUI opened in a subdir)
 HERDR_IDLE_TIMEOUT_MS="${HERDR_IDLE_TIMEOUT_MS:-60000}"
 HERDR_RESET_CMD="${HERDR_RESET_CMD:-}"              # optional per-card TUI reset (e.g. /new on pi); empty = off
+HERDR_RESET_SETTLE_MS="${HERDR_RESET_SETTLE_MS:-2000}"  # post-reset window to observe the TUI taking the reset before re-guarding
 IMPL_SLASH_CMD="${IMPL_SLASH_CMD:-/pipeline-impl}"  # stage command typed into the TUI (pi registers skills as /skill:pipeline-impl)
 CARD_TIMEOUT="${CARD_TIMEOUT:-2700}"                # orca/herdr transports: max seconds to wait for one card
 POLL_SECS="${POLL_SECS:-30}"                        # orca/herdr transports: journal poll interval
@@ -384,39 +385,70 @@ resolve_herdr_pane() {
   esac
 }
 
-herdr_pane_status() {   # echoes the pane's live agent_status ('' on any failure)
-  herdr pane get "$1" 2>/dev/null | jq -r '.result.pane.agent_status // empty' 2>/dev/null
+# One atomic sample per poll: agent STATE and detection AUTHORITY from the SAME
+# `herdr agent explain` payload — checking them in separate reads races (a
+# screen-manifest pane can leave its matched rule between the two reads and fall
+# back to always-idle). Authoritative = a lifecycle hook OR a MATCHED manifest
+# rule, with no fallback in effect. A merely LOADED manifest (manifest_source set,
+# matched_rule null) is NOT authority: on an unrecognized screen Herdr 0.7.3
+# reports exactly that plus fallback_reason=default_known_agent_idle_fallback and
+# state idle — the always-idle trap this guard exists to reject.
+herdr_agent_sample() {   # echoes "<state> <1|0 authority flag>"; empty on read failure
+  herdr agent explain "$1" --json 2>/dev/null | jq -r \
+    '[(.state // "unknown"),
+      (if (((.screen_detection_skip_reason == "full_lifecycle_hook_authority") or (.matched_rule != null))
+           and (.fallback_reason == null)) then "1" else "0" end)]
+     | join(" ")' 2>/dev/null
 }
 
-# Fail-closed authority check (PRD §Most fragile assumption): the pane's agent state
-# must come from a lifecycle hook or a matched manifest rule. Without that, Herdr's
-# default_known_agent_idle_fallback reports always-idle and the status guard would be
-# a no-op — typing into a possibly-busy TUI. Refuse instead of guessing.
-herdr_agent_authoritative() {
-  local js
-  js=$(herdr agent explain "$1" --json 2>/dev/null) || return 1
-  printf '%s' "$js" | jq -e \
-    '(.screen_detection_skip_reason == "full_lifecycle_hook_authority")
-     or (.matched_rule != null) or (.manifest_source != null)' >/dev/null 2>&1
-}
+sleep_ms() { sleep "$(awk "BEGIN{printf \"%.3f\", $1/1000}")"; }
 
-# Status guard, read-first: proceed iff agent_status ∈ {done,idle}; blocked halts fast;
-# anything else (working/unknown/unreadable) re-polls until HERDR_IDLE_TIMEOUT_MS.
-# Herdr's done = finished-unviewed vs idle = finished-viewed — an idle pane never
-# re-fires done, so a bare `herdr wait agent-status --status done` would hang
-# (live-verified; PRD status-guard note).
+# Status guard, read-first: proceed iff the SAME sample is authoritative AND its
+# state ∈ {done,idle}; authoritative blocked halts fast; anything else (working /
+# unknown / non-authoritative / unreadable) re-polls until HERDR_IDLE_TIMEOUT_MS —
+# the budget is honored exactly (the last sleep shrinks to the remaining budget;
+# no sample taken past the deadline is accepted). Herdr's done = finished-unviewed
+# vs idle = finished-viewed — an idle pane never re-fires done, so a bare
+# `herdr wait agent-status --status done` would hang (live-verified; PRD note).
 herdr_status_guard() {
-  local pane="$1" st waited_ms=0 step_ms=2000
+  local pane="$1" sample st auth elapsed_ms=0 step_ms=500 rem sl
   while :; do
-    st=$(herdr_pane_status "$pane") || st=""
-    case "$st" in
-      done|idle) return 0 ;;
-      blocked)   note "herdr: pane $pane agent is BLOCKED — halting fast (needs a human look)"; return 1 ;;
-    esac
-    [ "$waited_ms" -ge "$HERDR_IDLE_TIMEOUT_MS" ] && return 1
-    sleep $((step_ms / 1000))
-    waited_ms=$((waited_ms + step_ms))
+    sample=$(herdr_agent_sample "$pane") || sample=""
+    st="${sample%% *}"; auth="${sample##* }"
+    if [ "$auth" = "1" ]; then
+      case "$st" in
+        done|idle) return 0 ;;
+        blocked)   note "herdr: pane $pane agent is BLOCKED — halting fast (needs a human look)"; return 1 ;;
+      esac
+    fi
+    if [ "$elapsed_ms" -ge "$HERDR_IDLE_TIMEOUT_MS" ]; then
+      [ "$auth" = "1" ] || note "herdr: agent state for pane $pane is NOT authoritative (no lifecycle hook / no MATCHED manifest rule — the always-idle fallback). Fail closed: pin HERDR_PANE_ID to a pane with hook authority, or install that agent's Herdr integration (herdr agent explain $pane)"
+      return 1
+    fi
+    rem=$((HERDR_IDLE_TIMEOUT_MS - elapsed_ms)); [ "$rem" -lt "$step_ms" ] && sl=$rem || sl=$step_ms
+    sleep_ms "$sl"
+    elapsed_ms=$((elapsed_ms + sl))
   done
+}
+
+# After a reset send: `pane run` only ENQUEUES text+Enter — an immediately-following
+# guard could read the PRE-reset ready state and submit the card before the reset is
+# processed. Watch for an observable transition (any non-ready sample = the TUI
+# visibly took the reset) and hand over to the guard the moment one shows; if none
+# shows within HERDR_RESET_SETTLE_MS, fall through to the guard after the window
+# (fast TUIs can finish a reset between polls, and pane `revision` does NOT tick on
+# content in Herdr 0.7.3 — live-verified — so time is the only remaining bound).
+herdr_reset_settle() {
+  local pane="$1" sample st elapsed_ms=0 step_ms=250 rem sl
+  while [ "$elapsed_ms" -lt "$HERDR_RESET_SETTLE_MS" ]; do
+    sample=$(herdr_agent_sample "$pane") || sample=""
+    st="${sample%% *}"
+    case "$st" in done|idle|"") ;; *) return 0 ;; esac
+    rem=$((HERDR_RESET_SETTLE_MS - elapsed_ms)); [ "$rem" -lt "$step_ms" ] && sl=$rem || sl=$step_ms
+    sleep_ms "$sl"
+    elapsed_ms=$((elapsed_ms + sl))
+  done
+  return 0
 }
 
 remote_seq() {   # seq of the LAST journal entry on origin/<BRANCH>; empty output on parse failure
@@ -609,18 +641,14 @@ run_impl_orca() {
 # pane, then poll the REMOTE journal as the only completion signal. Herdr deltas
 # (PRD .pipeline/herdr-transport/PRD.md): send is `herdr pane run` (atomic
 # text+Enter, officially preferred over send-text + send-keys enter); the pre-send
-# guard reads agent_status ({done,idle} both mean ready — an idle pane never
-# re-fires done); and the guard is only trusted when the agent state source is
-# authoritative (hook/manifest) — otherwise FAIL CLOSED rather than type into a
-# pane whose always-idle fallback can't see a busy TUI.
+# guard validates readiness AND detection authority from the SAME explain sample on
+# every poll ({done,idle} both mean ready — an idle pane never re-fires done), and
+# FAILS CLOSED on non-authoritative state rather than type into a pane whose
+# always-idle fallback can't see a busy TUI. A reset is followed by a settle window
+# (herdr_reset_settle) before the second guard.
 run_impl_herdr() {
   local pane start s
   pane=$(resolve_herdr_pane) || return 1
-  herdr_agent_authoritative "$pane" || {
-    note "herdr: no authoritative agent detection for pane $pane (no lifecycle hook / manifest rule — state would be the always-idle fallback). Fail closed:"
-    note "       pin HERDR_PANE_ID to a pane whose agent has hook authority, or install that agent's Herdr integration (herdr agent explain $pane)"
-    return 1
-  }
   if [ -n "$HERDR_RESET_CMD" ]; then
     # The guard is as load-bearing for the reset as for the real send: typing the
     # reset into a BUSY TUI could corrupt an in-flight card. A guard failure is fatal.
@@ -628,6 +656,7 @@ run_impl_herdr() {
       || { note "herdr: pane $pane not ready within ${HERDR_IDLE_TIMEOUT_MS}ms (before reset)"; return 1; }
     herdr pane run "$pane" "$HERDR_RESET_CMD" >/dev/null 2>&1 \
       || { note "herdr: reset send failed for $pane"; return 1; }
+    herdr_reset_settle "$pane"
   fi
   herdr_status_guard "$pane" \
     || { note "herdr: pane $pane not ready within ${HERDR_IDLE_TIMEOUT_MS}ms"; return 1; }
