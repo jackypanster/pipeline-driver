@@ -96,7 +96,8 @@ semantics, GATE 1/2, the spec-rev protocol and every guard are transport-indepen
   acknowledges enqueueing. Pane discovery filters `herdr pane list` by pane `.cwd == WORKDIR`
   (or the `HERDR_PANE_CWD_MATCH` substring, e.g. a TUI opened in a subdir),
   targets only agent-bearing panes, and excludes the driver's own pane; pin with
-  `HERDR_PANE_ID`. Needs `herdr` + `jq`. Spec: `.pipeline/herdr-transport/PRD.md`.
+  `HERDR_PANE_ID`. Needs `herdr` + `jq` + `perl` (monotonic deadlines +
+  process-group kills). Spec: `.pipeline/herdr-transport/PRD.md`.
 
 Driven-TUI (orca/herdr) deltas to know: there is **no child exit code** — the only
 completion signal is the remote journal (a stuck TUI = `CARD_TIMEOUT` halt, with the

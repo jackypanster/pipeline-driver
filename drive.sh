@@ -174,7 +174,9 @@ doctor() {
       if command -v herdr >/dev/null 2>&1; then d_ok "herdr on PATH (IMPL_TRANSPORT=herdr)"
       else d_miss "herdr not on PATH but IMPL_TRANSPORT=herdr" "install Herdr (https://herdr.dev), or set IMPL_TRANSPORT=claude"; fi
       if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH (herdr transport needs it)"
-      else d_miss "jq not on PATH but IMPL_TRANSPORT=herdr" "brew install jq"; fi ;;
+      else d_miss "jq not on PATH but IMPL_TRANSPORT=herdr" "brew install jq"; fi
+      if command -v perl >/dev/null 2>&1; then d_ok "perl on PATH (herdr transport: monotonic deadlines + process-group kills)"
+      else d_miss "perl not on PATH but IMPL_TRANSPORT=herdr" "install perl (base system package on macOS/Linux)"; fi ;;
     claude)
       if command -v claude >/dev/null 2>&1; then d_ok "claude on PATH (IMPL_TRANSPORT=claude)"
       else d_miss "claude not on PATH but IMPL_TRANSPORT=claude" "install Claude Code, or set IMPL_TRANSPORT=orca"; fi
@@ -428,27 +430,28 @@ now_ms() {
   esac
 }
 
-# Run <cmd…> with a hard kill after <ms> — a wedged herdr daemon must not hang the
-# guard past its budget. Portable (macOS ships neither `timeout` nor `setsid`):
-# background the child in its OWN process group (perl setpgrp+exec) and kill the
-# GROUP — killing only the direct child would leave grandchildren holding the
-# stdout pipe, and the consumer (jq) would block until they exit. Watchdog armed
-# alongside; the child's rc propagates; stdout passes through.
+# Run <cmd…> with a hard deadline of <ms> — a wedged herdr daemon must not hang the
+# guard past its budget. Portable (macOS ships neither `timeout` nor `setsid`; perl
+# is a CHECKED herdr-transport dependency — preflight/doctor): both the child AND
+# the watchdog run in their OWN process groups (perl setpgrp+exec), because
+# (a) killing only the direct child would leave grandchildren holding the stdout
+# pipe — the consumer (jq) would block until they exit — and (b) disarming only the
+# watchdog shell would orphan its in-flight external `sleep` (one per poll: ~120
+# strays over a 60s budget). The watchdog escalates TERM → 200ms grace → KILL to
+# the child's group, so a TERM-trapping descendant cannot stretch the deadline
+# beyond that grace; the disarm is a group-KILL + reap. The child's rc propagates;
+# stdout passes through.
 run_with_timeout_ms() {   # <ms> <cmd…>
   local ms=$1; shift
-  if command -v perl >/dev/null 2>&1; then
-    ( perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- "$@" & c=$!
-      ( sleep_ms "$ms"; kill -TERM -- -"$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!
-      rc=0; wait "$c" || rc=$?
-      kill -TERM "$w" 2>/dev/null
-      exit "$rc" )
-  else
-    ( "$@" & c=$!   # best effort without perl: direct-child kill only
-      ( sleep_ms "$ms"; kill -TERM "$c" 2>/dev/null ) >/dev/null 2>&1 & w=$!
-      rc=0; wait "$c" || rc=$?
-      kill -TERM "$w" 2>/dev/null
-      exit "$rc" )
-  fi
+  ( secs=$(awk -v ms="$ms" 'BEGIN{printf "%.3f", ms/1000}')
+    perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- "$@" & c=$!
+    perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- bash -c \
+      'sleep "$1"; kill -TERM -- "-$2" 2>/dev/null; sleep 0.2; kill -KILL -- "-$2" 2>/dev/null' watchdog "$secs" "$c" \
+      >/dev/null 2>&1 & w=$!
+    rc=0; wait "$c" || rc=$?
+    kill -KILL -- -"$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    exit "$rc" )
 }
 
 # Status guard, read-first: proceed iff the SAME sample is authoritative AND its
@@ -578,7 +581,8 @@ case "$IMPL_TRANSPORT" in
     command -v jq   >/dev/null 2>&1 || halt "jq not on PATH (IMPL_TRANSPORT=orca needs it)" "install jq, then re-run" 2 ;;
   herdr)
     command -v herdr >/dev/null 2>&1 || halt "herdr CLI not on PATH (IMPL_TRANSPORT=herdr)" "install Herdr (https://herdr.dev), then re-run" 2
-    command -v jq    >/dev/null 2>&1 || halt "jq not on PATH (IMPL_TRANSPORT=herdr needs it)" "install jq, then re-run" 2 ;;
+    command -v jq    >/dev/null 2>&1 || halt "jq not on PATH (IMPL_TRANSPORT=herdr needs it)" "install jq, then re-run" 2
+    command -v perl  >/dev/null 2>&1 || halt "perl not on PATH (IMPL_TRANSPORT=herdr needs it: monotonic deadlines + process-group kills)" "install perl, then re-run" 2 ;;
   *) halt "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT'" "set IMPL_TRANSPORT=claude, orca, or herdr in drive.config" 2 ;;
 esac
 git_q rev-parse --git-dir >/dev/null 2>&1 || halt "WORKDIR is not a git repo: $WORKDIR" "clone the target repo there" 2

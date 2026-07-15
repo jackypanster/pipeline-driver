@@ -68,6 +68,9 @@ case "$sub" in
   "pane list") cat "$HERDR_STUB_LIST_JSON" ;;
   "agent explain")
     [ -n "${HERDR_STUB_HANG:-}" ] && sleep 60   # wedged daemon: never answers
+    if [ -n "${HERDR_STUB_HANG_HARD:-}" ]; then  # wedged AND TERM-immune: only KILL ends it
+      trap "" TERM; while :; do sleep 1; done
+    fi
     st="${HERDR_STUB_STATUS:-idle}"
     if [ -n "${HERDR_STUB_BUSY_AFTER_RUN:-}" ] && [ -s "${HERDR_STUB_RUN_LOG:-/dev/null}" ]; then st="working"; fi
     if [ -n "${HERDR_STUB_FLIP_FILE:-}" ]; then
@@ -286,6 +289,20 @@ unset HERDR_STUB_HANG HERDR_STUB_RUN_LOG
 echo "$out" | grep -q 'not ready within' && [ ! -s "$R/runs.log" ] && [ "$dur" -lt 30 ] \
   && ok "hung explain -> sample killed at budget, guard fails in ${dur}s, zero sends" \
   || bad "hung explain: dur=${dur}s $out $(cat "$R/runs.log" 2>/dev/null)"
+rm -rf "$R"
+
+# 16) TERM-immune wedged daemon: explain traps TERM and loops — the watchdog's
+#     TERM -> grace -> KILL escalation still ends every sample within ~the budget;
+#     the guard gives up, zero sends
+R=$(mktemp -d); seed_repo "$R" 1; stub_herdr "$R"
+export HERDR_STUB_LIST_JSON="$R/list.json" HERDR_STUB_HANG_HARD=1 HERDR_STUB_RUN_LOG="$R/runs.log"
+t0=$SECONDS
+out=$(run "$R")
+dur=$((SECONDS - t0))
+unset HERDR_STUB_HANG_HARD HERDR_STUB_RUN_LOG
+echo "$out" | grep -q 'not ready within' && [ ! -s "$R/runs.log" ] && [ "$dur" -lt 30 ] \
+  && ok "TERM-immune explain -> KILL escalation, guard fails in ${dur}s, zero sends" \
+  || bad "TERM-immune explain: dur=${dur}s $out $(cat "$R/runs.log" 2>/dev/null)"
 rm -rf "$R"
 
 unset HERDR_STUB_LIST_JSON 2>/dev/null || true
