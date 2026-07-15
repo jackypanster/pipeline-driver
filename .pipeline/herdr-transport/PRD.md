@@ -36,8 +36,11 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
    halts (`drive.sh:402`, extended to name `herdr`).
 3. **Send + status-guard order.** Against the `herdr` stub, one card issues, in order: a status guard
    (read `agent_status`, proceed iff `done`/`idle`), then one atomic submit
-   `herdr pane run <id> "$IMPL_SLASH_CMD repo=$WORKDIR branch=$BRANCH"` — asserted from the stub's
-   recorded argv, mirroring the orca send assertions.
+   `herdr pane run <id> "$IMPL_SLASH_CMD repo=$WORKDIR branch=$BRANCH"`. With `HERDR_RESET_CMD` set,
+   the order is guard → `pane run <id> "$HERDR_RESET_CMD"` → guard → card submit (the Orca ordering,
+   `drive.sh:487-498` — never reset into a busy TUI, never submit before the reset settles). A failed
+   guard is fatal and sends NOTHING (zero `pane run` calls in the stub's argv). All asserted from the
+   stub's recorded argv, mirroring the orca send assertions.
 4. **Completion signal unchanged.** `run_impl_herdr` returns success only when `remote_seq` on
    `origin/<BRANCH>` advances (the same git-poll loop as `run_impl_orca`, `drive.sh:501-509`), never on
    a terminal signal; a stubbed no-progress run dumps the pane tail and returns 1 within `CARD_TIMEOUT`.
@@ -45,6 +48,12 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
    appears in the usage header (`drive.sh:38-39`) and README; `test/e2e-herdr.sh` is added to the
    README run-all line only — `.pipeline/current.json` is NOT touched (it belongs to the parked
    `drive-setup` run; the next scheduled pipeline run regenerates its own full-verify list).
+6. **Self-pane safety.** Herdr injects `HERDR_PANE_ID` (alongside `HERDR_ENV`, `HERDR_SOCKET_PATH`, …)
+   into every pane process it manages — live-verified on this machine. `drive.sh` captures the
+   inherited value as the driver's self pane and unsets it BEFORE sourcing config (mirroring the
+   `ORCA_TERMINAL_HANDLE` capture, `drive.sh:53-60`); `resolve_herdr_pane` discovery excludes the
+   self pane, and an explicitly configured `HERDR_PANE_ID` equal to it halts with a note (mirrors
+   `resolve_orca_terminal`, `drive.sh:311-317`) — both cases covered in `test/e2e-herdr.sh`.
 
 ## Scope
 
@@ -53,8 +62,11 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
 - A `herdr)` branch in three `case "$IMPL_TRANSPORT"` sites: `run_impl` dispatch (`drive.sh:512`),
   transport preflight (`drive.sh:396`), and doctor (`drive.sh:155`).
 - `HERDR_*` config vars mirroring the `ORCA_*` block (`drive.sh:79-86`): `HERDR_PANE_ID`,
-  `HERDR_PANE_CWD_MATCH` (title/cwd disambiguator), `HERDR_IDLE_TIMEOUT_MS`, `HERDR_RESET_CMD`;
-  `CARD_TIMEOUT` / `POLL_SECS` reused as-is.
+  `HERDR_PANE_CWD_MATCH` (title/cwd disambiguator), `HERDR_IDLE_TIMEOUT_MS`, `HERDR_RESET_CMD`
+  (double-guarded per criterion 3); `CARD_TIMEOUT` / `POLL_SECS` reused as-is. `HERDR_PANE_ID`
+  collides with the env var Herdr injects into every pane it manages — the driver captures the
+  inherited value as its self pane and unsets it before sourcing config (criterion 6), exactly
+  the `ORCA_TERMINAL_HANDLE` discipline.
 - Command mapping (orca → herdr), all Herdr verbs **live-verified against herdr 0.7.3
   (socket protocol 16) on this machine, 2026-07-15** (`herdr pane --help` / `herdr wait --help`
   plus live read-only calls):
@@ -65,7 +77,7 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
   | `orca terminal wait --terminal <h> --for tui-idle --timeout-ms N` | status guard: `herdr pane get <id>` → proceed iff `.agent_status` ∈ {`done`,`idle`}; else poll until it leaves `working` or timeout (halt fast on `blocked`). **NOT** a bare `herdr wait agent-status --status done` — see status-guard note |
   | `orca terminal send --terminal <h> --text "…" --enter` | `herdr pane run <id> "…"` — atomic text+Enter submit, officially preferred over two-step `send-text` + `send-keys enter` (all three are first-class CLI verbs — no socket needed) |
   | `orca terminal read --terminal <h>` (tail) | `herdr pane read <id> --source recent --lines 20` |
-  | `ORCA_TERMINAL_HANDLE` (`term_…`) | `HERDR_PANE_ID` (`w1:p1`) |
+  | `ORCA_TERMINAL_HANDLE` (`term_…`) | `HERDR_PANE_ID` (`w1:p1`; Herdr also injects this env var into every pane — capture/unset per criterion 6) |
 
   Discovery filters on `.cwd` (the pane's base cwd), NOT `.foreground_cwd` — live evidence: a
   claude pane showed `cwd=…/workspace/pipeline` while `foreground_cwd` pointed into a plugin
@@ -133,8 +145,8 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
   over the two-step send).
 - ✅ RESOLVED: `foreground_cwd` drift is real (observed live — a foreground child had chdir'd
   into a plugin cache dir), but `pane.list` also carries the stable pane-level `.cwd`; discovery
-  filters on `.cwd`, and a pinned `HERDR_PANE_ID` still wins over discovery (mirrors pinning
-  `ORCA_TERMINAL_HANDLE`).
+  filters on `.cwd`, and a pinned `HERDR_PANE_ID` still wins over discovery after self-pane
+  rejection (mirrors pinning `ORCA_TERMINAL_HANDLE`; criterion 6).
 
 ## Most fragile assumption (protect at implementation + review)
 
@@ -173,5 +185,10 @@ field setup.
   submit replaces two-step send, protocol 16 demoted to provenance. The `done`-vs-`idle` hang and
   the `wait output` false-positive were re-verified live before applying; `pane run` preference
   confirmed against the official CLI reference.
+- Review round 2 (meta-PR relay, 2026-07-15): 2 findings applied — P1 self-pane safety (Herdr
+  injects `HERDR_PANE_ID` into every pane, live-verified `HERDR_PANE_ID=w9:p1` in the reviewing
+  session's own environment; capture/unset + discovery exclusion + pinned==self rejection, new
+  criterion 6) and P2 reset double-guard (guard → reset → guard → card, mirroring
+  `run_impl_orca` `drive.sh:487-498`; failed guard sends nothing — folded into criterion 3).
 - Related KB notes: `86.116` (Herdr), `86.117` (Orca vs Herdr), `41.100`/`41.101` (pipeline two-track SOP).
 - `drive.sh` anchors cited above verified against `origin/main` @ `f960793`.
