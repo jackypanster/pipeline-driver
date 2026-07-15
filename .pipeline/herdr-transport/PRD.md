@@ -2,8 +2,9 @@
 
 Stage: prd · Feature: `herdr-transport` · Repo: `jackypanster/pipeline-driver` · Branch: `main`
 
-> Filed as a queued TODO feature (prd stage only). Not scheduled; does not touch
-> `.pipeline/current.json` (which points at the active `drive-setup` run).
+> Filed 2026-07-14 as a queued TODO feature (prd stage only). Scheduled 2026-07-15 into the
+> **meta-PR lane** (see Resolved decisions); still does not touch `.pipeline/current.json`
+> (which stays on the parked `drive-setup` run).
 
 ## Problem
 
@@ -52,15 +53,21 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
 - `HERDR_*` config vars mirroring the `ORCA_*` block (`drive.sh:79-86`): `HERDR_PANE_ID`,
   `HERDR_PANE_CWD_MATCH` (title/cwd disambiguator), `HERDR_IDLE_TIMEOUT_MS`, `HERDR_RESET_CMD`;
   `CARD_TIMEOUT` / `POLL_SECS` reused as-is.
-- Command mapping (orca → herdr), all Herdr verbs code-verified against herdr.dev/docs this session:
+- Command mapping (orca → herdr), all Herdr verbs **live-verified against herdr 0.7.3
+  (socket protocol 16) on this machine, 2026-07-15** (`herdr pane --help` / `herdr wait --help`
+  plus live read-only calls):
 
   | orca (existing) | herdr (new) |
   |---|---|
-  | `orca terminal list --json` (filter by `$WORKDIR`) | `herdr pane list --json` → filter `.foreground_cwd == $WORKDIR` |
-  | `orca terminal wait --terminal <h> --for tui-idle --timeout-ms N` | `herdr wait agent-status <id> --status done --timeout-ms N` (opt. short-circuit on `blocked`) |
-  | `orca terminal send --terminal <h> --text "…" --enter` | socket `pane.send_text` + `pane.send_keys enter` (CLI wrapper if present) |
+  | `orca terminal list --json` (filter by `$WORKDIR`) | `herdr pane list` (JSON is the only output — **no `--json` flag**; prints the socket envelope) → filter `.result.panes[]` by `.cwd == $WORKDIR` |
+  | `orca terminal wait --terminal <h> --for tui-idle --timeout-ms N` | `herdr wait agent-status <id> --status done --timeout MS` (**flag is `--timeout`, not `--timeout-ms`**; opt. short-circuit on `blocked`) |
+  | `orca terminal send --terminal <h> --text "…" --enter` | `herdr pane send-text <id> "…"` + `herdr pane send-keys <id> enter` (confirmed first-class CLI verbs — no socket needed) |
   | `orca terminal read --terminal <h>` (tail) | `herdr pane read <id> --source recent --lines 20` |
   | `ORCA_TERMINAL_HANDLE` (`term_…`) | `HERDR_PANE_ID` (`w1:p1`) |
+
+  Discovery filters on `.cwd` (the pane's base cwd), NOT `.foreground_cwd` — live evidence: a
+  claude pane showed `cwd=…/workspace/pipeline` while `foreground_cwd` pointed into a plugin
+  cache dir its foreground child had chdir'd into.
 
 - A frozen red test `test/e2e-herdr.sh` cloned from `test/e2e-orca.sh` with a `herdr` stub.
 - README, usage-header, and `drive.config.example` additions.
@@ -85,26 +92,38 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
 - **Completion stays git-poll, transport-agnostic.** 📖 code-verified — `run_impl_orca`
   (`drive.sh:485-510`) types then polls `remote_seq` on `origin/<BRANCH>`; the terminal `wait` is only
   a pre-send idle guard, not the completion signal.
-- **Command mapping to Herdr CLI/socket.** 📖 code-verified against herdr.dev/docs this session:
-  `herdr pane read <id> --source recent --lines N`; `herdr wait agent-status <id> --status done|blocked`;
-  send via socket `pane.send_text` + `pane.send_keys enter`; pane discovery via `pane.list`
-  `foreground_cwd` field; socket at `~/.config/herdr/herdr.sock` (newline-delimited JSON).
+- **Command mapping to Herdr CLI.** 📖 live-verified 2026-07-15 against herdr 0.7.3 on this
+  machine (see the Scope table): every needed method has a first-class CLI verb; discovery via
+  `pane.list` `.cwd` field; socket at `~/.config/herdr/herdr.sock` (newline-delimited JSON,
+  protocol 16 — `ping` round-trip confirmed via `nc -U`).
+- **Transport surface = CLI verbs, not raw socket.** ✅ human-confirmed (2026-07-15 /think
+  session). The CLI is a 1:1 wrapper over the socket — its output IS the socket response
+  envelope — so nothing is lost by shelling it; raw socket would add an `nc -U`/`socat`
+  dependency plus hand-rolled request-id/timeout/error handling in bash, and make the stubbed
+  e2e harder (fake binary on PATH vs a background socket listener), for no capability the
+  git-poll driver uses (no `events.subscribe`). The socket protocol stays the versioned
+  compatibility contract (`herdr api schema`, protocol 16) — a doctor check target, not a
+  transport surface.
 - **Bonus over orca: catch `--status blocked` to halt fast** instead of burning `CARD_TIMEOUT` — Herdr
   distinguishes done/blocked natively (hook + screen-manifest). Optional; not required for parity.
 - **Same rationale as the orca transport** — drive an interactive TUI to dodge the Zhipu
   headless-fingerprint block. 📖 code-verified — `drive.sh` header:38-40.
-- **Build lane (full feature pipeline vs sibling-repo meta-PR) deferred** to when the feature is
-  scheduled — not fixed at prd (mirrors the `drive-setup` PRD's explicit-choice pattern).
+- **Build lane = meta-PR.** ✅ human-confirmed (2026-07-15 session, resolving the deferral):
+  implement on a feature branch off `main` (~150-line mirror of `run_impl_orca` plus a cloned
+  `test/e2e-herdr.sh`), reviewed + human-confirmed merge. NOT scheduled as the active pipeline
+  feature — `.pipeline/current.json` stays on the parked `drive-setup` run. Rationale: a mirror
+  of an already-reviewed pattern, with a live-verified verb surface and this frozen spec, gains
+  little from full arch/task stages.
 
-## Assumptions (unconfirmed defaults — challengeable at arch)
+## Assumptions (were unconfirmed defaults — all resolved by live verification 2026-07-15)
 
-- ⚠️ Herdr exposes a stable send verb. If only the socket exists (no `herdr pane send-text` CLI),
-  `run_impl_herdr` writes newline-delimited JSON to `~/.config/herdr/herdr.sock` via a small
-  `herdr_send()` helper rather than shelling a CLI. Confirm the exact verb via `herdr pane --help` at
-  arch/impl (a lift-the-live-value step, not a spike).
-- ⚠️ Pane resolution by `foreground_cwd` may be unreliable when the agent forks child processes;
-  default to a pinned `HERDR_PANE_ID` (as the KB note advises pinning `ORCA_TERMINAL_HANDLE`), with
-  cwd-match as the disambiguator.
+- ✅ RESOLVED: `herdr pane send-text` / `herdr pane send-keys` exist as first-class CLI verbs
+  (from `herdr pane --help`, herdr 0.7.3) — the socket-fallback `herdr_send()` helper is dropped
+  from scope.
+- ✅ RESOLVED: `foreground_cwd` drift is real (observed live — a foreground child had chdir'd
+  into a plugin cache dir), but `pane.list` also carries the stable pane-level `.cwd`; discovery
+  filters on `.cwd`, and a pinned `HERDR_PANE_ID` still wins over discovery (mirrors pinning
+  `ORCA_TERMINAL_HANDLE`).
 
 ## Most fragile assumption (protect at arch)
 
@@ -117,8 +136,20 @@ falls back to a **settle delay + tail-quiescence** on `herdr pane read --source 
 unchanged for N seconds = idle) — a deterministic guard independent of Herdr's agent-state model,
 mirroring `parse-tail.awk`'s read-side tolerance.
 
+Live evidence largely de-risking this (2026-07-15, herdr 0.7.3, this machine): detection is
+hook-authoritative for the target TUIs — `herdr agent explain` on a live pi pane reports
+`screen_detection_skip_reason: full_lifecycle_hook_authority`; four live panes simultaneously
+showed pi=`done`/`idle`, claude=`working`, codex=`idle`; `herdr wait agent-status --status idle`
+returned in ~0.1s with exit 0. The degrade path stays for agents without hook authority, and
+`herdr wait output <id> --match <text> [--regex] [--timeout MS]` is a ready-made primitive for
+the tail-quiescence guard.
+
 ## Provenance
 
 - Design origin: `/think` session 2026-07-14 (Claude Code, Opus 4.8).
+- Live verification backfill: `/think` session 2026-07-15 (Claude Code, Fable 5) — herdr 0.7.3,
+  socket protocol 16; verb surface from `herdr pane|wait|agent --help`; socket `ping` +
+  `pane.list` round-trips via `nc -U`; agent-state authority via `herdr agent explain`; lane +
+  transport-surface decisions human-confirmed same session.
 - Related KB notes: `86.116` (Herdr), `86.117` (Orca vs Herdr), `41.100`/`41.101` (pipeline two-track SOP).
 - `drive.sh` anchors cited above verified against `origin/main` @ `f960793`.
