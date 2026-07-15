@@ -24,7 +24,7 @@ Add a third impl transport `IMPL_TRANSPORT=herdr` that drives the impl loop by t
 reusing the existing git-poll completion path verbatim. Adding it must **not** change the `claude`
 (default) or `orca` transports; selecting it is a config switch and rollback is not-setting it.
 
-## Success criteria (freezable spec surface)
+## Success criteria (acceptance surface — meta-PR lane: enforced at review, no freeze gate)
 
 Testable hermetically in the existing `test/*.sh` style (model: `test/e2e-orca.sh` — a stubbed `herdr`
 on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
@@ -34,15 +34,17 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
 2. **Preflight.** `drive.sh doctor` with `IMPL_TRANSPORT=herdr` checks `herdr` + `jq` on PATH with
    exact remediation (mirrors the `orca` doctor branch, `drive.sh:155-160`); an unknown transport still
    halts (`drive.sh:402`, extended to name `herdr`).
-3. **Send + idle-guard order.** Against the `herdr` stub, one card issues, in order: an idle guard,
-   then a text send of `$IMPL_SLASH_CMD repo=$WORKDIR branch=$BRANCH`, then ENTER — asserted from the
-   stub's recorded argv, mirroring the orca send assertions.
+3. **Send + status-guard order.** Against the `herdr` stub, one card issues, in order: a status guard
+   (read `agent_status`, proceed iff `done`/`idle`), then one atomic submit
+   `herdr pane run <id> "$IMPL_SLASH_CMD repo=$WORKDIR branch=$BRANCH"` — asserted from the stub's
+   recorded argv, mirroring the orca send assertions.
 4. **Completion signal unchanged.** `run_impl_herdr` returns success only when `remote_seq` on
    `origin/<BRANCH>` advances (the same git-poll loop as `run_impl_orca`, `drive.sh:501-509`), never on
    a terminal signal; a stubbed no-progress run dumps the pane tail and returns 1 within `CARD_TIMEOUT`.
 5. **No regressions.** `bash -n drive.sh` clean; every existing `test/*.sh` passes; the new transport
    appears in the usage header (`drive.sh:38-39`) and README; `test/e2e-herdr.sh` is added to the
-   README run-all line and to the `.pipeline/current.json` full-verify list.
+   README run-all line only — `.pipeline/current.json` is NOT touched (it belongs to the parked
+   `drive-setup` run; the next scheduled pipeline run regenerates its own full-verify list).
 
 ## Scope
 
@@ -60,8 +62,8 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
   | orca (existing) | herdr (new) |
   |---|---|
   | `orca terminal list --json` (filter by `$WORKDIR`) | `herdr pane list` (JSON is the only output — **no `--json` flag**; prints the socket envelope) → filter `.result.panes[]` by `.cwd == $WORKDIR` |
-  | `orca terminal wait --terminal <h> --for tui-idle --timeout-ms N` | `herdr wait agent-status <id> --status done --timeout MS` (**flag is `--timeout`, not `--timeout-ms`**; opt. short-circuit on `blocked`) |
-  | `orca terminal send --terminal <h> --text "…" --enter` | `herdr pane send-text <id> "…"` + `herdr pane send-keys <id> enter` (confirmed first-class CLI verbs — no socket needed) |
+  | `orca terminal wait --terminal <h> --for tui-idle --timeout-ms N` | status guard: `herdr pane get <id>` → proceed iff `.agent_status` ∈ {`done`,`idle`}; else poll until it leaves `working` or timeout (halt fast on `blocked`). **NOT** a bare `herdr wait agent-status --status done` — see status-guard note |
+  | `orca terminal send --terminal <h> --text "…" --enter` | `herdr pane run <id> "…"` — atomic text+Enter submit, officially preferred over two-step `send-text` + `send-keys enter` (all three are first-class CLI verbs — no socket needed) |
   | `orca terminal read --terminal <h>` (tail) | `herdr pane read <id> --source recent --lines 20` |
   | `ORCA_TERMINAL_HANDLE` (`term_…`) | `HERDR_PANE_ID` (`w1:p1`) |
 
@@ -69,7 +71,14 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
   claude pane showed `cwd=…/workspace/pipeline` while `foreground_cwd` pointed into a plugin
   cache dir its foreground child had chdir'd into.
 
-- A frozen red test `test/e2e-herdr.sh` cloned from `test/e2e-orca.sh` with a `herdr` stub.
+  Status-guard note: Herdr distinguishes `done` (finished, not yet viewed) from `idle` (finished
+  and viewed); an already-`idle` pane never transitions back to `done`, so waiting on
+  `--status done` alone hangs. Live-verified on the same idle pi pane: `wait agent-status
+  --status idle` exits 0 in ~0.1s; `--status done` times out (exit 1). The guard must READ the
+  current state first and accept either terminal state.
+
+- An acceptance e2e test `test/e2e-herdr.sh` cloned from `test/e2e-orca.sh` with a `herdr` stub
+  (meta-PR lane: no freeze gate — the test lands with the implementation and review enforces it).
 - README, usage-header, and `drive.config.example` additions.
 
 ## Non-scope
@@ -101,9 +110,9 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
   envelope — so nothing is lost by shelling it; raw socket would add an `nc -U`/`socat`
   dependency plus hand-rolled request-id/timeout/error handling in bash, and make the stubbed
   e2e harder (fake binary on PATH vs a background socket listener), for no capability the
-  git-poll driver uses (no `events.subscribe`). The socket protocol stays the versioned
-  compatibility contract (`herdr api schema`, protocol 16) — a doctor check target, not a
-  transport surface.
+  git-poll driver uses (no `events.subscribe`). The socket protocol version (16 at authoring, via
+  `herdr api schema`) is recorded as provenance only — doctor checks stay exactly criterion 2's
+  `herdr` + `jq` on PATH.
 - **Bonus over orca: catch `--status blocked` to halt fast** instead of burning `CARD_TIMEOUT` — Herdr
   distinguishes done/blocked natively (hook + screen-manifest). Optional; not required for parity.
 - **Same rationale as the orca transport** — drive an interactive TUI to dodge the Zhipu
@@ -112,37 +121,43 @@ on PATH, temp `HOME`/XDG, no network, no real Herdr runtime):
   implement on a feature branch off `main` (~150-line mirror of `run_impl_orca` plus a cloned
   `test/e2e-herdr.sh`), reviewed + human-confirmed merge. NOT scheduled as the active pipeline
   feature — `.pipeline/current.json` stays on the parked `drive-setup` run. Rationale: a mirror
-  of an already-reviewed pattern, with a live-verified verb surface and this frozen spec, gains
-  little from full arch/task stages.
+  of an already-reviewed pattern, with a live-verified verb surface and this reviewed spec, gains
+  little from full arch/task stages. Consequence: no freeze gate applies — spec-protection
+  responsibility moves to implementation discipline + the review gate.
 
 ## Assumptions (were unconfirmed defaults — all resolved by live verification 2026-07-15)
 
-- ✅ RESOLVED: `herdr pane send-text` / `herdr pane send-keys` exist as first-class CLI verbs
-  (from `herdr pane --help`, herdr 0.7.3) — the socket-fallback `herdr_send()` helper is dropped
-  from scope.
+- ✅ RESOLVED: `herdr pane run` / `pane send-text` / `pane send-keys` exist as first-class CLI
+  verbs (from `herdr pane --help`, herdr 0.7.3) — the socket-fallback `herdr_send()` helper is
+  dropped from scope, and the transport uses `pane run` (atomic text+Enter, officially preferred
+  over the two-step send).
 - ✅ RESOLVED: `foreground_cwd` drift is real (observed live — a foreground child had chdir'd
   into a plugin cache dir), but `pane.list` also carries the stable pane-level `.cwd`; discovery
   filters on `.cwd`, and a pinned `HERDR_PANE_ID` still wins over discovery (mirrors pinning
   `ORCA_TERMINAL_HANDLE`).
 
-## Most fragile assumption (protect at arch)
+## Most fragile assumption (protect at implementation + review)
 
-The plan assumes **Herdr reliably reports `done`/`idle` for the specific coder TUI** (`pi`/`codex`/
-`claude`) — a lifecycle hook or screen-manifest rule matches, so `herdr wait agent-status --status done`
-fires instead of falling back to `default_known_agent_idle_fallback` (always-idle). If it does not, the
-idle guard is a no-op and the driver could type a card into a busy TUI and **corrupt an in-flight
-card**. Required degrade: when `wait agent-status` is unreliable for the chosen agent, the idle guard
-falls back to a **settle delay + tail-quiescence** on `herdr pane read --source recent` (buffer
-unchanged for N seconds = idle) — a deterministic guard independent of Herdr's agent-state model,
-mirroring `parse-tail.awk`'s read-side tolerance.
+The plan assumes **Herdr reliably reports agent state for the specific coder TUI** (`pi`/`codex`/
+`claude`) — a lifecycle hook or screen-manifest rule matches, so the status guard reads real state
+instead of the `default_known_agent_idle_fallback` (always-idle). If it does not, the guard is a
+no-op and the driver could type a card into a busy TUI and **corrupt an in-flight card**. Required
+degrade: **fail closed.** When `herdr agent explain <id>` shows no authoritative detection for the
+pane's agent (no lifecycle hook, no manifest rule — state would come from the always-idle
+fallback), `run_impl_herdr` HALTS with remediation (pin `HERDR_PANE_ID` to a pane whose agent has
+hook authority, or install that agent's Herdr integration) instead of guessing readiness.
+`wait output --match` is NOT a substitute guard: it only proves text exists in the buffer —
+live-tested to succeed instantly on an `agent_status=working` pane — and the official CLI
+reference scopes it to plain commands/servers, reserving `wait agent-status` for coding agents.
 
 Live evidence largely de-risking this (2026-07-15, herdr 0.7.3, this machine): detection is
 hook-authoritative for the target TUIs — `herdr agent explain` on a live pi pane reports
 `screen_detection_skip_reason: full_lifecycle_hook_authority`; four live panes simultaneously
 showed pi=`done`/`idle`, claude=`working`, codex=`idle`; `herdr wait agent-status --status idle`
-returned in ~0.1s with exit 0. The degrade path stays for agents without hook authority, and
-`herdr wait output <id> --match <text> [--regex] [--timeout MS]` is a ready-made primitive for
-the tail-quiescence guard.
+returned in ~0.1s with exit 0 while `--status done` on the same idle pane timed out (exit 1) —
+the `done`-vs-`idle` distinction that forces the read-first guard. All three target TUIs carry
+hook authority on this machine, so the fail-closed degrade is not expected to trigger in the
+field setup.
 
 ## Provenance
 
@@ -151,5 +166,12 @@ the tail-quiescence guard.
   socket protocol 16; verb surface from `herdr pane|wait|agent --help`; socket `ping` +
   `pane.list` round-trips via `nc -U`; agent-state authority via `herdr agent explain`; lane +
   transport-surface decisions human-confirmed same session.
+- Review round 1 (meta-PR relay, 2026-07-15): 7 findings applied — freeze-language purged
+  (meta-PR lane has no freeze gate), `current.json` acceptance item removed, read-first
+  {`done`,`idle`} status guard replaces bare `wait --status done`, degrade is fail-closed
+  (tail-quiescence and `wait output --match` rejected as readiness proofs), `pane run` atomic
+  submit replaces two-step send, protocol 16 demoted to provenance. The `done`-vs-`idle` hang and
+  the `wait output` false-positive were re-verified live before applying; `pane run` preference
+  confirmed against the official CLI reference.
 - Related KB notes: `86.116` (Herdr), `86.117` (Orca vs Herdr), `41.100`/`41.101` (pipeline two-track SOP).
 - `drive.sh` anchors cited above verified against `origin/main` @ `f960793`.
