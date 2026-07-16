@@ -984,6 +984,213 @@ emit_status_json() {  # <state> <rkey> <feat> <seq> <commit> <delivery> <halt> <
      halt:n($halt), lock:$lock}'
 }
 
+# ---- watch/resume helpers (design §8/§13/§14/§16/§19) ---------------------------
+# Globals set up by cmd_watch/cmd_resume after config load. W_FEATDIR is the
+# <state-root>/<repo-key>/<feature> directory; W_LOCK_HELD is 1 while THIS process
+# holds the feature lock. coord_fatal uses these to write audit/halt; when they are
+# unset (a fatal before state set-up) it falls back to sanitized stderr only.
+W_FEATURE=""; W_FEATDIR=""; W_RKEY=""; W_REPOROOT=""; W_LOCK_HELD=0
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }   # ISO8601 UTC, second resolution
+
+# atomic_write <path> <mode-octal>  — read content from stdin, write it via an
+# exclusive SAME-DIRECTORY temp file + atomic rename (§13/§19). Rejects a symlink
+# destination (the rename would otherwise follow it). Returns nonzero on any failure;
+# the temp is removed on all error paths so nothing partial is left behind.
+atomic_write() {
+  local path=$1 mode=$2 dir tmp
+  [ -L "$path" ] && return 1                 # symlink destination forbidden (§19)
+  dir=$(dirname "$path")
+  [ -d "$dir" ] || return 1
+  tmp=$(mktemp "$dir/.tmp.XXXXXX") || return 1
+  chmod "$mode" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  cat > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# state_setup_dirs <featdir> — create the state-root/<repo-key>/<feature> chain
+# at 0700 (idempotent). Validates the state-root PARENT chain and the root itself
+# reject symlinked/non-directory ancestors BEFORE creating anything (§19; a
+# rejected parent poisons the subtree). Returns nonzero + sets STATE_SETUP_ERR on a
+# blocking violation.
+state_setup_dirs() {
+  local featd=$1 root rp rp2 p
+  root=$(state_root)
+  rp=$(resolve_path "$root")
+  STATE_SETUP_ERR=""
+  # parent chain (above the root): reject symlinks and existing non-directories.
+  p=$(dirname "$rp")
+  while [ "$p" != "/" ] && [ -n "$p" ]; do
+    if [ -L "$p" ]; then STATE_SETUP_ERR="parent of state root ($p) is a symlink — §19 forbids symlinked state parents"; return 1; fi
+    if [ -e "$p" ] && [ ! -d "$p" ]; then STATE_SETUP_ERR="ancestor of state root ($p) exists but is not a directory"; return 1; fi
+    p=$(dirname "$p")
+  done
+  # the root itself, if it exists, must be a real directory (not a symlink / file).
+  if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
+    STATE_SETUP_ERR="state root ($root) is a symlink or non-directory entry"; return 1; fi
+  rp2=$(resolve_path "$featd"); p=$(dirname "$rp2")
+  while [ "$p" != "$rp" ] && [ "$p" != "/" ] && [ -n "$p" ]; do
+    if [ -L "$p" ]; then STATE_SETUP_ERR="state component ($p) is a symlink"; return 1; fi
+    p=$(dirname "$p")
+  done
+  [ -d "$root" ] || { mkdir -p "$root" 2>/dev/null && chmod 700 "$root" 2>/dev/null || { STATE_SETUP_ERR="cannot create state root $root"; return 1; }; }
+  # repo-key dir + feature dir, 0700.
+  local rd; rd=$(dirname "$featd")
+  [ -d "$rd" ] || { mkdir -p "$rd" 2>/dev/null && chmod 700 "$rd" 2>/dev/null || { STATE_SETUP_ERR="cannot create repo state dir $rd"; return 1; }; }
+  [ -d "$featd" ] || { mkdir -p "$featd" 2>/dev/null && chmod 700 "$featd" 2>/dev/null || { STATE_SETUP_ERR="cannot create feature state dir $featd"; return 1; }; }
+  return 0
+}
+
+# ---- audit (§16) ---------------------------------------------------------------
+# audit_commit <featdir> — append ONE events.jsonl line built from the A_* globals
+# (caller sets A_EVENT plus any applicable A_* fields; missing ⇒ null). Returns
+# nonzero on append failure (caller fatalizes AUDIT_WRITE_FAILED). The events file
+# is opened append-only; if it is a symlink the append is refused (§19).
+audit_commit() {
+  local featd=$1 evf="$1/events.jsonl"
+  [ -L "$evf" ] && return 1
+  jq -nc --arg timestamp "$(now_iso)" \
+        --arg event "${A_EVENT:-}" \
+        --arg remote_identity "${W_RKEY:-}" \
+        --arg branch "${BRANCH:-}" \
+        --arg feature "${W_FEATURE:-}" \
+        --arg journal_commit "${A_COMMIT:-}" \
+        --arg journal_seq "${A_SEQ:-}" \
+        --arg transition "${A_TRANSITION:-}" \
+        --arg stage_status "${A_STATUS:-}" \
+        --arg action "${A_ACTION:-}" \
+        --arg target_role "${A_TARGET_ROLE:-}" \
+        --arg pane_id "${A_PANE:-}" \
+        --arg result "${A_RESULT:-}" \
+        --arg duration_ms "${A_DURATION_MS:-}" \
+        --arg error_code "${A_ERROR_CODE:-}" \
+        --arg error_context "${A_ERROR_CONTEXT:-}" \
+        --arg next_action "${A_NEXT_ACTION:-}" '
+    def n(e): if (e|type)=="string" and (e|length)>0 then e else null end;
+    def num(e): if (e|type)=="string" and (e|length)>0 then (e|tonumber) else null end;
+    {timestamp:$timestamp, event:$event,
+     remote_identity:n($remote_identity), branch:n($branch), feature:n($feature),
+     journal_commit:n($journal_commit), journal_seq:num($journal_seq),
+     transition:n($transition), stage_status:n($stage_status), action:n($action),
+     target_role:n($target_role), pane_id:n($pane_id), result:n($result),
+     duration_ms:num($duration_ms), error_code:n($error_code),
+     error_context:n($error_context), next_action:n($next_action)}' \
+    >> "$evf" 2>/dev/null
+}
+
+# ---- ledger (§13) --------------------------------------------------------------
+# ledger_path  — echoes the absolute ledger path (W_FEATDIR/ledger.json).
+ledger_path() { printf '%s/ledger.json' "$W_FEATDIR"; }
+
+# ledger_read  — read+schema-validate the ledger; echoes a tab-separated
+#   feature<TAB>seq<TAB>commit<TAB>role<TAB>pane<TAB>command<TAB>delivery, or empty
+#   + LEDGER_ERR on failure/absence. Never called on a rejected path.
+LEDGER_ERR=""
+ledger_read() {
+  LEDGER_ERR=""
+  local led; led=$(ledger_path)
+  if [ ! -f "$led" ]; then LEDGER_ERR="absent"; return 1; fi
+  [ -L "$led" ] && { LEDGER_ERR="ledger is a symlink"; return 1; }
+  local prob j
+  if ! j=$(jq -e . "$led" 2>&1 >/dev/null); then LEDGER_ERR="not JSON: ${j:-unreadable}"; return 1; fi
+  if prob=$(ledger_schema_problem "$led") && [ -n "$prob" ]; then LEDGER_ERR="schema: $prob"; return 1; fi
+  jq -r '[.feature,.journal_seq,.journal_commit,.target_role,.pane,.command,.delivery]|@tsv' "$led" 2>/dev/null
+}
+
+# ledger_write <seq> <commit> <role> <pane> <command-name> <delivery> — atomic
+#   0600 write of the full §13 ledger record.
+ledger_write() {
+  local seq=$1 commit=$2 role=$3 pane=$4 cmdname=$5 delivery=$6
+  jq -nc --arg feature "$W_FEATURE" --argjson seq "$seq" --arg commit "$commit" \
+        --arg role "$role" --arg pane "$pane" --arg command "$cmdname" --arg delivery "$delivery" \
+    '{feature:$feature, journal_seq:$seq, journal_commit:$commit, target_role:$role,
+      pane:$pane, command:$command, delivery:$delivery}' \
+    | atomic_write "$(ledger_path)" 600
+}
+
+# ledger_clear  — remove the dispatch record (back to observed-idle) atomically:
+#   rewrite to an "idle" marker (delivery="idle"), so status/doctor still see a
+#   valid record but watch treats it as no in-flight dispatch.
+ledger_clear() {
+  jq -nc --arg feature "$W_FEATURE" --argjson seq 0 --arg commit "" \
+        --arg role "" --arg pane "" --arg command "" --arg delivery "idle" \
+    '{feature:$feature, journal_seq:$seq, journal_commit:"", target_role:"",
+      pane:"", command:"", delivery:"idle"}' \
+    | atomic_write "$(ledger_path)" 600
+}
+
+# ---- lock (§13/§19) -------------------------------------------------------------
+# lock_acquire <featdir> — atomic mkdir of <featdir>/lock + a 0600 pidfile. Returns
+#   0 if acquired; on a pre-existing lock, sets LOCK_STATE (held|stale) + LOCK_PID
+#   and returns nonzero (caller fatalizes LOCK_HELD / LOCK_STALE).
+LOCK_STATE=""; LOCK_PID=""
+lock_acquire() {
+  local featd=$1 lockd="$1/lock" pidf
+  LOCK_STATE=""; LOCK_PID=""
+  if mkdir "$lockd" 2>/dev/null; then
+    chmod 700 "$lockd" 2>/dev/null || true
+    pidf="$lockd/pid"
+    printf '%s\n' "$$" | atomic_write "$pidf" 600 || { rmdir "$lockd" 2>/dev/null || true; return 1; }
+    W_LOCK_HELD=1; return 0
+  fi
+  # lock exists — inspect the recorded PID (the pidfile must be a regular file).
+  pidf="$lockd/pid"
+  if [ -L "$pidf" ] || [ ! -f "$pidf" ]; then LOCK_STATE="stale"; LOCK_PID=""; return 1; fi
+  LOCK_PID=$(cat "$pidf" 2>/dev/null || echo "")
+  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then LOCK_STATE="held"; else LOCK_STATE="stale"; fi
+  return 1
+}
+
+# lock_release — remove the pidfile + lock dir this process created. Best-effort;
+# only called when W_LOCK_HELD=1. Never removes another process's lock.
+lock_release() {
+  [ "$W_LOCK_HELD" = "1" ] || return 0
+  local lockd="$W_FEATDIR/lock" pidf="$W_FEATDIR/lock/pid"
+  local mine=""
+  [ -f "$pidf" ] && mine=$(cat "$pidf" 2>/dev/null || echo "")
+  if [ "$mine" = "$$" ]; then rm -f -- "$pidf" 2>/dev/null || true; rmdir "$lockd" 2>/dev/null || true; fi
+  W_LOCK_HELD=0
+}
+
+# ---- the §14 fatal path --------------------------------------------------------
+# coord_fatal <code> <where> <input> <reason> <next_action> [resume_guard] — the
+#   ordered §14 sequence: stop dispatches (implicit) → audit fatal → halt.json →
+#   stderr tuple → bounded ON_HALT_EXEC (argv [halt.json path]) → release lock →
+#   exit 1. Falls back to sanitized stderr if the audit/halt sink is unavailable.
+coord_fatal() {
+  local code=$1 where=$2 input=$3 reason=$4 action=$5 guard=${6:-}
+  [ -n "$guard" ] || guard="fix the above, then re-run \`coordinate.sh doctor --config $CONF\`; resume never bypasses it"
+  local haltf=""
+  if [ -n "$W_FEATDIR" ] && [ -d "$W_FEATDIR" ]; then
+    A_EVENT="fatal"; A_ERROR_CODE="$code"; A_NEXT_ACTION="$action"; A_ERROR_CONTEXT="$where: $reason"
+    audit_commit "$W_FEATDIR" 2>/dev/null || true
+    A_EVENT=""; A_ERROR_CODE=""; A_NEXT_ACTION=""; A_ERROR_CONTEXT=""
+    haltf="$W_FEATDIR/halt.json"
+    jq -nc --arg ts "$(now_iso)" --arg code "$code" --arg where "$where" --arg input "$input" \
+          --arg reason "$reason" --arg next_action "$action" --arg resume_guard "$guard" \
+          --arg feature "${W_FEATURE:-}" --arg remote_identity "${W_RKEY:-}" --arg branch "${BRANCH:-}" '
+      {timestamp:$ts, code:$code, where:$where, input:$input, reason:$reason,
+       next_action:$next_action, resume_guard:$resume_guard,
+       feature:n($feature), remote_identity:n($remote_identity), branch:n($branch)}' \
+      | atomic_write "$haltf" 600 2>/dev/null || haltf=""
+  fi
+  printf '\n=== COORDINATOR FATAL ===\n'        >&2
+  printf 'code:        %s\n' "$code"            >&2
+  printf 'where:       %s\n' "$where"           >&2
+  printf 'input:       %s\n' "$input"           >&2
+  printf 'reason:      %s\n' "$reason"          >&2
+  printf 'next_action: %s\n' "$action"          >&2
+  printf 'resume_guard: %s\n' "$guard"          >&2
+  if [ -n "$haltf" ] && [ -n "${ON_HALT_EXEC:-}" ] && [ -x "$ON_HALT_EXEC" ] && [ ! -L "$ON_HALT_EXEC" ]; then
+    # argv vector, no shell, bounded 10s; hook failure is reported but never masks.
+    bounded_run_ms 10000 "$ON_HALT_EXEC" "$haltf" >/dev/null 2>&1 || \
+      note "coordinate.sh: ON_HALT_EXEC exited nonzero (reported; the original fatal above stands)" >&2
+  fi
+  lock_release
+  exit 1
+}
+
 # ---- arg dispatch --------------------------------------------------------------
 usage() {
   cat >&2 <<EOF
