@@ -131,6 +131,15 @@ cat > "$T/list.json" <<EOF
 ]}}
 EOF
 assert_code "missing CODEX pane -> PANE_NOT_FOUND" PANE_NOT_FOUND
+# (finding 10) that pane miss MUST carry the §14 tuple (where/input/next_action).
+tup=$(run_doctor)
+if printf '%s' "$tup" | grep -q 'where: doctor:panes:CODEX' \
+   && printf '%s' "$tup" | grep -q 'input:' \
+   && printf '%s' "$tup" | grep -q 'next_action:'; then
+  ok "§14 tuple present on doctor pane miss (where/input/next_action)"
+else
+  bad "§14 tuple (doctor pane)" "got: $(printf '%s' "$tup" | grep -A1 PANE_NOT_FOUND | head -4)"
+fi
 
 # ===== 3. ambiguous pane (two agent-bearing panes in the CC workdir) =====
 fresh; seed "$T"

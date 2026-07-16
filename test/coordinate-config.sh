@@ -168,6 +168,20 @@ fresh; seed_clones "$T"; write_cfg "$T"
 printf 'STATE_DIR=%s/state\n' "$T" >> "$T/cfg"
 assert_cfg_ok "STATE_DIR outside clones" "$T"
 
+# ===== (finding 10) every doctor miss carries the FULL §14 tuple: where / input /
+#      next_action (resume_guard where meaningful), not just [CODE] + prose. =====
+fresh; seed_clones "$T"; write_cfg "$T"
+sed -i.bak 's#^POLL_SECS=.*#POLL_SECS=not-a-num#' "$T/cfg"; rm -f "$T/cfg.bak"
+tuple_out=$(run_doctor "$T")
+if printf '%s' "$tuple_out" | grep -q '\[CONFIG_INVALID\] POLL_SECS not a positive integer' \
+   && printf '%s' "$tuple_out" | grep -q 'where: doctor:config' \
+   && printf '%s' "$tuple_out" | grep -q 'input: POLL_SECS' \
+   && printf '%s' "$tuple_out" | grep -q 'next_action: edit'; then
+  ok "§14 tuple present (where/input/next_action) on a config miss"
+else
+  bad "§14 tuple" "missing tuple fields; got: $(printf '%s' "$tuple_out" | grep -A1 CONFIG_INVALID | head -4)"
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

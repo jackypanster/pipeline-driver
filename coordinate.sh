@@ -176,22 +176,23 @@ authority_of() {
 }
 
 # ---- config validation (design §11) --------------------------------------------
-# Appends "CODE: message" lines to CFG_V[] and sets CFG_BAD=1 on any violation.
-# Runs EVERY check (does not short-circuit) so doctor can report the full list.
+# Appends "CODE<TAB>input<TAB>reason" lines to CFG_V[] and sets CFG_BAD=1 on any
+# violation. Runs EVERY check (does not short-circuit) so doctor can report the
+# full list. (finding: §14 tuple — input carries the offending var/value.)
 CFG_V=(); CFG_BAD=0
-cfg_violation() { CFG_V+=("$1: $2"); CFG_BAD=1; }
+cfg_violation() { CFG_V+=("$1"$'\t'"$2"$'\t'"$3"); CFG_BAD=1; }   # <code> <input> <reason>
 
 validate_config() {
   CFG_V=(); CFG_BAD=0
-  local wdvar wd url norm i ok_abs
+  local wdvar wd url norm ok_abs
   # 1. workdirs: absolute, existing git clones.
   for wdvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
     wd="${!wdvar:-}"
-    if [ -z "$wd" ]; then cfg_violation CONFIG_INVALID "$wdvar is unset"; continue; fi
-    case "$wd" in /*) ;; *) cfg_violation WORKDIR_INVALID "$wdvar not absolute: $wd"; continue ;; esac
-    if [ ! -d "$wd" ]; then cfg_violation WORKDIR_INVALID "$wdvar does not exist: $wd"; continue; fi
+    if [ -z "$wd" ]; then cfg_violation CONFIG_INVALID "$wdvar" "$wdvar is unset"; continue; fi
+    case "$wd" in /*) ;; *) cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar not absolute: $wd"; continue ;; esac
+    if [ ! -d "$wd" ]; then cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar does not exist: $wd"; continue; fi
     if ! git -C "$wd" rev-parse --git-dir >/dev/null 2>&1; then
-      cfg_violation WORKDIR_INVALID "$wdvar is not a git clone: $wd"; continue; fi
+      cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar is not a git clone: $wd"; continue; fi
   done
   # 2. remote-identity agreement across all four clones that resolved above.
   norm=""; ok_abs=1
@@ -202,52 +203,52 @@ validate_config() {
     git -C "$wd" rev-parse --git-dir >/dev/null 2>&1 || ok_abs=0
     if [ "$ok_abs" = "1" ]; then
       url=$(git -C "$wd" config --get remote.origin.url 2>/dev/null) || url=""
-      if [ -z "$url" ]; then cfg_violation WORKDIR_INVALID "$wdvar has no remote.origin.url"
+      if [ -z "$url" ]; then cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar has no remote.origin.url"
       elif [ -z "$norm" ]; then norm=$(normalize_remote "$url")
       elif [ "$(normalize_remote "$url")" != "$norm" ]; then
-        cfg_violation REMOTE_MISMATCH "$wdvar remote ($(redact_remote "$url")) != observer ($norm)"
+        cfg_violation REMOTE_MISMATCH "$wdvar" "$wdvar remote ($(redact_remote "$url")) != observer ($norm)"
       fi
     fi
   done
   # 3. BRANCH non-empty.
-  [ -n "${BRANCH:-}" ] || cfg_violation CONFIG_INVALID "BRANCH is unset"
+  [ -n "${BRANCH:-}" ] || cfg_violation CONFIG_INVALID "BRANCH" "BRANCH is unset"
   # 4. command prefixes: non-empty, single-line (no embedded newline).
   local cmdvar
   for cmdvar in CC_ARCH_CMD CC_TASK_CMD CC_HUNT_CMD PI_IMPL_CMD CODEX_REVIEW_CMD; do
     wd="${!cmdvar:-}"   # reuse varname slot for the VALUE
-    if [ -z "$wd" ]; then cfg_violation CONFIG_INVALID "$cmdvar is unset"; continue; fi
-    case "$wd" in *$'\n'*) cfg_violation CONFIG_INVALID "$cmdvar spans multiple lines" ;; esac
+    if [ -z "$wd" ]; then cfg_violation CONFIG_INVALID "$cmdvar" "$cmdvar is unset"; continue; fi
+    case "$wd" in *$'\n'*) cfg_violation CONFIG_INVALID "$cmdvar" "$cmdvar spans multiple lines" ;; esac
   done
   # 5. optional pane IDs: single-line opaque, non-empty (when set).
   for cmdvar in CC_PANE_ID PI_PANE_ID CODEX_PANE_ID; do
     wd="${!cmdvar:-}"
     [ -z "$wd" ] && continue
-    case "$wd" in *$'\n'*) cfg_violation CONFIG_INVALID "$cmdvar spans multiple lines" ;; esac
+    case "$wd" in *$'\n'*) cfg_violation CONFIG_INVALID "$cmdvar" "$cmdvar spans multiple lines" ;; esac
   done
   # 6. timeouts: positive base-10 ints within documented upper bounds.
-  if ! is_pos_int "${POLL_SECS:-0}"; then cfg_violation CONFIG_INVALID "POLL_SECS not a positive integer"
-  elif [ "${POLL_SECS:-0}" -gt "$POLL_SECS_MAX" ]; then cfg_violation CONFIG_INVALID "POLL_SECS exceeds $POLL_SECS_MAX"; fi
-  if ! is_pos_int "${PANE_READY_TIMEOUT_MS:-0}"; then cfg_violation CONFIG_INVALID "PANE_READY_TIMEOUT_MS not a positive integer"
-  elif [ "${PANE_READY_TIMEOUT_MS:-0}" -gt "$PANE_READY_TIMEOUT_MS_MAX" ]; then cfg_violation CONFIG_INVALID "PANE_READY_TIMEOUT_MS exceeds $PANE_READY_TIMEOUT_MS_MAX"; fi
-  if ! is_pos_int "${STAGE_TIMEOUT_SECS:-0}"; then cfg_violation CONFIG_INVALID "STAGE_TIMEOUT_SECS not a positive integer"
-  elif [ "${STAGE_TIMEOUT_SECS:-0}" -gt "$STAGE_TIMEOUT_SECS_MAX" ]; then cfg_violation CONFIG_INVALID "STAGE_TIMEOUT_SECS exceeds $STAGE_TIMEOUT_SECS_MAX"; fi
+  if ! is_pos_int "${POLL_SECS:-0}"; then cfg_violation CONFIG_INVALID "POLL_SECS" "POLL_SECS not a positive integer"
+  elif [ "${POLL_SECS:-0}" -gt "$POLL_SECS_MAX" ]; then cfg_violation CONFIG_INVALID "POLL_SECS" "POLL_SECS exceeds $POLL_SECS_MAX"; fi
+  if ! is_pos_int "${PANE_READY_TIMEOUT_MS:-0}"; then cfg_violation CONFIG_INVALID "PANE_READY_TIMEOUT_MS" "PANE_READY_TIMEOUT_MS not a positive integer"
+  elif [ "${PANE_READY_TIMEOUT_MS:-0}" -gt "$PANE_READY_TIMEOUT_MS_MAX" ]; then cfg_violation CONFIG_INVALID "PANE_READY_TIMEOUT_MS" "PANE_READY_TIMEOUT_MS exceeds $PANE_READY_TIMEOUT_MS_MAX"; fi
+  if ! is_pos_int "${STAGE_TIMEOUT_SECS:-0}"; then cfg_violation CONFIG_INVALID "STAGE_TIMEOUT_SECS" "STAGE_TIMEOUT_SECS not a positive integer"
+  elif [ "${STAGE_TIMEOUT_SECS:-0}" -gt "$STAGE_TIMEOUT_SECS_MAX" ]; then cfg_violation CONFIG_INVALID "STAGE_TIMEOUT_SECS" "STAGE_TIMEOUT_SECS exceeds $STAGE_TIMEOUT_SECS_MAX"; fi
   # 7. ON_HALT_EXEC (if set): absolute, executable, regular file, NOT a symlink.
   if [ -n "${ON_HALT_EXEC:-}" ]; then
-    case "$ON_HALT_EXEC" in /*) ;; *) cfg_violation CONFIG_INVALID "ON_HALT_EXEC not absolute: $ON_HALT_EXEC" ;;
+    case "$ON_HALT_EXEC" in /*) ;; *) cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC not absolute: $ON_HALT_EXEC" ;;
     esac
-    if [ -L "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC is a symlink: $ON_HALT_EXEC"
-    elif [ ! -f "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC not a regular file: $ON_HALT_EXEC"
-    elif [ ! -x "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC not executable: $ON_HALT_EXEC"
+    if [ -L "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC is a symlink: $ON_HALT_EXEC"
+    elif [ ! -f "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC not a regular file: $ON_HALT_EXEC"
+    elif [ ! -x "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC not executable: $ON_HALT_EXEC"
     fi
   fi
   # 8. STATE_DIR (if set): outside EVERY configured clone.
   if [ -n "${STATE_DIR:-}" ]; then
-    case "$STATE_DIR" in /*) ;; *) cfg_violation CONFIG_INVALID "STATE_DIR not absolute: $STATE_DIR" ;; esac
+    case "$STATE_DIR" in /*) ;; *) cfg_violation CONFIG_INVALID "STATE_DIR" "STATE_DIR not absolute: $STATE_DIR" ;; esac
     for wdvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
       wd="${!wdvar:-}"
       [ -z "$wd" ] && continue
       case "$STATE_DIR" in
-        "$wd"|"$wd"/*) cfg_violation CONFIG_INVALID "STATE_DIR ($STATE_DIR) is inside $wdvar ($wd)" ;;
+        "$wd"|"$wd"/*) cfg_violation CONFIG_INVALID "STATE_DIR" "STATE_DIR ($STATE_DIR) is inside $wdvar ($wd)" ;;
       esac
     done
   fi
@@ -305,25 +306,35 @@ cmd_doctor() {
   d_info() { printf 'info  %s\n' "$1"; }
   d_warn() { printf 'warn  %s\n      %s\n' "$1" "$2"; warn=$((warn+1)); }
   d_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; bad=$((bad+1)); }
-  # d_code <CODE> <label> <fix> — drive.sh d_miss shape, with the §14 code surfaced
-  # so a caller can match the exact failure (the handoff's break-one-prereq cases).
-  d_code() { printf 'MISS  [%s] %s\n      fix: %s\n' "$1" "$2" "$3"; bad=$((bad+1)); }
+  # d_code <CODE> <where> <input> <reason> <next_action> [resume_guard] — drive.sh
+  # d_miss shape with the FULL §14 tuple (where/input/reason/next_action, plus
+  # resume_guard where meaningful) so a caller can match the exact failure AND a
+  # human has every field the fail-fast contract requires (finding: §14 tuple).
+  d_code() {
+    printf 'MISS  [%s] %s\n' "$1" "$4"
+    printf '      where: %s | input: %s | next_action: %s\n' "$2" "$3" "$5"
+    [ -n "${6:-}" ] && printf '      resume_guard: %s\n' "$6"
+    bad=$((bad+1))
+  }
 
   printf -- '--- deps ----------------------------------------------------------\n'
   if   command -v git   >/dev/null 2>&1; then d_ok "git on PATH"
-  else d_code DEPENDENCY_MISSING "git not on PATH" "install git (xcode-select --install / package manager)"; fi
+  else d_code DEPENDENCY_MISSING "doctor:deps" "git" "git not on PATH" "install git (xcode-select --install / package manager)"; fi
   if   command -v jq    >/dev/null 2>&1; then d_ok "jq on PATH"
-  else d_code DEPENDENCY_MISSING "jq not on PATH" "brew install jq"; fi
+  else d_code DEPENDENCY_MISSING "doctor:deps" "jq" "jq not on PATH" "brew install jq"; fi
   if   command -v herdr >/dev/null 2>&1; then d_ok "herdr on PATH"
-  else d_code DEPENDENCY_MISSING "herdr not on PATH" "install Herdr (https://herdr.dev)"; fi
+  else d_code DEPENDENCY_MISSING "doctor:deps" "herdr" "herdr not on PATH" "install Herdr (https://herdr.dev)"; fi
   if   command -v perl  >/dev/null 2>&1; then d_ok "perl on PATH (bounded exec + authority timeout)"
-  else d_code DEPENDENCY_MISSING "perl not on PATH" "install perl (base system package on macOS/Linux)"; fi
+  else d_code DEPENDENCY_MISSING "doctor:deps" "perl" "perl not on PATH" "install perl (base system package on macOS/Linux)"; fi
 
   printf -- '--- config --------------------------------------------------------\n'
   validate_config || true
   if [ "${CFG_BAD:-0}" = "1" ]; then
-    local v
-    for v in "${CFG_V[@]}"; do d_code "${v%%:*}" "${v#*: }" "edit $CONF (coordinate.config.example documents each rule)"; done
+    local v c ci cr
+    for v in "${CFG_V[@]}"; do
+      IFS=$'\t' read -r c ci cr <<< "$v"
+      d_code "$c" "doctor:config" "$ci" "$cr" "edit $CONF (coordinate.config.example documents each rule)"
+    done
   else
     d_ok "config valid ($CONF): workdirs/remote/branch/commands/timeouts all pass §11"
   fi
@@ -340,21 +351,21 @@ cmd_doctor() {
     printf -- '--- remote / branch agreement -------------------------------------\n'
     local rkey
     rkey=$(repo_key_from "$OBSERVER_WORKDIR") || rkey=""
-    [ -n "$rkey" ] && d_ok "normalized repo key: $rkey" || d_code REMOTE_MISMATCH "observer has no remote.origin.url" "git -C $OBSERVER_WORKDIR remote add origin <url>"
+    [ -n "$rkey" ] && d_ok "normalized repo key: $rkey" || d_code REMOTE_MISMATCH "doctor:remote" "$OBSERVER_WORKDIR" "observer has no remote.origin.url" "git -C $OBSERVER_WORKDIR remote add origin <url>"
 
     printf -- '--- observed remote trunk (fetch + git show) ----------------------\n'
     local fetch_ok=0 observed_commit=""
     if git -C "$OBSERVER_WORKDIR" fetch origin --quiet 2>/dev/null; then
       d_ok "git fetch origin ($OBSERVER_WORKDIR)"; fetch_ok=1
     else
-      d_code GIT_FETCH_FAILED "git fetch origin failed in $OBSERVER_WORKDIR" "check network / remote access / auth from $OBSERVER_WORKDIR"
+      d_code GIT_FETCH_FAILED "doctor:remote:fetch" "$OBSERVER_WORKDIR" "git fetch origin failed" "check network / remote access / auth from $OBSERVER_WORKDIR"
     fi
     if [ "$fetch_ok" = "1" ]; then
       if git -C "$OBSERVER_WORKDIR" rev-parse --verify "refs/remotes/origin/$BRANCH" >/dev/null 2>&1; then
         observed_commit=$(git -C "$OBSERVER_WORKDIR" rev-parse "origin/$BRANCH")
         d_ok "origin/$BRANCH resolves -> ${observed_commit:0:12}"
       else
-        d_code REMOTE_REF_MISSING "origin/$BRANCH missing after fetch" "confirm BRANCH=$BRANCH matches the remote trunk"
+        d_code REMOTE_REF_MISSING "doctor:remote:ref" "origin/$BRANCH" "origin/$BRANCH missing after fetch" "confirm BRANCH=$BRANCH matches the remote trunk"
         fetch_ok=0
       fi
     fi
@@ -377,7 +388,7 @@ cmd_doctor() {
         elif printf '%s' "$CTL" | jq -e '.schema_version == 1 and (.mode == "human" or .mode == "coordinated") and .merge_gate == "human-direct"' >/dev/null 2>&1; then
           d_ok "control.json valid (mode=$(printf '%s' "$CTL" | jq -r .mode))"
         else
-          d_code CONTROL_MALFORMED "control.json malformed or violates schema (schema_version/mode/merge_gate)" "inspect .pipeline/$FEATURE/control.json on origin/$BRANCH"
+          d_code CONTROL_MALFORMED "doctor:control" ".pipeline/$FEATURE/control.json" "control.json malformed or violates schema (schema_version/mode/merge_gate)" "inspect .pipeline/$FEATURE/control.json on origin/$BRANCH"
         fi
 
         # mode drives whether the journal authority is REQUIRED: a coordinated
@@ -390,7 +401,7 @@ cmd_doctor() {
         J=$(show_remote ".pipeline/$FEATURE/journal.md") || J=""
         if [ -z "$J" ]; then
           if [ "$j_required" = "1" ]; then
-            d_code JOURNAL_MALFORMED "coordinated feature $FEATURE has no journal.md on origin/$BRANCH (authoritative tail required in coordinated mode)" "commit a .pipeline/$FEATURE/journal.md"
+            d_code JOURNAL_MALFORMED "doctor:journal" ".pipeline/$FEATURE/journal.md" "coordinated feature $FEATURE has no journal.md on origin/$BRANCH (authoritative tail required in coordinated mode)" "commit a .pipeline/$FEATURE/journal.md"
           else
             d_warn "no journal.md for $FEATURE on origin/$BRANCH" "human mode — feature may be pre-first-commit"
           fi
@@ -399,10 +410,10 @@ cmd_doctor() {
           # shellcheck disable=SC1090
           eval "$(printf '%s' "$J" | awk -f "$AWK" 2>/dev/null)"
           case "${PARSE_ERR:-}" in
-            malformed-header) d_code JOURNAL_MALFORMED "journal tail header malformed (non-numeric seq, or seq/status/to incomplete)" "inspect the tail entry of .pipeline/$FEATURE/journal.md on origin/$BRANCH" ;;
+            malformed-header) d_code JOURNAL_MALFORMED "doctor:journal" ".pipeline/$FEATURE/journal.md" "journal tail header malformed (non-numeric seq, or seq/status/to incomplete)" "inspect the tail entry of .pipeline/$FEATURE/journal.md on origin/$BRANCH" ;;
             no-entries)
               if [ "$j_required" = "1" ]; then
-                d_code JOURNAL_MALFORMED "coordinated feature $FEATURE journal has no entries on origin/$BRANCH" "the authoritative tail is required in coordinated mode — commit the first journal entry"
+                d_code JOURNAL_MALFORMED "doctor:journal" ".pipeline/$FEATURE/journal.md" "coordinated feature $FEATURE journal has no entries on origin/$BRANCH" "the authoritative tail is required in coordinated mode — commit the first journal entry"
               else
                 d_warn "journal has no entries yet" "feature is pre-first-commit"
               fi ;;
@@ -416,7 +427,7 @@ cmd_doctor() {
     local panes_json=""
     panes_json=$(bounded_run_ms "$PANE_LIST_TIMEOUT_MS" herdr pane list 2>/dev/null) || panes_json=""
     if [ -z "$panes_json" ] || ! printf '%s' "$panes_json" | jq -e . >/dev/null 2>&1; then
-      d_code DEPENDENCY_MISSING "'herdr pane list' returned no JSON" "is Herdr running? (herdr status; socket: ~/.config/herdr/herdr.sock)"
+      d_code DEPENDENCY_MISSING "doctor:panes" "herdr pane list" "'herdr pane list' returned no JSON" "is Herdr running? (herdr status; socket: ~/.config/herdr/herdr.sock)"
     else
       d_ok "herdr pane list reachable ($(printf '%s' "$panes_json" | jq '.result.panes | length') panes)"
       coord_check_role "CC"    "$CC_WORKDIR"    "${CC_PANE_ID:-}"
@@ -442,14 +453,14 @@ coord_check_role() {
     pane="$RES_PANE"
     d_ok "$role pane resolved: $pane"
   else
-    d_code "$RES_CODE" "$role pane: $RES_MSG" "see coordinate.config.example (${role}_PANE_ID / role clone cwd)"
+    d_code "$RES_CODE" "doctor:panes:$role" "$workdir" "$role pane: $RES_MSG" "see coordinate.config.example (${role}_PANE_ID / role clone cwd)"
     return
   fi
   auth=$(authority_of "$pane" "$AUTH_TIMEOUT_MS")
   if [ "$auth" = "1" ]; then
     d_ok "$role pane lifecycle authority: confirmed (hook/matched-rule, no idle fallback)"
   else
-    d_code AGENT_STATUS_INVALID "$role pane $pane: agent status source NOT authoritative (no lifecycle hook / no MATCHED manifest rule — always-idle fallback)" "attach that agent's Herdr integration, or pin to a pane with hook authority (design §24.2)"
+    d_code AGENT_STATUS_INVALID "doctor:panes:$role" "$pane" "$role pane $pane: agent status source NOT authoritative (no lifecycle hook / no MATCHED manifest rule — always-idle fallback)" "attach that agent's Herdr integration, or pin to a pane with hook authority (design §24.2)"
   fi
 }
 
@@ -491,7 +502,7 @@ coord_doctor_state() {
       if lerr=$(jq -e . "$led" 2>&1 >/dev/null); then
         d_ok "ledger.json valid ($ffeat)"
       else
-        d_code LEDGER_CORRUPT "ledger.json unreadable ($ffeat): ${lerr:-not JSON}" "inspect $led; remove only after confirming no dispatch is in flight"
+        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json unreadable ($ffeat): ${lerr:-not JSON}" "inspect $led; remove only after confirming no dispatch is in flight"
       fi
     done
   else
