@@ -122,6 +122,18 @@ git init -q --bare "$T/other.git"
 git -C "$T/codex" remote set-url origin "$T/other.git"
 assert_code "remote mismatch -> REMOTE_MISMATCH" REMOTE_MISMATCH
 
+# ===== (finding 1) branch agreement: a role clone NOT on BRANCH -> BLOCKING =====
+fresh; seed "$T"
+git -C "$T/codex" checkout -q -b wrong-branch 2>/dev/null || git -C "$T/codex" symbolic-ref HEAD refs/heads/wrong-branch
+assert_code "codex clone not on BRANCH -> REMOTE_MISMATCH" REMOTE_MISMATCH
+
+# ===== (finding 1) globally unique role panes: CC and CODEX pinned to the SAME
+#      pane (distinct clones) -> PANE_UNAUTHORIZED. Defense-in-depth: distinct-
+#      workdirs passes, but the pane collision must still block (design §5/§11). =====
+fresh; seed "$T"
+{ grep -v '^CODEX_PANE_ID=' "$T/cfg"; printf 'CC_PANE_ID=wA:p1\nCODEX_PANE_ID=wA:p1\n'; } > "$T/cfg.new" && mv "$T/cfg.new" "$T/cfg"
+assert_code "CC and CODEX share pane -> PANE_UNAUTHORIZED" PANE_UNAUTHORIZED
+
 # ===== 2. missing pane (no agent-bearing pane in the CODEX workdir) =====
 fresh; seed "$T"
 cat > "$T/list.json" <<EOF

@@ -104,6 +104,23 @@ state_root() {
   else printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/pipeline-driver"; fi
 }
 
+# resolve_path <path> — absolute, symlink-resolved (PHYSICAL). Resolves the longest
+# EXISTING ancestor via perl Cwd::abs_path and re-appends the not-yet-created tail,
+# so a STATE_DIR that does not exist yet still resolves to its intended physical
+# location. Used for containment (§13/§19) and distinct-workdir checks so lexical
+# tricks ("..", symlinks INTO a clone) cannot bypass physical isolation.
+resolve_path() {
+  local p=$1 base dir
+  case "$p" in "") printf '%s' ""; return 0 ;; /*) ;; *) p="$PWD/$p" ;; esac
+  base=$p
+  while [ "$base" != "/" ] && [ ! -e "$base" ]; do base=$(dirname "$base"); done
+  [ "$base" = "/" ] && { printf '/'; return 0; }
+  dir=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$base" 2>/dev/null) || dir=""
+  [ -n "$dir" ] || dir=$base
+  if [ "$base" = "$p" ]; then printf '%s' "$dir"
+  else printf '%s/%s' "$dir" "${p#"$base"/}"; fi
+}
+
 # cwd_in_workdir <cwd> <workdir> — 0 if cwd == workdir OR a descendant of it.
 cwd_in_workdir() {
   [ "$1" = "$2" ] && return 0
@@ -194,6 +211,20 @@ validate_config() {
     if ! git -C "$wd" rev-parse --git-dir >/dev/null 2>&1; then
       cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar is not a git clone: $wd"; continue; fi
   done
+  # 1b. workdirs must be PHYSICALLY distinct (realpath pairwise unique) — two roles
+  # sharing one clone, or aliased via ".."/symlink, erodes reviewer/implementer
+  # isolation before dispatch exists (design §§2/5/11; finding: distinct workdirs).
+  local rp_obs rp_cc rp_pi rp_cx
+  rp_obs=$(resolve_path "${OBSERVER_WORKDIR:-}"); rp_cc=$(resolve_path "${CC_WORKDIR:-}")
+  rp_pi=$(resolve_path "${PI_WORKDIR:-}");     rp_cx=$(resolve_path "${CODEX_WORKDIR:-}")
+  _cfg_distinct() { if [ -n "$3" ] && [ -n "$4" ] && [ "$3" = "$4" ]; then cfg_violation WORKDIR_INVALID "$1/$2" "$1 and $2 resolve to the same physical clone ($3)"; fi; }
+  _cfg_distinct OBSERVER CC    "$rp_obs" "$rp_cc"
+  _cfg_distinct OBSERVER PI    "$rp_obs" "$rp_pi"
+  _cfg_distinct OBSERVER CODEX "$rp_obs" "$rp_cx"
+  _cfg_distinct CC      PI     "$rp_cc"  "$rp_pi"
+  _cfg_distinct CC      CODEX  "$rp_cc"  "$rp_cx"
+  _cfg_distinct PI      CODEX  "$rp_pi"  "$rp_cx"
+  unset -f _cfg_distinct
   # 2. remote-identity agreement across all four clones that resolved above.
   norm=""; ok_abs=1
   for wdvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
@@ -352,6 +383,20 @@ cmd_doctor() {
     local rkey
     rkey=$(repo_key_from "$OBSERVER_WORKDIR") || rkey=""
     [ -n "$rkey" ] && d_ok "normalized repo key: $rkey" || d_code REMOTE_MISMATCH "doctor:remote" "$OBSERVER_WORKDIR" "observer has no remote.origin.url" "git -C $OBSERVER_WORKDIR remote add origin <url>"
+    # Each clone MUST be checked out on BRANCH — a role clone on another branch
+    # would type the next stage into the wrong branch (design §5/§11; finding:
+    # branch agreement).
+    local _bvar _bwd _bactual
+    for _bvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
+      _bwd="${!_bvar:-}"
+      [ -d "$_bwd" ] || continue
+      _bactual=$(git -C "$_bwd" symbolic-ref --short HEAD 2>/dev/null || echo "")
+      if [ "$_bactual" = "$BRANCH" ]; then
+        d_ok "$_bvar on $BRANCH"
+      else
+        d_code REMOTE_MISMATCH "doctor:remote:branch" "$_bvar" "$_bvar not on BRANCH=$BRANCH (on ${_bactual:-detached})" "git -C $_bwd checkout $BRANCH"
+      fi
+    done
 
     printf -- '--- observed remote trunk (fetch + git show) ----------------------\n'
     local fetch_ok=0 observed_commit=""
@@ -430,9 +475,20 @@ cmd_doctor() {
       d_code DEPENDENCY_MISSING "doctor:panes" "herdr pane list" "'herdr pane list' returned no JSON" "is Herdr running? (herdr status; socket: ~/.config/herdr/herdr.sock)"
     else
       d_ok "herdr pane list reachable ($(printf '%s' "$panes_json" | jq '.result.panes | length') panes)"
-      coord_check_role "CC"    "$CC_WORKDIR"    "${CC_PANE_ID:-}"
-      coord_check_role "PI"    "$PI_WORKDIR"    "${PI_PANE_ID:-}"
-      coord_check_role "CODEX" "$CODEX_WORKDIR" "${CODEX_PANE_ID:-}"
+      coord_check_role "CC"    "$CC_WORKDIR"    "${CC_PANE_ID:-}";   local cc_pane="${RES_PANE:-}"
+      coord_check_role "PI"    "$PI_WORKDIR"    "${PI_PANE_ID:-}";   local pi_pane="${RES_PANE:-}"
+      coord_check_role "CODEX" "$CODEX_WORKDIR" "${CODEX_PANE_ID:-}"; local cx_pane="${RES_PANE:-}"
+      # Globally unique role panes (design §5/§11; finding: unique panes): two
+      # roles resolving to the SAME pane would erase role isolation before dispatch.
+      _pane_distinct() {
+        if [ -n "$3" ] && [ -n "$4" ] && [ "$3" = "$4" ]; then
+          d_code PANE_UNAUTHORIZED "doctor:panes" "$3" "$1 and $2 panes resolve to the same pane ($3) — each role needs a distinct pane" "configure distinct ${1}_PANE_ID/${2}_PANE_ID or separate role-clone cwds"
+        fi
+      }
+      _pane_distinct CC    PI    "$cc_pane" "$pi_pane"
+      _pane_distinct CC    CODEX "$cc_pane" "$cx_pane"
+      _pane_distinct PI    CODEX "$pi_pane" "$cx_pane"
+      unset -f _pane_distinct
     fi
   else
     d_info "skipping remote/pane/state sections: one or more workdirs unusable (fix the config section above)"

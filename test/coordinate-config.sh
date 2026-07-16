@@ -93,6 +93,15 @@ fresh; seed_clones "$T"; write_cfg "$T"
 mkdir -p "$T/notgit"; sed -i.bak 's#^PI_WORKDIR=.*#PI_WORKDIR='"$T"'/notgit#' "$T/cfg"; rm -f "$T/cfg.bak"
 assert_code "PI_WORKDIR not a git clone" WORKDIR_INVALID "$T"
 
+# ===== (finding 1) distinct workdirs: all four roles pointed at ONE clone -> BLOCKING.
+#      The reviewer's exact repro (all workdirs = one clone, one authoritative pane).
+#      realpath pairwise check must catch it (design §§2/5/11). =====
+fresh; seed_clones "$T"; write_cfg "$T"
+sed -i.bak -e "s#^CC_WORKDIR=.*#CC_WORKDIR=$T/obs#" \
+        -e "s#^PI_WORKDIR=.*#PI_WORKDIR=$T/obs#" \
+        -e "s#^CODEX_WORKDIR=.*#CODEX_WORKDIR=$T/obs#" "$T/cfg"; rm -f "$T/cfg.bak"
+assert_code "all workdirs = one clone -> WORKDIR_INVALID" WORKDIR_INVALID "$T"
+
 # ===== 4. remote mismatch (one clone tracks a different origin) =====
 fresh; seed_clones "$T"; write_cfg "$T"
 git init -q --bare "$T/other.git"
