@@ -81,19 +81,40 @@ semantics, GATE 1/2, the spec-rev protocol and every guard are transport-indepen
   headless Claude Code (observed: bigmodel.cn answers a fake-529 to the
   `cc_entrypoint=sdk-cli` billing marker), the interactive TUI is the compliant
   channel — the driver only automates the typing a human would do into it.
+- **herdr** — the same driven-TUI shape on a lightweight substrate: submits the stage
+  command into a coder TUI running in a [Herdr](https://herdr.dev) pane with
+  `herdr pane run` (atomic text+Enter, the officially preferred submit), then polls
+  `origin/<BRANCH>` identically. Deltas vs orca: the pre-send guard READS
+  `agent_status` and proceeds on `done`/`idle` (Herdr's `done` = finished-unviewed
+  never re-fires on an already-idle pane, so the driver never bare-waits on `done`),
+  halts fast on `blocked`, and validates readiness AND detection authority from the
+  SAME `agent explain` sample on every poll (lifecycle hook / MATCHED manifest rule,
+  no fallback — a merely loaded manifest on an unrecognized screen is the always-idle
+  fallback) — otherwise the transport **fails closed** instead of typing into a pane
+  whose always-idle fallback cannot see a busy TUI. A reset is followed by a settle
+  window (`HERDR_RESET_SETTLE_MS`) before the second guard, since `pane run` only
+  acknowledges enqueueing. Pane discovery filters `herdr pane list` by pane `.cwd == WORKDIR`
+  (or the `HERDR_PANE_CWD_MATCH` substring, e.g. a TUI opened in a subdir),
+  targets only agent-bearing panes, and excludes the driver's own pane; pin with
+  `HERDR_PANE_ID`. Needs `herdr` + `jq` + `perl` (monotonic deadlines +
+  process-group kills). Spec: `.pipeline/herdr-transport/PRD.md`.
 
-Orca-transport deltas to know: there is **no child exit code** — the only completion
-signal is the remote journal (a stuck TUI = `CARD_TIMEOUT` halt, with the terminal tail
-printed); the deny-merge `--settings` hook does **not** travel into the TUI agent (the
-durable gates — halt-before-review, human merge, trunk rules — hold regardless); the
-TUI is a **long session**, not a cold node per card (`ORCA_RESET_CMD` approximates cold
-starts); it needs `jq`, a running Orca runtime, and a TUI agent that has the
+Driven-TUI (orca/herdr) deltas to know: there is **no child exit code** — the only
+completion signal is the remote journal (a stuck TUI = `CARD_TIMEOUT` halt, with the
+terminal/pane tail printed); the deny-merge `--settings` hook does **not** travel into
+the TUI agent (the durable gates — halt-before-review, human merge, trunk rules — hold
+regardless); the TUI is a **long session**, not a cold node per card
+(`ORCA_RESET_CMD` / `HERDR_RESET_CMD` approximate cold starts — both sides of the reset
+are guarded); it needs `jq`, the substrate's runtime, and a TUI agent that has the
 `pipeline-impl` shim + the roles.yaml impl skill installed with permissions to finish a
 card unattended. While a driven loop runs, keep other agents out of that worktree.
 Terminal discovery: **pin `ORCA_TERMINAL_HANDLE`** — TUI agents rename their own tab on
 startup, so title matching goes stale (field-tested on the first trial run); the driver
 also unsets any INHERITED `ORCA_TERMINAL_HANDLE` before reading config, because Orca
 injects it into every terminal it manages — including the one running the driver.
+Herdr injects `HERDR_PANE_ID` the same way; the driver applies the same capture/unset
+discipline, excludes its own pane from discovery, and rejects a pinned target equal
+to it.
 
 ## Merge safety (read this before trusting it)
 
@@ -153,6 +174,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `test/hook.sh` | merge-gate tests incl. the wrapper/refspec bypass cases |
 | `test/e2e.sh` | hermetic end-to-end loop tests (stub `claude`) + every safety halt |
 | `test/e2e-orca.sh` | hermetic e2e for the orca transport (stub `orca` plays the TUI coder) |
+| `test/e2e-herdr.sh` | hermetic e2e for the herdr transport (stub `herdr`; guards, self-pane, fail-closed) |
 | `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
 | `test/defaults-doctor.sh` | hermetic tests for the defaults layer + `drive.sh doctor` |
 | `test/board-relay.sh` | hermetic tests for `BOARD_OUT` auto-refresh + the one-key review relay |
@@ -163,20 +185,21 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 1. Clone next to `pipeline/` as a read-only consumer:
    `git clone <this> ~/workspace/pipeline-driver`. The driver runs in place — no install step.
 2. Ensure the `pipeline-*` shims + the impl-slot skill resolve on the runtime that runs
-   impl (claude transport: Claude Code's skill dir; orca transport: the TUI agent's skill
-   dir). Follow the pipeline repo README §Install → *Canonical multi-runtime layout* —
+   impl (claude transport: Claude Code's skill dir; orca/herdr transports: the TUI
+   agent's skill dir). Follow the pipeline repo README §Install → *Canonical multi-runtime layout* —
    one shared physical copy (`~/.agents/skills`), each runtime attached by symlink/wrapper.
 3. **A1 — drive impl on Claude (claude transport only):** repoint the target repo's
    `.pipeline/roles.yaml` `impl` slot to a **Claude-installed** coder skill. The default
    `goal-driven-implementation` is Hermes-only and will STOP under `claude`; the
-   driver pre-flights this and warns. (The orca transport drives the TUI agent's own
-   runtime, where its native impl skill resolves — no repoint needed there.)
+   driver pre-flights this and warns. (The orca/herdr transports drive the TUI agent's
+   own runtime, where its native impl skill resolves — no repoint needed there.)
 4. One-time: `mkdir -p ~/.config/pipeline-driver && cp drive.defaults.example
    ~/.config/pipeline-driver/drive.defaults`, then set your stable preferences there
    (transport, `IMPL_MODEL` floor `haiku` / gateway via `IMPL_BASE_URL` +
    `IMPL_AUTH_TOKEN_ENV`, tuning, `YOLO`). Per feature: `cp drive.config.example
    drive.config` and set just `WORKDIR`, `BRANCH`, `FEATURE` (+ the per-run
-   `ORCA_TERMINAL_HANDLE` on the orca transport) — drive.config wins on conflict.
+   `ORCA_TERMINAL_HANDLE` on the orca transport / `HERDR_PANE_ID` on the herdr
+   transport) — drive.config wins on conflict.
 5. **Protect the target's trunk against force-push / deletion (server-side).** This is
    compatible with the pipeline (metadata fast-forwards + the squash-merge still work).
    Replace `OWNER/REPO` and `<trunk>`:
@@ -191,7 +214,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
    (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
    to pin handles from). Every MISS prints the exact remediation command; it installs nothing

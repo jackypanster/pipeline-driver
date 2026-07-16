@@ -24,6 +24,11 @@ FEATURE=my-feature
 # its own tab mid-setup). Get it from `orca terminal list --json` right before the run.
 # ORCA_TERMINAL_HANDLE=term_...
 
+# Herdr transport only: pin the impl pane PER RUN (pane ids die with the pane).
+# Get it from `herdr pane list` right before the run. NEVER the pane running
+# drive.sh itself — the driver rejects that (it cannot type into itself).
+# HERDR_PANE_ID=w1:p1
+
 # Rare per-feature overrides: ANY variable documented in drive.defaults.example may
 # be set here to override it for THIS feature only (e.g. IMPL_MODEL=sonnet for a
 # hairier codebase). Do NOT bulk-copy stable values here — that defeats the layering.

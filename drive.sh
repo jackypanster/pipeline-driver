@@ -37,8 +37,11 @@
 # IMPL TRANSPORT: IMPL_TRANSPORT=claude (default) spawns a headless `claude` child
 # per card. IMPL_TRANSPORT=orca instead sends "$IMPL_SLASH_CMD …" into a live
 # Orca-managed TUI terminal (e.g. pi running GLM) and polls origin/<BRANCH> until
-# the journal seq advances (or CARD_TIMEOUT). Same halt predicate, gates and
-# guards either way — only the "run one card" primitive changes.
+# the journal seq advances (or CARD_TIMEOUT). IMPL_TRANSPORT=herdr does the same
+# through a Herdr pane: `herdr pane run` (atomic text+Enter), a read-first
+# {done,idle} status guard, and a fail-closed check that the pane's agent state
+# is authoritative (hook/manifest, never the always-idle fallback). Same halt
+# predicate, gates and guards every way — only the "run one card" primitive changes.
 
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -58,6 +61,11 @@ fi
 # candidate and type the stage command into itself), then drop it before sourcing.
 DRIVER_SELF_TERMINAL="${ORCA_TERMINAL_HANDLE:-}"
 unset ORCA_TERMINAL_HANDLE ORCA_TERMINAL_TITLE 2>/dev/null || true
+# Herdr does the same: HERDR_PANE_ID (among other HERDR_*) is injected into every
+# pane it manages. Same discipline: save it as "the pane running THIS driver" so
+# discovery can EXCLUDE it and a pinned target equal to it can be rejected, then drop.
+DRIVER_SELF_PANE="${HERDR_PANE_ID:-}"
+unset HERDR_PANE_ID 2>/dev/null || true
 # Global defaults first (optional), per-feature config second — drive.config wins.
 DEFAULTS="${DRIVE_DEFAULTS:-${XDG_CONFIG_HOME:-$HOME/.config}/pipeline-driver/drive.defaults}"
 # shellcheck disable=SC1090
@@ -75,14 +83,19 @@ IMPL_MODEL="${IMPL_MODEL:-haiku}"
 MAX_CONSEC_FAIL="${MAX_CONSEC_FAIL:-2}"
 RETRY_ON_FAIL="${RETRY_ON_FAIL:-1}"
 SETTINGS_TMPL="${SETTINGS:-$HERE/settings.driver.json}"
-IMPL_TRANSPORT="${IMPL_TRANSPORT:-claude}"          # claude | orca (see header)
+IMPL_TRANSPORT="${IMPL_TRANSPORT:-claude}"          # claude | orca | herdr (see header)
 ORCA_TERMINAL_HANDLE="${ORCA_TERMINAL_HANDLE:-}"    # explicit term_… handle (wins over discovery)
 ORCA_TERMINAL_TITLE="${ORCA_TERMINAL_TITLE:-}"      # substring match on the tab title (disambiguator)
 ORCA_IDLE_TIMEOUT_MS="${ORCA_IDLE_TIMEOUT_MS:-60000}"
 ORCA_RESET_CMD="${ORCA_RESET_CMD:-}"                # optional per-card TUI reset (e.g. /new on pi); empty = off
+HERDR_PANE_ID="${HERDR_PANE_ID:-}"                  # explicit w1:p1 pane id (wins over discovery; never the driver's own pane)
+HERDR_PANE_CWD_MATCH="${HERDR_PANE_CWD_MATCH:-}"    # cwd substring filter REPLACING the ==WORKDIR match (e.g. TUI opened in a subdir)
+HERDR_IDLE_TIMEOUT_MS="${HERDR_IDLE_TIMEOUT_MS:-60000}"
+HERDR_RESET_CMD="${HERDR_RESET_CMD:-}"              # optional per-card TUI reset (e.g. /new on pi); empty = off
+HERDR_RESET_SETTLE_MS="${HERDR_RESET_SETTLE_MS:-2000}"  # post-reset window to observe the TUI taking the reset before re-guarding
 IMPL_SLASH_CMD="${IMPL_SLASH_CMD:-/pipeline-impl}"  # stage command typed into the TUI (pi registers skills as /skill:pipeline-impl)
-CARD_TIMEOUT="${CARD_TIMEOUT:-2700}"                # orca transport: max seconds to wait for one card
-POLL_SECS="${POLL_SECS:-30}"                        # orca transport: journal poll interval
+CARD_TIMEOUT="${CARD_TIMEOUT:-2700}"                # orca/herdr transports: max seconds to wait for one card
+POLL_SECS="${POLL_SECS:-30}"                        # orca/herdr transports: journal poll interval
 # YOLO=1 records the operator's STANDING ex-ante grant for LOW-RISK drive features
 # (README §YOLO): the coordinating agent may read the frozen spec and echo the
 # spec-rev at GATE 1 without a fresh chat authorization. It does NOT auto-start
@@ -93,8 +106,8 @@ YOLO="${YOLO:-0}"
 PIPELINE_REPO="${PIPELINE_REPO:-$HOME/workspace/pipeline}"
 DASHBOARD_REPO="${DASHBOARD_REPO:-$HOME/workspace/pipeline-dashboard}"
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
-# Where the orca-transport TUI agent (e.g. pi) loads skills from — doctor checks the
-# impl slot resolves THERE, since that is the runtime that actually runs the stage.
+# Where the TUI-transport agent (orca/herdr; e.g. pi) loads skills from — doctor
+# checks the impl slot resolves THERE, since that is the runtime that runs the stage.
 TUI_SKILLS_DIR="${TUI_SKILLS_DIR:-$HOME/.pi/agent/skills}"
 # Board auto-refresh: non-empty BOARD_OUT re-renders the read-only dashboard there
 # after GATE 1, after every advanced card, and on halt. Best-effort side effect —
@@ -157,6 +170,13 @@ doctor() {
       else d_miss "orca not on PATH but IMPL_TRANSPORT=orca" "install the Orca CLI, or set IMPL_TRANSPORT=claude"; fi
       if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH (orca transport needs it)"
       else d_miss "jq not on PATH but IMPL_TRANSPORT=orca" "brew install jq"; fi ;;
+    herdr)
+      if command -v herdr >/dev/null 2>&1; then d_ok "herdr on PATH (IMPL_TRANSPORT=herdr)"
+      else d_miss "herdr not on PATH but IMPL_TRANSPORT=herdr" "install Herdr (https://herdr.dev), or set IMPL_TRANSPORT=claude"; fi
+      if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH (herdr transport needs it)"
+      else d_miss "jq not on PATH but IMPL_TRANSPORT=herdr" "brew install jq"; fi
+      if command -v perl >/dev/null 2>&1; then d_ok "perl on PATH (herdr transport: monotonic deadlines + process-group kills)"
+      else d_miss "perl not on PATH but IMPL_TRANSPORT=herdr" "install perl (base system package on macOS/Linux)"; fi ;;
     claude)
       if command -v claude >/dev/null 2>&1; then d_ok "claude on PATH (IMPL_TRANSPORT=claude)"
       else d_miss "claude not on PATH but IMPL_TRANSPORT=claude" "install Claude Code, or set IMPL_TRANSPORT=orca"; fi
@@ -164,7 +184,7 @@ doctor() {
       else d_warn "jq not on PATH" "needed only for the orca transport + terminal listing: brew install jq"; fi ;;
     *)
       d_miss "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT' (drive.sh would halt on it)" \
-        "set IMPL_TRANSPORT=claude or orca in $DEFAULTS / drive.config" ;;
+        "set IMPL_TRANSPORT=claude, orca, or herdr in $DEFAULTS / drive.config" ;;
   esac
   if command -v gh >/dev/null 2>&1; then d_ok "gh on PATH"
   else d_warn "gh not on PATH" "trunk-protection preflight + PR review degrade: brew install gh"; fi
@@ -232,11 +252,11 @@ doctor() {
           # by frontmatter `name:` (field-verified 2026-07-12: a symlinked dir name does
           # NOT register on Claude Code), so grep the name, not the directory.
           case "$IMPL_TRANSPORT" in
-            orca)
+            orca|herdr)
               if grep -qs "^name: ${slot}\$" "$TUI_SKILLS_DIR"/*/SKILL.md 2>/dev/null; then
                 d_ok "impl slot '$slot' resolves in the TUI agent's skill dir ($TUI_SKILLS_DIR)"
               else
-                d_miss "impl slot '$slot' not registered under $TUI_SKILLS_DIR — the orca-driven TUI agent would STOP at slot resolution" \
+                d_miss "impl slot '$slot' not registered under $TUI_SKILLS_DIR — the $IMPL_TRANSPORT-driven TUI agent would STOP at slot resolution" \
                   "ln -s $SKILLS_DIR/$slot $TUI_SKILLS_DIR/$slot   # or set TUI_SKILLS_DIR in $DEFAULTS"
               fi ;;
             claude)
@@ -333,6 +353,173 @@ resolve_orca_terminal() {
   esac
 }
 
+# ---- herdr transport helpers ------------------------------------------------------
+# Resolve the impl pane: explicit HERDR_PANE_ID > discovery (agent-bearing pane whose
+# .cwd == WORKDIR, or whose .cwd contains HERDR_PANE_CWD_MATCH when set — e.g. a TUI
+# opened in a subdir of the worktree). Exactly ONE match required — the driver must
+# never type into an ambiguous pane. `herdr pane list` prints the socket JSON envelope
+# by default (there is NO --json flag); filter .cwd, NOT .foreground_cwd (a foreground
+# child chdir'ing drags foreground_cwd away from the pane — PRD, live-verified).
+resolve_herdr_pane() {
+  if [ -n "$HERDR_PANE_ID" ]; then
+    # A pinned pane must never be the driver's own pane (config error).
+    if [ -n "${DRIVER_SELF_PANE:-}" ] && [ "$HERDR_PANE_ID" = "$DRIVER_SELF_PANE" ]; then
+      note "herdr: HERDR_PANE_ID equals the pane running drive.sh — the driver cannot type into itself"
+      return 1
+    fi
+    printf '%s\n' "$HERDR_PANE_ID"; return 0
+  fi
+  local js n
+  js=$(herdr pane list 2>/dev/null) \
+    || { note "herdr: 'pane list' failed — is Herdr running? (socket: ~/.config/herdr/herdr.sock)"; return 1; }
+  # Exclude the driver's own pane (Herdr injects HERDR_PANE_ID into every pane it
+  # manages — a driver launched inside the target worktree would otherwise match).
+  # Agent-bearing only: a plain shell pane in the worktree is never a send target.
+  js=$(printf '%s' "$js" | jq --arg wd "$WORKDIR" --arg m "$HERDR_PANE_CWD_MATCH" --arg self "${DRIVER_SELF_PANE:-}" \
+        '[.result.panes[]? | select((.agent // "") != "")
+          | select(.pane_id != $self)
+          | select(if $m == "" then .cwd == $wd else ((.cwd // "") | contains($m)) end)]') || return 1
+  n=$(printf '%s' "$js" | jq 'length')
+  case "$n" in
+    1) printf '%s' "$js" | jq -r '.[0].pane_id' ;;
+    0) note "herdr: no agent-bearing pane for cwd ${HERDR_PANE_CWD_MATCH:-$WORKDIR}${HERDR_PANE_CWD_MATCH:+ (substring match)} (the driver's own pane is excluded)"; return 1 ;;
+    *) note "herdr: $n panes match — narrow with HERDR_PANE_CWD_MATCH (different cwd) or pin HERDR_PANE_ID"; return 1 ;;
+  esac
+}
+
+# One atomic sample per poll: agent STATE and detection AUTHORITY from the SAME
+# `herdr agent explain` payload — checking them in separate reads races (a
+# screen-manifest pane can leave its matched rule between the two reads and fall
+# back to always-idle). Authoritative = a lifecycle hook OR a MATCHED manifest
+# rule, with no fallback in effect. A merely LOADED manifest (manifest_source set,
+# matched_rule null) is NOT authority: on an unrecognized screen Herdr 0.7.3
+# reports exactly that plus fallback_reason=default_known_agent_idle_fallback and
+# state idle — the always-idle trap this guard exists to reject.
+herdr_agent_sample() {   # <pane> <timeout_ms> — echoes "<state> <1|0 authority flag>"; empty on failure/timeout
+  run_with_timeout_ms "$2" herdr agent explain "$1" --json 2>/dev/null | jq -r \
+    '[(.state // "unknown"),
+      (if (((.screen_detection_skip_reason == "full_lifecycle_hook_authority") or (.matched_rule != null))
+           and (.fallback_reason == null)) then "1" else "0" end)]
+     | join(" ")' 2>/dev/null
+}
+
+# NB: single-quoted awk program + -v, deliberately — bash 3.2 (macOS /bin/bash)
+# mangles escaped quotes nested inside $(): `"$(awk "…\"…\"…")"` brace-expands the
+# program into garbage (field-hit 2026-07-15: the watchdog slept 0ms and killed
+# every sample at birth).
+sleep_ms() { sleep "$(awk -v ms="$1" 'BEGIN{printf "%.3f", ms/1000}')"; }
+
+# Clock for guard deadlines: MONOTONIC when available (perl Time::HiRes
+# clock_gettime — wall-clock steps from NTP/manual adjustment must not stretch or
+# shrink a timeout), else HiRes wall time, else whole-second date. The source is
+# probed and PINNED once (herdr transport only) — mixing epochs across calls
+# would corrupt deadline arithmetic (CLOCK_MONOTONIC counts from boot).
+NOW_MS_MODE=date
+if [ "$IMPL_TRANSPORT" = "herdr" ]; then
+  if perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'clock_gettime(CLOCK_MONOTONIC)' >/dev/null 2>&1; then
+    NOW_MS_MODE=mono
+  elif perl -MTime::HiRes=time -e 'time()' >/dev/null 2>&1; then
+    NOW_MS_MODE=wall
+  fi
+fi
+now_ms() {
+  case "$NOW_MS_MODE" in
+    mono) perl -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC -e 'printf("%.0f", clock_gettime(CLOCK_MONOTONIC)*1000)' ;;
+    wall) perl -MTime::HiRes=time -e 'printf("%.0f", time()*1000)' ;;
+    *)    date +%s000 ;;
+  esac
+}
+
+# Run <cmd…> with a hard deadline of <ms> — a wedged herdr daemon must not hang the
+# guard past its budget. Portable (macOS ships neither `timeout` nor `setsid`; perl
+# is a CHECKED herdr-transport dependency — preflight/doctor): both the child AND
+# the watchdog run in their OWN process groups (perl setpgrp+exec), because
+# (a) killing only the direct child would leave grandchildren holding the stdout
+# pipe — the consumer (jq) would block until they exit — and (b) disarming only the
+# watchdog shell would orphan its in-flight external `sleep` (one per poll: ~120
+# strays over a 60s budget). The watchdog sends TERM at max(0, ms-200) and KILL AT
+# the deadline — the 200ms grace is carved out of the budget, not appended, so a
+# TERM-trapping descendant still dies ON the deadline (budgets ≤200ms skip the
+# TERM phase: a straight deadline KILL beats TERMing a healthy sample at t=0).
+# The disarm is a group-KILL + reap. The child's rc propagates; stdout passes
+# through.
+run_with_timeout_ms() {   # <ms> <cmd…>
+  local ms=$1; shift
+  ( term_ms=$(( ms > 200 ? ms - 200 : 0 ))
+    grace_ms=$(( ms - term_ms ))
+    term_s=$(awk -v ms="$term_ms" 'BEGIN{printf "%.3f", ms/1000}')
+    grace_s=$(awk -v ms="$grace_ms" 'BEGIN{printf "%.3f", ms/1000}')
+    perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- "$@" & c=$!
+    perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- bash -c \
+      '[ "$1" = "0.000" ] || { sleep "$1"; kill -TERM -- "-$3" 2>/dev/null; }; sleep "$2"; kill -KILL -- "-$3" 2>/dev/null' \
+      watchdog "$term_s" "$grace_s" "$c" \
+      >/dev/null 2>&1 & w=$!
+    rc=0; wait "$c" || rc=$?
+    kill -KILL -- -"$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    exit "$rc" )
+}
+
+# Status guard, read-first: proceed iff the SAME sample is authoritative AND its
+# state ∈ {done,idle}; authoritative blocked halts fast; anything else (working /
+# unknown / non-authoritative / unreadable) re-polls until a MONOTONIC deadline of
+# HERDR_IDLE_TIMEOUT_MS from guard start. The budget binds for real: the deadline
+# is checked before every sample, each `agent explain` call is itself KILLED at
+# the remaining budget (a wedged daemon cannot hang the guard), and a ready state
+# is accepted only when the sample also RETURNED within the deadline — nothing
+# authorizes a send past the budget. Herdr's done = finished-unviewed vs idle =
+# finished-viewed — an idle pane never re-fires done, so a bare
+# `herdr wait agent-status --status done` would hang (live-verified; PRD note).
+herdr_status_guard() {
+  local pane="$1" sample st auth="" deadline rem step_ms=500 sl
+  deadline=$(( $(now_ms) + HERDR_IDLE_TIMEOUT_MS ))
+  while :; do
+    rem=$(( deadline - $(now_ms) ))
+    if [ "$rem" -le 0 ]; then
+      [ "$auth" = "1" ] || note "herdr: agent state for pane $pane is NOT authoritative (no lifecycle hook / no MATCHED manifest rule — the always-idle fallback). Fail closed: pin HERDR_PANE_ID to a pane with hook authority, or install that agent's Herdr integration (herdr agent explain $pane)"
+      return 1
+    fi
+    sample=$(herdr_agent_sample "$pane" "$rem") || sample=""
+    st="${sample%% *}"; auth="${sample##* }"
+    if [ "$auth" = "1" ]; then
+      case "$st" in
+        done|idle)
+          [ "$(now_ms)" -le "$deadline" ] && return 0
+          return 1 ;;   # sample returned past the deadline — timeout, not consent
+        blocked)   note "herdr: pane $pane agent is BLOCKED — halting fast (needs a human look)"; return 1 ;;
+      esac
+    fi
+    rem=$(( deadline - $(now_ms) ))
+    [ "$rem" -le 0 ] && continue
+    sl=$step_ms; [ "$rem" -lt "$sl" ] && sl=$rem
+    sleep_ms "$sl"
+  done
+}
+
+# After a reset send: `pane run` only ENQUEUES text+Enter — an immediately-following
+# guard could read the PRE-reset ready state and submit the card before the reset is
+# processed. Watch for an observable transition (any non-ready sample = the TUI
+# visibly took the reset) and hand over to the guard the moment one shows; if none
+# shows before a real-clock deadline of HERDR_RESET_SETTLE_MS, fall through to the
+# guard (fast TUIs can finish a reset between polls, and pane `revision` does NOT
+# tick on content in Herdr 0.7.3 — live-verified — so time is the only remaining
+# bound).
+herdr_reset_settle() {
+  local pane="$1" sample st deadline step_ms=250 rem sl
+  deadline=$(( $(now_ms) + HERDR_RESET_SETTLE_MS ))
+  while :; do
+    rem=$(( deadline - $(now_ms) ))
+    [ "$rem" -le 0 ] && return 0
+    sample=$(herdr_agent_sample "$pane" "$rem") || sample=""
+    st="${sample%% *}"
+    case "$st" in done|idle|"") ;; *) return 0 ;; esac
+    rem=$(( deadline - $(now_ms) ))
+    [ "$rem" -le 0 ] && continue
+    sl=$step_ms; [ "$rem" -lt "$sl" ] && sl=$rem
+    sleep_ms "$sl"
+  done
+}
+
 remote_seq() {   # seq of the LAST journal entry on origin/<BRANCH>; empty output on parse failure
   local J
   J=$(show_origin "$JOURNAL") || return 1
@@ -398,7 +585,11 @@ case "$IMPL_TRANSPORT" in
   orca)
     command -v orca >/dev/null 2>&1 || halt "orca CLI not on PATH (IMPL_TRANSPORT=orca)" "install the Orca CLI, then re-run" 2
     command -v jq   >/dev/null 2>&1 || halt "jq not on PATH (IMPL_TRANSPORT=orca needs it)" "install jq, then re-run" 2 ;;
-  *) halt "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT'" "set IMPL_TRANSPORT=claude or orca in drive.config" 2 ;;
+  herdr)
+    command -v herdr >/dev/null 2>&1 || halt "herdr CLI not on PATH (IMPL_TRANSPORT=herdr)" "install Herdr (https://herdr.dev), then re-run" 2
+    command -v jq    >/dev/null 2>&1 || halt "jq not on PATH (IMPL_TRANSPORT=herdr needs it)" "install jq, then re-run" 2
+    command -v perl  >/dev/null 2>&1 || halt "perl not on PATH (IMPL_TRANSPORT=herdr needs it: monotonic deadlines + process-group kills)" "install perl, then re-run" 2 ;;
+  *) halt "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT'" "set IMPL_TRANSPORT=claude, orca, or herdr in drive.config" 2 ;;
 esac
 git_q rev-parse --git-dir >/dev/null 2>&1 || halt "WORKDIR is not a git repo: $WORKDIR" "clone the target repo there" 2
 git_q fetch origin --quiet || halt "git fetch origin failed (network / auth)" "fix connectivity, re-run" 1
@@ -444,6 +635,14 @@ if [ "$IMPL_TRANSPORT" = "orca" ]; then
   _h=$(resolve_orca_terminal) || halt "cannot resolve the impl terminal in Orca (worktree: $WORKDIR)" \
       "open the coder TUI in an Orca terminal for that worktree; disambiguate with ORCA_TERMINAL_TITLE or ORCA_TERMINAL_HANDLE" 2
   note "orca transport: impl terminal = $_h"
+fi
+
+# Herdr transport: same early bind — a bad setup halts before GATE 1.
+# (run_impl_herdr re-resolves per card — handles churn when panes close/reopen.)
+if [ "$IMPL_TRANSPORT" = "herdr" ]; then
+  _p=$(resolve_herdr_pane) || halt "cannot resolve the impl pane in Herdr (cwd: $WORKDIR)" \
+      "open the coder TUI in a Herdr pane for that worktree; use HERDR_PANE_CWD_MATCH or pin HERDR_PANE_ID" 2
+  note "herdr transport: impl pane = $_p"
 fi
 
 # ---- run ONE impl stage: a fresh `claude` cold node on the cheap tier ----------
@@ -508,9 +707,47 @@ run_impl_orca() {
   return 1
 }
 
+# Herdr transport: same shape as orca — type the stage command into a live coder TUI
+# pane, then poll the REMOTE journal as the only completion signal. Herdr deltas
+# (PRD .pipeline/herdr-transport/PRD.md): send is `herdr pane run` (atomic
+# text+Enter, officially preferred over send-text + send-keys enter); the pre-send
+# guard validates readiness AND detection authority from the SAME explain sample on
+# every poll ({done,idle} both mean ready — an idle pane never re-fires done), and
+# FAILS CLOSED on non-authoritative state rather than type into a pane whose
+# always-idle fallback can't see a busy TUI. A reset is followed by a settle window
+# (herdr_reset_settle) before the second guard.
+run_impl_herdr() {
+  local pane start s
+  pane=$(resolve_herdr_pane) || return 1
+  if [ -n "$HERDR_RESET_CMD" ]; then
+    # The guard is as load-bearing for the reset as for the real send: typing the
+    # reset into a BUSY TUI could corrupt an in-flight card. A guard failure is fatal.
+    herdr_status_guard "$pane" \
+      || { note "herdr: pane $pane not ready within ${HERDR_IDLE_TIMEOUT_MS}ms (before reset)"; return 1; }
+    herdr pane run "$pane" "$HERDR_RESET_CMD" >/dev/null 2>&1 \
+      || { note "herdr: reset send failed for $pane"; return 1; }
+    herdr_reset_settle "$pane"
+  fi
+  herdr_status_guard "$pane" \
+    || { note "herdr: pane $pane not ready within ${HERDR_IDLE_TIMEOUT_MS}ms"; return 1; }
+  herdr pane run "$pane" "$IMPL_SLASH_CMD repo=$WORKDIR branch=$BRANCH" >/dev/null 2>&1 \
+    || { note "herdr: 'pane run' failed for $pane"; return 1; }
+  start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$CARD_TIMEOUT" ]; do
+    sleep "$POLL_SECS"
+    git_q fetch origin --quiet || true          # transient fetch error: keep polling
+    s=$(remote_seq) || s=""
+    if [ -n "$s" ] && [ "$s" -gt "$prev_seq" ]; then return 0; fi
+  done
+  note "herdr transport: no journal progress within ${CARD_TIMEOUT}s — impl pane tail:"
+  herdr pane read "$pane" --source recent --lines 20 2>/dev/null | tail -20 >&2 || true
+  return 1
+}
+
 run_impl() {
   case "$IMPL_TRANSPORT" in
     orca) run_impl_orca ;;
+    herdr) run_impl_herdr ;;
     *)    run_impl_claude ;;
   esac
 }
@@ -540,8 +777,8 @@ stranded_in_progress() { # echoes a card path if any card is status: in-progress
 CONFIRMED_SPEC_REV=$(live_spec_rev) || halt "no task cards under origin/$BRANCH:$TASKS — feature not decomposed yet" "run pipeline-task (human, frontier)" 2
 [ -n "$CONFIRMED_SPEC_REV" ] || halt "cards carry no spec-rev — task did not freeze a spec" "run pipeline-task (human, frontier)" 2
 
-if [ "$IMPL_TRANSPORT" = "orca" ]; then
-  note "Feature : $FEATURE   (trunk=$BRANCH)   impl transport=orca (live TUI terminal)"
+if [ "$IMPL_TRANSPORT" = "orca" ] || [ "$IMPL_TRANSPORT" = "herdr" ]; then
+  note "Feature : $FEATURE   (trunk=$BRANCH)   impl transport=$IMPL_TRANSPORT (live TUI terminal)"
 else
   note "Feature : $FEATURE   (trunk=$BRANCH)   impl model=$IMPL_MODEL"
 fi
@@ -618,6 +855,12 @@ while : ; do
     if ! run_impl; then
       halt "the driven pipeline-impl made no journal progress after seq=$prev_seq (terminal error or card timeout)" \
            "inspect the impl terminal in Orca; pipeline-impl (manual) or pipeline-hunt" 1
+    fi
+  elif [ "$IMPL_TRANSPORT" = "herdr" ]; then
+    note ">>> impl dispatch via herdr pane (after seq=$prev_seq) ..."
+    if ! run_impl; then
+      halt "the driven pipeline-impl made no journal progress after seq=$prev_seq (pane error or card timeout)" \
+           "inspect the impl pane in Herdr; pipeline-impl (manual) or pipeline-hunt" 1
     fi
   else
     note ">>> impl run (after seq=$prev_seq, model=$IMPL_MODEL) ..."
