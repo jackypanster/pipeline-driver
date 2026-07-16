@@ -4,12 +4,19 @@ Status: **Partially superseded — see Section 25 (v1.3 outcome)**
 
 The read-only surface (`doctor`/`status`, PR #13) and the cross-repository `pipeline` contract
 (control.json / dispatch envelope / stale guard / atomic review outcome, pipeline PR #44) are merged
-and REMAIN NORMATIVE for any dispatcher. The deterministic bash dispatch half (`watch`/`resume`,
-Sections 8, 12–18) is NOT being implemented — coordinated mode v1 is a CC-as-coordinator playbook
-instead (Section 25 records why). Sections describing watch/resume are retained as design history and
-as requirements input for any future deterministic dispatcher.
+and REMAIN NORMATIVE for any dispatcher. The deterministic bash dispatch half is NOT being
+implemented — coordinated mode v1 is a CC-as-coordinator playbook instead (Section 25 records why).
+**Every Bash-dispatch imperative in this document is historical**: Sections 8 and 12–18 entirely, the
+`pipeline-driver` half of Section 20, the implementation sequence in Section 21, the acceptance
+scenarios in Section 22, and the deterministic-mode rollout language in Section 23 — each carries its
+own marker. They are retained as design history and as requirements input for any future
+deterministic dispatcher, and MUST NOT be executed as instructions.
 
 Approved: 2026-07-16
+
+Revision: v1.3 (2026-07-16) — records the operator decision to pivot the dispatch half to a
+CC-as-coordinator playbook (Section 25) and marks every Bash-dispatch imperative as historical. The
+merged read-only surface and the merged `pipeline` contract are unchanged and stay normative.
 
 Revision: v1.2 (2026-07-16) — v1.1 trimmed three duplicate-protection mechanisms; the PR #12 review
 found one load-bearing, and v1.2 restores it. Kept trims: the dispatch envelope is plain fields (a
@@ -547,7 +554,11 @@ Update `CONTRACT.md`, `DESIGN.md`, README, and the relevant stage skills to:
 - emit the exact human-direct merge wait marker;
 - preserve human-relay mode and the direct-human merge invariant.
 
-### `pipeline-driver` second
+### `pipeline-driver` second — **HISTORICAL (superseded by §25; do not execute)**
+
+Only `doctor`/`status` and the shared journal parsing below shipped (PR #13, merged). The dispatch
+items (coordinate.sh watch/resume, locking, ledger, audit, delivery, drive.sh delegation, watcher
+end-to-end validation) were attempted in PR #14, closed unmerged — see §25.
 
 After the pipeline contract lands and Herdr transport PR #11 is merged or deliberately rebased into the
 implementation branch, add:
@@ -564,7 +575,7 @@ The currently active `.pipeline/drive-setup` feature in `pipeline-driver` MUST N
 by a second `.pipeline` feature. Coordinator implementation must be a toolchain meta-PR with no new
 `.pipeline` state, or wait until `drive-setup` is resolved.
 
-## 21. Implementation sequence for CC
+## 21. Implementation sequence for CC — **HISTORICAL (superseded by §25; do not execute)**
 
 1. Read this document, `pipeline/CONTRACT.md`, `pipeline/DESIGN.md`, `pipeline-driver/README.md`, and
    Herdr transport PR #11. Do not reinterpret frozen decisions.
@@ -578,7 +589,10 @@ by a second `.pipeline` feature. Coordinator implementation must be a toolchain 
 9. Exercise every fatal seam and crash window, then run the real three-pane flow.
 10. Keep the two repository diffs independent and reviewable; do not merge either automatically.
 
-## 22. Acceptance scenarios
+## 22. Acceptance scenarios — **HISTORICAL (superseded by §25)**
+
+These scenarios defined completeness for the BASH watcher and are requirements input for any future
+deterministic dispatcher; they are not a to-do list for the playbook coordinator.
 
 The implementation is not complete until all scenarios below are demonstrated:
 
@@ -615,13 +629,18 @@ The implementation is not complete until all scenarios below are demonstrated:
 - This design is additive and opt-in. Existing human-relay and standalone `drive.sh` flows remain valid.
 - The coordinator must reject coordinated features until both repositories support schema version 1.
 - No automatic migration writes `control.json` into existing features.
-- A rollback removes or stops the watcher; it does not rewrite Git history. The feature remains
+- A rollback removes or stops the coordinator; it does not rewrite Git history. The feature remains
   resumable by normal human relay from the journal tail.
-- The implementation PRs must update existing prose that says a whole-pipeline scheduler is forbidden:
-  the prohibition remains the default, while this approved deterministic, feature-authorized mode is
-  the explicit exception. Do not leave contradictory instructions for agents.
+- **Historical note (superseded by §25):** the original requirement to update scheduler-prohibition
+  prose for "this approved deterministic mode" was fulfilled for the PLAYBOOK coordinator instead —
+  pipeline PRs #44/#45 name coordinated mode's v1 as the `pipeline-coordinate` playbook, with the
+  deterministic watcher a future option. Do not leave contradictory instructions for agents.
 
-## 24. Known v1 limitations
+## 24. Known v1 limitations — scoped to the BASH watcher (see §25 for the playbook)
+
+Limitation 1 below applies to a deterministic dispatcher only (a playbook coordinator handles a
+stage's legitimate question by reading it and involving the human). Limitation 2 — pane lifecycle
+authority — applies to ANY coordinator that dispatches through Herdr, including the playbook.
 
 1. Stage autonomy between journal commits is assumed. Every legitimate stage question that ends a turn
    without a journal handoff halts the coordinator as `AGENT_ENDED_WITHOUT_HANDOFF` and costs a human
@@ -644,17 +663,26 @@ the pivot:
 
 1. **Frozen decision 6 is structurally unimplementable as written.** Delegating impl spans to the
    existing `drive.sh` requires a headless path through its interactive GATE 1 trust gate — the one
-   surface every party agreed never to relax. The alternative (per-card dispatch by the coordinator)
-   was viable, but by then finding 2 dominated.
-2. **Coordination is semi-semantic.** Decision 2 ("the coordinator MUST NOT make a semantic
-   decision") forces every judgment — is the implementer's output acceptable, what should a fix
-   handoff say, is a review round closed — into machine-parseable protocol. The 46 review findings
-   across PRs #13/#14 were overwhelmingly the cost of making bash safe against inputs a reasoning
-   coordinator simply reads. A CC session handles those cases natively and demonstrably better (this
-   architecture's own PRs were coordinated exactly that way, end to end).
-3. **The unattended premise was already void.** The merge gate requires a live human in the reviewer
-   session (Section 17), so end-to-end unattended operation was never achievable; an attended CC
-   coordinator gives up nothing the design could actually deliver.
+   surface every party agreed never to relax. The viable alternative (per-card dispatch by the
+   coordinator) contradicts decision 6's text and would still carry the full hardening cost below.
+2. **The hardening cost of a safe bash dispatcher proved very high, and it was still not done.** The
+   review record is 55 findings: 39 across five rounds on PR #13 (the read-only half, eventually
+   merged) and 13 P1 + 3 P2 on PR #14 round one (the dispatch half, closed with blockers open). They
+   were predominantly CONCRETE implementation defects — parser anchoring, timeout/process-group
+   discipline, remote-identity normalization, symlink/FIFO/mode trust boundaries, ledger schema and
+   replay, locking scope, stale transport samples — not protocolized judgment calls. The honest
+   conclusion is narrower than "a reasoning coordinator reads what bash must parse": every one of
+   those fail-closed checks remains NORMATIVE for any dispatcher, the playbook coordinator relaxes
+   none of them, and stage-output judgment stays with Codex review under the three-role separation.
+   What the operator weighed is the COST: a CC session already coordinating real PRs under the same
+   contract guards was available immediately, while the bash dispatcher still had 13 open P1s after
+   the read-only half alone had consumed five review rounds.
+3. **The attended tradeoff was accepted, not free.** Decision 7 promised unattended ownership of all
+   normal handoffs until the terminal merge gate or a fatal stop; §17's human-direct gate bounds only
+   the final merge. Pivoting to a live CC coordinator GIVES UP unattended pre-merge handoffs and the
+   watcher's continuous restart/recovery behavior. The operator explicitly accepted that tradeoff
+   (attended-but-async operation: the human is reachable, not watching), because the end-to-end flow
+   still requires the human at the merge gate and at exception decisions in any case.
 
 What remains normative from this document for the playbook coordinator: the role/pane topology (§5),
 `control.json` authorization (§6), the route evidence table (§7 — as reading guidance, not a parser
