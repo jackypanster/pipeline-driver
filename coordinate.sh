@@ -133,6 +133,18 @@ is_pos_int() {  # <value>
   [ "$1" -gt 0 ]
 }
 
+# valid_feature_slug <slug> — 0 iff <slug> is safe to use as a SINGLE path
+# component under the repo state dir. Rejects empty, '.', '..', any '/', leading
+# '-', whitespace, control chars, and anything outside [A-Za-z0-9._-] — so a
+# malicious feature read from HEAD's current.json (or a tampered state subdir)
+# can never traverse into another repo/feature state namespace (finding: slug).
+valid_feature_slug() {
+  local s=$1
+  [ -n "$s" ] || return 1
+  case "$s" in -*|*/*|*".."*) return 1 ;; esac
+  printf '%s' "$s" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+}
+
 # ---- bounded exec (perl; base-system on macOS/Linux; no `timeout` on macOS) -----
 # bounded_run_ms <ms> <cmd...> — stdout passes through; exit 124 on timeout, else
 # the leader's rc. The child runs in its OWN process group (perl setpgrp+exec); the
@@ -659,6 +671,15 @@ cmd_status() {
   if [ -z "$feat" ] && [ -d "$repodir" ]; then
     # fall back to the most recently modified feature subdir
     feat=$(cd "$repodir" 2>/dev/null && ls -1dt */ 2>/dev/null | head -1); feat="${feat%/}"
+  fi
+  # The feature slug is UNTRUSTED (read from HEAD's current.json, or a state subdir
+  # name) and is concatenated into a state path — validate it BEFORE path use so a
+  # malicious slug ('..', with '/', whitespace, control chars) cannot traverse into
+  # another repo/feature state namespace (finding: feature slug).
+  if [ -n "$feat" ] && ! valid_feature_slug "$feat"; then
+    coord_die CONFIG_INVALID "status:feature" "<redacted-slug>" \
+      "feature slug from current.json is malformed or unsafe: must be a simple name ([A-Za-z0-9][A-Za-z0-9._-]*), got something containing '/', '..', or whitespace/control chars" \
+      "inspect .pipeline/current.json on HEAD in $OBSERVER_WORKDIR; do NOT pass the raw value to any path"
   fi
 
   local state="idle" seq="" commit="" delivery="" halt_code="" lock_state="free"

@@ -113,6 +113,21 @@ if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'CONFIG_INVALID'; then
 else
   bad "invalid config" "rc=$rc; out=$(printf '%s' "$out" | head -8)"; fi
 
+# ===== 6. (finding 11) malicious feature slug from current.json must NOT traverse.
+#      The feature is read from HEAD and concatenated into a state path; a slug
+#      like '../..' must be rejected with CONFIG_INVALID instead of path traversal. =====
+fresh; seed "$T"
+( cd "$T/obs"
+  printf '{"feature":"../../etc","stage":"impl"}' > .pipeline/current.json
+  git commit -aqm badfeat && git push -q origin main )
+out=$(run_status 2>&1); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q 'CONFIG_INVALID' \
+   && ! printf '%s' "$out" | grep -q 'etc/passwd'; then
+  ok "malicious feature slug -> CONFIG_INVALID (no traversal)"
+else
+  bad "malicious feature slug" "rc=$rc; expected CONFIG_INVALID + no traversal; out=$(printf '%s' "$out" | head -8)"; fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
