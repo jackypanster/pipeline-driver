@@ -6,11 +6,18 @@ The read-only surface (`doctor`/`status`, PR #13) and the cross-repository `pipe
 (control.json / dispatch envelope / stale guard / atomic review outcome, pipeline PR #44) are merged
 and REMAIN NORMATIVE for any dispatcher. The deterministic bash dispatch half is NOT being
 implemented — coordinated mode v1 is a CC-as-coordinator playbook instead (Section 25 records why).
-**Every Bash-dispatch imperative in this document is historical**: Sections 8 and 12–18 entirely, the
-`pipeline-driver` half of Section 20, the implementation sequence in Section 21, the acceptance
-scenarios in Section 22, and the deterministic-mode rollout language in Section 23 — each carries its
-own marker. They are retained as design history and as requirements input for any future
-deterministic dispatcher, and MUST NOT be executed as instructions.
+
+**Historical (design history + requirements input for a future deterministic dispatcher; MUST NOT be
+executed as instructions):** Section 8 (the watcher lifecycle/loop), the `watch`/`resume` subcommands
+in Section 12, Section 13 (local delivery ledger), Section 16 (operational audit), Section 18
+(watcher signals/timeouts), the `pipeline-driver` dispatch half of Section 20, the implementation
+sequence in Section 21, the acceptance scenarios in Section 22, and the deterministic-mode rollout
+bullet in Section 23.
+
+**Normative for ANY coordinator, including the playbook:** Sections 1–7 and 9–11, the
+`doctor`/`status` contract in Section 12, the fail-closed requirements of Section 14, the
+business-route evidence rules of Section 15, the human-direct merge gate of Section 17, Section 19,
+and the `pipeline`-first half of Section 20 (merged as pipeline PR #44).
 
 Approved: 2026-07-16
 
@@ -206,7 +213,7 @@ The reviewer MUST NOT expose an intermediate "verdict written; disposition follo
 coordinated mode. Without this rule, the watcher could observe a review result that is neither routable
 nor a valid merge wait. Human-relay mode may remain backward compatible, but coordinated mode is strict.
 
-## 8. Coordinator lifecycle
+## 8. Coordinator lifecycle — **HISTORICAL (superseded by §25)**
 
 The process has these internal states:
 
@@ -349,7 +356,7 @@ Read-only full preflight. It reports dependencies, remote identity, branch, cont
 role-clone agreement, pane resolution, lifecycle authority, state-directory permissions, ledger
 integrity, lock state, and halt state. Any missing prerequisite exits non-zero.
 
-### `watch`
+### `watch` — **HISTORICAL (superseded by §25)**
 
 Acquire the lock and run the reconcile loop. If an unresolved `halt.json` exists, exit non-zero and tell
 the operator to use `resume`; plain `watch` cannot bypass a halt.
@@ -359,7 +366,7 @@ the operator to use `resume`; plain `watch` cannot bypass a halt.
 Read only local state and the last observed Git identifiers. Print one concise human summary plus a JSON
 form suitable for agents. It never contacts a model and never changes ledger state.
 
-### `resume`
+### `resume` — **HISTORICAL (superseded by §25)**
 
 Require a non-empty human reason, rerun full preflight, record the human resume event, and resume only
 after the original guard is satisfied. If ledger state is ambiguous `pending`, require exactly one:
@@ -373,7 +380,7 @@ its promised handoff — the stale-dispatch guard cannot tell them apart (it ref
 seqs), and guessing either way masks a real failure. The choice, reason, prior fatal event, and
 resulting state MUST be audited. Coordinator code never selects either option automatically.
 
-## 13. Local delivery state
+## 13. Local delivery state — **HISTORICAL (superseded by §25)**
 
 The default state root is `${XDG_STATE_HOME:-$HOME/.local/state}/pipeline-driver`, overridable by
 `STATE_DIR`. A stable repo key is derived from normalized remote identity. Each feature owns:
@@ -459,7 +466,7 @@ The counter is card-level. It does not fingerprint individual findings and does 
 Missing attribution, a counter jump, a review rejection that leaves no actionable card, or disagreement
 between the journal and card state is a protocol fatal rather than a guessed route.
 
-## 16. Operational audit
+## 16. Operational audit — **HISTORICAL (superseded by §25)**
 
 Git journal and coordinator audit have different jobs:
 
@@ -509,7 +516,7 @@ The operator replies directly in the same Codex session using the exact token ac
 `pipeline-review`. Codex performs the merge and appends `review -> done`. If that session is lost, the
 gate is disarmed and review must run again; the coordinator cannot restore or impersonate the session.
 
-## 18. Signals, timeouts, and exceptional HITL
+## 18. Signals, timeouts, and exceptional HITL — **HISTORICAL (superseded by §25)**
 
 - `POLL_SECS` controls normal no-change Git polling; no change is not an error.
 - `PANE_READY_TIMEOUT_MS` bounds waiting to deliver before the stage begins.
@@ -632,9 +639,11 @@ The implementation is not complete until all scenarios below are demonstrated:
 - A rollback removes or stops the coordinator; it does not rewrite Git history. The feature remains
   resumable by normal human relay from the journal tail.
 - **Historical note (superseded by §25):** the original requirement to update scheduler-prohibition
-  prose for "this approved deterministic mode" was fulfilled for the PLAYBOOK coordinator instead —
-  pipeline PRs #44/#45 name coordinated mode's v1 as the `pipeline-coordinate` playbook, with the
-  deterministic watcher a future option. Do not leave contradictory instructions for agents.
+  prose was written for "this approved deterministic mode". Merged pipeline PR #44 supplies the
+  still-normative coordinated-mode contract (worded for an external `coordinate.sh` coordinator);
+  pipeline PR #45 PROPOSES renaming coordinated mode's v1 to the `pipeline-coordinate` playbook (with
+  the deterministic watcher a future option) and fulfills this requirement only when merged. Do not
+  leave contradictory instructions for agents.
 
 ## 24. Known v1 limitations — scoped to the BASH watcher (see §25 for the playbook)
 
