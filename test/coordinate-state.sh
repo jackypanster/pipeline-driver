@@ -164,6 +164,42 @@ fresh; seed_clones "$T"; mkdir -p "$T/elsewhere"; chmod 700 "$T/elsewhere"; ln -
 write_cfg "$T" "$T/link-parent/state"; mkdir -p "$T/link-parent/state"; chmod 700 "$T/link-parent/state"
 assert_code "symlinked parent of state root -> CONFIG_INVALID" CONFIG_INVALID "$T"
 
+# run_doctor_bounded <root> <budget_s>: doctor under a HARD external deadline —
+# used only by the cases whose OLD-head behavior was an unbounded hang (a test
+# that hangs proves nothing). Kills the whole process group at the deadline and
+# exits 124.
+run_doctor_bounded() {
+  perl -e '
+    my $s = shift; my @c = @ARGV;
+    my $p = fork(); die "fork: $!" unless defined $p;
+    if (!$p) { setpgrp(0,0); exec @c or exit 127; }
+    local $SIG{ALRM} = sub { kill "KILL", -$p; waitpid $p, 0; exit 124 };
+    alarm $s; waitpid $p, 0; my $rc = $? >> 8; alarm 0;
+    kill "KILL", -$p; exit $rc;
+  ' "$2" env PATH=/usr/bin:/bin bash "$COORD" doctor --config "$1/cfg" 2>&1
+}
+
+# ===== 14. (round-3 F3) a mode-0600 FIFO named ledger.json must be REFUSED as
+#      non-regular BEFORE anything opens it. The old head reported "file 0600" and
+#      then hung forever in jq (no writer); bounded here so the old head FAILS with
+#      rc=124 instead of hanging the suite. =====
+fresh; seed_clones "$T"; write_cfg "$T" "$T/state"; mkstate "$T" 700 600
+repodir="$T/state/$(state_dir_of "$T")"; feat="$repodir/hello-cli"
+rm -f "$feat/ledger.json"; mkfifo "$feat/ledger.json"; chmod 600 "$feat/ledger.json"
+out=$(run_doctor_bounded "$T" 12); rc=$?
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && printf '%s' "$out" | grep -q 'not a regular file'; then
+  ok "FIFO ledger.json -> refused as non-regular, never read (no hang)"
+else
+  bad "FIFO ledger.json" "rc=$rc (124 = doctor hung until the external deadline); $(printf '%s' "$out" | grep -iE 'ledger|regular|0600' | head -3)"
+fi
+
+# ===== 15. (round-3 F2) symlinked PARENT with the state root NOT created yet must
+#      still BLOCK — the first write would land through the forbidden parent. The
+#      old head early-returned "state root not created yet" before the parent walk. =====
+fresh; seed_clones "$T"; mkdir -p "$T/elsewhere"; chmod 700 "$T/elsewhere"; ln -s "$T/elsewhere" "$T/link-parent"
+write_cfg "$T" "$T/link-parent/state"   # state NOT created
+assert_code "symlinked parent + absent state root -> CONFIG_INVALID" CONFIG_INVALID "$T"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

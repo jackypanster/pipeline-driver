@@ -42,11 +42,20 @@ PANE_READY_TIMEOUT_MS=60000
 STAGE_TIMEOUT_SECS=2700
 EOF
 }
-# set_all_origins <root> <url>: point all four clones at <url> (origin.url is just
-# config, so a non-local https URL is fine — nothing is fetched in the sections we
-# assert on; doctor fails at git fetch, AFTER printing the repo key line).
+# set_all_origins <root> <url>: point all four clones at <url>.
 set_all_origins() { local c; for c in obs cc pi codex; do git -C "$1/$c" remote set-url origin "$2"; done; }
-run_doctor() { env PATH=/usr/bin:/bin bash "$COORD" doctor --config "$1/cfg" 2>&1; }
+# run_doctor is HERMETIC (finding: the suite must never touch the network even
+# though doctor reaches `git fetch`): ssh is forced to fail instantly
+# (GIT_SSH_COMMAND=/usr/bin/false) and http(s) is routed into a closed local port
+# (ALL_PROXY -> 127.0.0.1:1, connection refused), with prompts disabled — the
+# identity strings under test are preserved verbatim while every fetch fails fast
+# as GIT_FETCH_FAILED, which the assertions below do not depend on.
+run_doctor() {
+  env PATH=/usr/bin:/bin \
+      GIT_SSH_COMMAND=/usr/bin/false GIT_ASKPASS=/usr/bin/false GIT_TERMINAL_PROMPT=0 \
+      ALL_PROXY=http://127.0.0.1:1 all_proxy=http://127.0.0.1:1 \
+      bash "$COORD" doctor --config "$1/cfg" 2>&1
+}
 
 # ===== finding 5: a password containing the '!' sub-delim must NOT leak. The old
 #      whitelist sanitizer ([A-Za-z0-9._~%+-]) stopped at '!' and kept the secret. =====
@@ -81,15 +90,56 @@ else
   bad "port/path collision" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -4)"
 fi
 
-# ===== finding 6: a remote that normalizes to a '..' segment is REFUSED (would let
-#      the repo key escape the state root). The old head produced the literal key '..'. =====
+# ===== finding 6 (surface moved by the round-3 filesystem canonicalization): a
+#      NETWORK remote whose path carries a '..' segment is still REFUSED (the key
+#      would escape the state root). Relative FILESYSTEM forms like '..' are now
+#      legitimately canonicalized per-clone (see the relative-remote case below) —
+#      resolution eliminates dot-segments, so no escape key can exist on that path. =====
 fresh; seed "$T"
-set_all_origins "$T" ".."
+set_all_origins "$T" "https://example.com/../escape.git"
 out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]'; then
-  ok "remote '..' -> CONFIG_INVALID (no escape key)"
+  ok "network remote with '..' segment -> CONFIG_INVALID (no escape key)"
 else
   bad "remote dot-segment" "expected CONFIG_INVALID; rc=$rc; $(printf '%s' "$out" | grep -iE 'repo key|config_invalid|normalized' | head -4)"
+fi
+
+# ===== round-3 F4: RELATIVE filesystem remotes resolve PER CLONE. Four clones each
+#      declaring remote.origin.url=origin.git name four DIFFERENT local repos —
+#      identities must mismatch. The old head normalized all four to the bare
+#      string 'origin' and accepted them sharing one key. =====
+fresh; seed "$T"
+set_all_origins "$T" "origin.git"
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
+  ok "relative origin.git per clone -> REMOTE_MISMATCH (resolved per-clone, no shared key)"
+else
+  bad "relative filesystem remote" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -4)"
+fi
+
+# ===== round-3 F4 (positive): the SAME absolute filesystem remote in all four
+#      clones agrees, and the key is the resolved physical path (injective). =====
+fresh; seed "$T"
+set_all_origins "$T" "$T/origin.git"
+out=$(run_doctor "$T")
+if ! printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
+   && printf '%s' "$out" | grep -q 'normalized repo key: file%2F'; then
+  ok "same absolute filesystem remote x4 -> agreement + resolved-path key"
+else
+  bad "absolute filesystem remote agreement" "$(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -4)"
+fi
+
+# ===== round-3 F5: query/fragment credentials never reach a key or diagnostic.
+#      The old head kept ?token=… in the percent-encoded key (repo_key=…%3Ftoken%3D…). =====
+fresh; seed "$T"
+set_all_origins "$T" "https://github.com/acme/x.git?token=ghp_QUERYSECRET"
+out=$(run_doctor "$T")
+if printf '%s' "$out" | grep -q 'github.com' \
+   && ! printf '%s' "$out" | grep -iq 'ghp_querysecret' \
+   && ! printf '%s' "$out" | grep -iq 'token='; then
+  ok "query-string token stripped (no ghp_QUERYSECRET, no token= in any output)"
+else
+  bad "query/fragment credential" "leaked: $(printf '%s' "$out" | grep -iE 'ghp_querysecret|token=' | head -3)"
 fi
 
 echo "----"

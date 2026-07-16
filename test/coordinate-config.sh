@@ -9,7 +9,10 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 COORD="$HERE/../coordinate.sh"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Physical temp base (macOS $TMPDIR sits behind the /var -> /private/var symlink;
+# the state-root parent-chain check correctly flags a symlinked parent, so the
+# suite must not construct its OWN state dirs behind one).
+TMP=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$(mktemp -d)"); trap 'rm -rf "$TMP"' EXIT
 pass=0 fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s\n     %s\n' "$1" "$2"; }
@@ -241,6 +244,46 @@ if printf '%s' "$tuple_out" | grep -q '\[CONFIG_INVALID\] reason: POLL_SECS not 
   ok "§14 tuple complete (where/input/next_action/resume_guard) on a config miss"
 else
   bad "§14 tuple" "missing tuple fields; got: $(printf '%s' "$tuple_out" | grep -A1 CONFIG_INVALID | head -4)"
+fi
+
+# ===== round-3 F6: an invalid workdir under bash >= 4 `set -u` must REPORT the
+#      accumulated §14 violations, not crash with 'unbound variable' (the _cd_*
+#      git-common-dir slots were declared but unset when a workdir continue'd past
+#      its assignment; macOS /bin/bash 3.2 tolerates that, bash 4/5 aborts).
+#      SKIPPED (counted as pass, like the gawk UTF-8 case) when no bash >= 4 exists. =====
+BASH5=""
+for cand in /opt/homebrew/bin/bash /usr/local/bin/bash /usr/bin/bash /bin/bash; do
+  [ -x "$cand" ] || continue
+  maj=$("$cand" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)
+  case "$maj" in ''|*[!0-9]*) continue ;; esac
+  [ "$maj" -ge 4 ] && { BASH5="$cand"; break; }
+done
+if [ -z "$BASH5" ]; then
+  ok "bash>=4 invalid workdir (SKIP: no bash >= 4 on this machine — exercised on runtimes that have one)"
+else
+  fresh; seed_clones "$T"
+  cat > "$T/cfg" <<EOF
+OBSERVER_WORKDIR=$T/obs
+BRANCH=main
+CC_WORKDIR=/nonexistent-cc-workdir
+PI_WORKDIR=$T/pi
+CODEX_WORKDIR=$T/codex
+CC_ARCH_CMD=/pipeline-arch
+CC_TASK_CMD=/pipeline-task
+CC_HUNT_CMD=/pipeline-hunt
+PI_IMPL_CMD=/skill:pipeline-impl
+CODEX_REVIEW_CMD='\$pipeline-review'
+POLL_SECS=30
+PANE_READY_TIMEOUT_MS=60000
+STAGE_TIMEOUT_SECS=2700
+EOF
+  out=$(STATE_DIR="$T/state" PATH=/usr/bin:/bin "$BASH5" "$COORD" doctor --config "$T/cfg" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[WORKDIR_INVALID\]' \
+     && ! printf '%s' "$out" | grep -qi 'unbound variable'; then
+    ok "bash>=4 ($BASH5) invalid workdir -> WORKDIR_INVALID, no unbound-variable crash"
+  else
+    bad "bash>=4 invalid workdir" "rc=$rc; $(printf '%s' "$out" | grep -iE 'unbound|workdir_invalid' | head -4)"
+  fi
 fi
 
 echo "----"

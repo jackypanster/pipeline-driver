@@ -76,6 +76,7 @@ stub_herdr() {
 case "\$1 \$2" in
   "pane list")
     if [ -n "\${HERDR_STUB_HUNG_PANE:-}" ]; then sleep 30 & exit 0; fi
+    if [ -n "\${HERDR_STUB_BLOCKING_LEADER:-}" ]; then sleep 20; exit 0; fi
     cat "\$HERDR_STUB_LIST_JSON" 2>/dev/null || echo '{"result":{"panes":[]}}'
     ;;
   "agent explain")
@@ -122,6 +123,22 @@ if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[DEPENDENCY_MISSING\]' \
   ok "hung pane list bounded -> DEPENDENCY_MISSING in ${el}s (no 30s hang)"
 else
   bad "hung pane list bounded" "rc=$rc elapsed=${el}s; $(printf '%s' "$out" | grep -i 'pane list' | head -2)"
+fi
+
+# ===== round-3 F1: a ZERO budget must never be USED, not merely reported. The
+#      round-2 zero test used a fast stub, so it proved only the diagnostic; with a
+#      BLOCKING pane-list leader the old head ran ualarm(0) (deadline disabled) and
+#      hung in waitpid for the leader's full 20s. The fix skips every Herdr read
+#      after the invalid-budget MISS (and bounded_run_ms refuses rc=125 as backstop),
+#      so doctor returns fast with CONFIG_INVALID. =====
+T="$TMP/t5"; seed "$T"; stub_herdr "$T"
+s=$(now); out=$(HERDR_STUB_BLOCKING_LEADER=1 COORD_PANE_LIST_TIMEOUT_MS=0 run_doctor); rc=$?; e=$(now)
+el=$(elapsed "$s" "$e")
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\].*PANE_LIST_TIMEOUT_MS' \
+   && awk -v x="$el" 'BEGIN{exit !(x < 8)}'; then
+  ok "zero budget + blocking leader -> CONFIG_INVALID in ${el}s (never calls Herdr unbounded)"
+else
+  bad "zero budget + blocking leader" "rc=$rc elapsed=${el}s; $(printf '%s' "$out" | grep -iE 'timeout|config_invalid|pane list' | head -4)"
 fi
 
 echo "----"

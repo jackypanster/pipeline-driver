@@ -75,6 +75,10 @@ note() { printf '%s\n' "$*" >&2; }
 strip_userinfo() {
   printf '%s' "$1" | perl -ne '
     chomp;
+    s/[?#].*$//;                 # query/fragment can carry ?token=… — NEVER kept in a
+                                 # key or diagnostic (§14/§19; finding: query/fragment
+                                 # credentials). Stripped on the WHOLE value so a
+                                 # no-path authority (https://host?token=x) is covered.
     my ($s, $rest) = m{^([a-zA-Z][a-zA-Z0-9+.\-]*://)(.*)$} ? ($1,$2) : ("",$_);
     my ($auth, $tail) = $rest =~ m{^([^/]*)(.*)$} ? ($1,$2) : ($rest,"");
     $auth =~ s/^.*\@//;          # drop userinfo through the terminal @
@@ -87,25 +91,51 @@ strip_userinfo() {
 # never reach stderr/stdout or a derived key (§14 sanitized-input / §19).
 redact_remote() { strip_userinfo "$1"; }
 
-# normalize_remote <url>: map https / ssh / scp-like forms of the SAME remote to
-# ONE canonical identity. The scp host:path colon is turned into '/' ONLY for the
-# scheme-less scp-like form (so an ssh:// port like host:2222 is NOT conflated with
-# a path /2222); scheme-bearing URLs keep their host:port colon. Verified forms:
+# normalize_remote_for <workdir> <url>: map https / ssh / scp-like forms of the
+# SAME remote to ONE canonical identity, and canonicalize FILESYSTEM remotes
+# (file://, absolute, or relative paths) against the clone that declares them:
+# `remote.origin.url=origin.git` in four different clones names four DIFFERENT
+# local repositories, so the identity must be the RESOLVED physical path — a bare
+# string comparison would let distinct repos agree and share one state key.
+# (finding: relative filesystem remotes.) A scheme-less value is a network
+# (scp-like) form ONLY when it matches the FULL grammar `<host>:<path>` with a
+# hostname-charset host ([A-Za-z0-9._-], no '/') — anything else, including
+# values that still contain '@', is a local path. The scp host:path colon is
+# turned into '/' ONLY for that scp-like form (so an ssh:// port like host:2222
+# is NOT conflated with a path /2222). Verified network forms:
 #   https://alice:secret@github.com/acme/x.git   ssh://git@github.com:2222/a/x.git
 #   git@github.com:acme/x.git                     https://github.com/acme/x
 # all -> github.com/acme/x   (ssh ...:2222 keeps the :2222, distinct from /2222)
-normalize_remote() {
-  local url has_scheme
-  url=$(strip_userinfo "$1")
-  case "$url" in
-    *://*) has_scheme=1; url=${url#*://} ;;   # ssh://host[:port]/path / https://host/path
-    *)     has_scheme=0 ;;                       # scp-like host:path OR a local filesystem path
+normalize_remote_for() {
+  local wd=$1 stripped hostpart u
+  stripped=$(strip_userinfo "$2")
+  case "$stripped" in
+    file://*) _normalize_fs_remote "$wd" "${stripped#file://}"; return 0 ;;
+    *://*)
+      u=${stripped#*://}
+      u=${u%.git}
+      printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }'
+      return 0 ;;
   esac
-  url=${url%.git}
-  if [ "$has_scheme" = "0" ]; then
-    url=$(printf '%s' "$url" | sed -E 's#([^/]*):#\1/#')   # scp host:path -> host/path
+  hostpart=${stripped%%:*}
+  if [ "$hostpart" != "$stripped" ] \
+     && printf '%s' "$hostpart" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+    u=$(printf '%s' "$stripped" | sed -E 's#([^/]*):#\1/#')   # scp host:path -> host/path
+    u=${u%.git}
+    printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }'
+    return 0
   fi
-  printf '%s' "$url" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }'
+  _normalize_fs_remote "$wd" "$stripped"
+}
+
+# _normalize_fs_remote <workdir> <path> — identity for a filesystem remote: the
+# PHYSICAL path resolved against the declaring clone, prefixed "file" so it can
+# never collide with a host identity. No .git strip (/srv/x and /srv/x.git are
+# genuinely different repos) and no lowercasing (paths are case-sensitive).
+_normalize_fs_remote() {
+  local wd=$1 p=$2
+  case "$p" in /*) ;; *) p="$wd/$p" ;; esac
+  printf 'file%s' "$(resolve_path "$p")"
 }
 
 # identity_has_dotseg <identity>: 0 (true) if it is empty or contains a '.'/'..'
@@ -123,7 +153,7 @@ repo_key_from() {
   local url norm
   url=$(git -C "$1" config --get remote.origin.url 2>/dev/null) || url=""
   [ -n "$url" ] || return 1
-  norm=$(normalize_remote "$url")
+  norm=$(normalize_remote_for "$1" "$url")
   identity_has_dotseg "$norm" && return 1
   printf '%s' "$norm" | jq -rR '@uri'
 }
@@ -191,6 +221,11 @@ valid_feature_slug() {
 # reimplemented here, never sourced.)
 bounded_run_ms() {
   local ms=$1; shift
+  # NEVER launch with a non-positive/invalid budget: ualarm(0) DISABLES the
+  # deadline, so a blocking leader would hang forever (finding: invalid budget
+  # still used after being reported). rc 125 = refused-to-run; every caller
+  # already treats a nonzero rc / empty output as failure.
+  is_pos_int "$ms" || return 125
   perl -e '
     use POSIX ":sys_wait_h";
     use Time::HiRes qw(ualarm);
@@ -275,7 +310,11 @@ validate_config() {
   # its own repo TOP-LEVEL (catches subdirs of one clone) and the four must share NO
   # git common-dir (catches subdirs AND worktrees of one clone). (finding: independent
   # clones.) The realpath check above is fooled by four subdirs of one clone.
-  local _tl _rpwd _cd_obs _cd_cc _cd_pi _cd_cx
+  # Initialize EVERY slot before the loop: an unusable workdir `continue`s past its
+  # assignment, and the later direct expansions would abort under Bash 4/5 `set -u`
+  # ("unbound variable") instead of reporting the accumulated §14 violations.
+  # (finding: uninitialized git-common-dir slots.)
+  local _tl="" _rpwd="" _cd_obs="" _cd_cc="" _cd_pi="" _cd_cx=""
   _common_dir_of() { git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null; }
   for wdvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
     wd="${!wdvar:-}"
@@ -311,14 +350,14 @@ validate_config() {
       url=$(git -C "$wd" config --get remote.origin.url 2>/dev/null) || url=""
       if [ -z "$url" ]; then cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar has no remote.origin.url"
       elif [ -z "$norm" ]; then
-        norm=$(normalize_remote "$url")
+        norm=$(normalize_remote_for "$wd" "$url")
         # reject identities with '.'/'..' segments — the repo key would escape the
         # state root (e.g. remote ".." -> repodir $root/..). (finding: dot-segment key)
         if identity_has_dotseg "$norm"; then
           cfg_violation CONFIG_INVALID "$wdvar" "$wdvar normalizes to an identity with a '.'/'..' segment ($norm) — refused as a repo-state key"
           norm=""
         fi
-      elif [ "$(normalize_remote "$url")" != "$norm" ]; then
+      elif [ "$(normalize_remote_for "$wd" "$url")" != "$norm" ]; then
         cfg_violation REMOTE_MISMATCH "$wdvar" "$wdvar remote ($(redact_remote "$url")) != observer ($norm)"
       fi
     fi
@@ -461,12 +500,16 @@ cmd_doctor() {
   fi
   # Runtime watchdog knobs (env): MUST be positive integers. ualarm(0) on a zero/
   # non-positive budget DISABLES the watchdog (finding: bounded knobs), so a wedged
-  # Herdr daemon would hang preflight. Reject them up front.
-  local _k _v
+  # Herdr daemon would hang preflight. Reject them up front AND skip every Herdr
+  # read for the rest of this run — reporting the violation and then calling Herdr
+  # with the same invalid budget would hang on a blocking leader (finding: invalid
+  # budget still used; bounded_run_ms also self-guards as the backstop).
+  local _k _v herdr_reads_ok=1
   for _k in AUTH_TIMEOUT_MS PANE_LIST_TIMEOUT_MS; do
     _v="${!_k:-}"
     if ! is_pos_int "$_v"; then
       d_code CONFIG_INVALID "doctor:config" "$_k=$_v" "$_k is not a positive integer (a zero/non-positive budget would disable the bounded-exec watchdog)" "unset $_k for the default, or set COORD_${_k} to a positive millisecond budget"
+      herdr_reads_ok=0
     fi
   done
 
@@ -580,6 +623,9 @@ cmd_doctor() {
 
     printf -- '--- role panes (herdr) --------------------------------------------\n'
     local panes_json=""
+    if [ "$herdr_reads_ok" != "1" ]; then
+      d_info "skipping ALL Herdr reads: invalid watchdog budget (see the CONFIG_INVALID above) — no unbounded call is ever made"
+    else
     panes_json=$(bounded_run_ms "$PANE_LIST_TIMEOUT_MS" herdr pane list 2>/dev/null) || panes_json=""
     if [ -z "$panes_json" ] || ! printf '%s' "$panes_json" | jq -e . >/dev/null 2>&1; then
       d_code DEPENDENCY_MISSING "doctor:panes" "herdr pane list" "'herdr pane list' returned no JSON" "is Herdr running? (herdr status; socket: ~/.config/herdr/herdr.sock)"
@@ -600,6 +646,7 @@ cmd_doctor() {
       _pane_distinct PI    CODEX "$pi_pane" "$cx_pane"
       unset -f _pane_distinct
     fi
+    fi   # herdr_reads_ok gate
   else
     d_info "skipping remote/pane/state sections: one or more workdirs unusable (fix the config section above)"
   fi
@@ -647,26 +694,40 @@ _state_symlink_bad() {
   return 1
 }
 # _state_assert_dir/_file <path> <root> <label> — BLOCK unless <path> is a real
-# (non-symlink, non-symlinked-parent) entry with mode 0700 (dir) / 0600 (file).
+# (non-symlink, non-symlinked-parent) entry of the right TYPE with mode 0700 (dir)
+# / 0600 (regular file). RETURNS nonzero on any violation so the caller can (and
+# MUST) skip every downstream read — a mode-0600 FIFO named ledger.json would hang
+# the jq/cat that follows. (finding: require regular files + stop reading after a
+# failed assertion.)
 _state_assert_dir() {
   local p=$1 root=$2 label=$3 sym perm
   if sym=$(_state_symlink_bad "$p" "$root"); then
     d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is reached via a symlink ($sym) — §19 forbids symlinked state paths" "remove the symlink; restore $label as a real directory"
-    return
+    return 1
+  fi
+  if [ ! -d "$p" ]; then
+    d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is not a directory" "restore $label as a real 0700 directory"
+    return 1
   fi
   perm=$(stat_perms "$p" 2>/dev/null)
-  if [ "$perm" = "700" ]; then d_ok "$label dir 0700 ($p)"
-  else d_code CONFIG_INVALID "doctor:state" "$p" "$label dir mode is ${perm:-?} (expected 0700) — §19" "chmod 700 $p"; fi
+  if [ "$perm" = "700" ]; then d_ok "$label dir 0700 ($p)"; return 0
+  else d_code CONFIG_INVALID "doctor:state" "$p" "$label dir mode is ${perm:-?} (expected 0700) — §19" "chmod 700 $p"; return 1; fi
 }
 _state_assert_file() {
   local p=$1 root=$2 label=$3 sym perm
   if sym=$(_state_symlink_bad "$p" "$root"); then
     d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is reached via a symlink ($sym) — §19 forbids symlinked state paths" "remove the symlink; restore $label as a real file"
-    return
+    return 1
+  fi
+  if [ ! -f "$p" ]; then
+    # -f = REGULAR file only: a FIFO/socket/device here would HANG any reader with
+    # no writer, so it is refused BEFORE anything opens it.
+    d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is not a regular file — refusing to read it (a FIFO/socket/device would hang doctor)" "replace $p with a regular 0600 file"
+    return 1
   fi
   perm=$(stat_perms "$p" 2>/dev/null)
-  if [ "$perm" = "600" ]; then d_ok "$label file 0600 ($p)"
-  else d_code CONFIG_INVALID "doctor:state" "$p" "$label file mode is ${perm:-?} (expected 0600) — §19" "chmod 600 $p"; fi
+  if [ "$perm" = "600" ]; then d_ok "$label file 0600 ($p)"; return 0
+  else d_code CONFIG_INVALID "doctor:state" "$p" "$label file mode is ${perm:-?} (expected 0600) — §19" "chmod 600 $p"; return 1; fi
 }
 # ledger_schema_problem <file> — echoes the first missing/invalid §13 record
 # field, or "" if the ledger is complete: feature / journal_seq (INTEGER) /
@@ -691,6 +752,19 @@ coord_doctor_state() {
   root=$(state_root)
   rkey=$(repo_key_from "$OBSERVER_WORKDIR" 2>/dev/null) || rkey=""
   repodir="$root/${rkey:-<unknown>}"
+  # Parent chain FIRST — before the absent-root early return. A symlinked parent
+  # redirects the whole state tree whether or not the root exists yet: the normal
+  # first write would land through the forbidden parent. Walking the chain is safe
+  # pre-creation (a non-existent component is never a symlink; -L is simply false).
+  # (finding: parent check must precede the absent early-return.)
+  local _p; _p=$(dirname "$root")
+  while [ "$_p" != "/" ] && [ -n "$_p" ]; do
+    if [ -L "$_p" ]; then
+      d_code CONFIG_INVALID "doctor:state" "$root" "parent of state root ($_p) is a symlink — §19 forbids symlinked state parents (blocking even before first write)" "remove the symlink $_p or point STATE_DIR outside a symlinked tree"
+      break
+    fi
+    _p=$(dirname "$_p")
+  done
   if [ ! -d "$root" ]; then
     # Distinguish "absent" (fine — created on first write) from a dangling
     # symlink or a non-directory entry at the state root (BLOCKING). (finding:
@@ -703,46 +777,40 @@ coord_doctor_state() {
     return
   fi
   d_ok "state root exists: $root"
-  _state_assert_dir "$root" "$root" "state root"          # 0700, root itself not a symlink
-  # Validate every EXISTING PARENT component up to / — a symlinked parent ABOVE the
-  # configured root would redirect the whole state tree elsewhere. _state_assert_dir
-  # only walks DOWN to the root boundary, so the parent chain is checked separately.
-  # (finding: symlinked state parents.)
-  local _p; _p=$(dirname "$root")
-  while [ "$_p" != "/" ] && [ -n "$_p" ]; do
-    if [ -L "$_p" ]; then
-      d_code CONFIG_INVALID "doctor:state" "$root" "parent of state root ($_p) is a symlink — §19 forbids symlinked state parents" "remove the symlink $_p or point STATE_DIR outside a symlinked tree"
-      break
-    fi
-    _p=$(dirname "$_p")
-  done
+  _state_assert_dir "$root" "$root" "state root" || true   # 0700, root itself not a symlink
   if [ -d "$repodir" ]; then
-    _state_assert_dir "$repodir" "$root" "repo state"
+    _state_assert_dir "$repodir" "$root" "repo state" || true
     # feature subdirs: 0700, real (no symlinks).
     local featd
     for featd in "$repodir"/*/; do
       [ -d "$featd" ] || continue
       featd=${featd%/}
-      _state_assert_dir "$featd" "$root" "feature state ($(basename "$featd"))"
+      _state_assert_dir "$featd" "$root" "feature state ($(basename "$featd"))" || true
     done
-    # halt.json (unresolved halt blocks watch; resume is the only bypass).
+    # halt.json (unresolved halt blocks watch; resume is the only bypass). The jq
+    # read runs ONLY when the file assertion passed — never read a rejected path.
     local haltf
     haltf=$(find "$repodir" -name halt.json 2>/dev/null | head -1)
     if [ -n "$haltf" ]; then
-      _state_assert_file "$haltf" "$root" "halt.json"
-      local code; code=$(jq -r '.code // "HALTED"' "$haltf" 2>/dev/null || echo HALTED)
-      d_warn "unresolved halt.json present ($code): $haltf" "inspect it, then \`coordinate.sh resume --config $CONF --reason <text>\` (not implemented this phase)"
+      if _state_assert_file "$haltf" "$root" "halt.json"; then
+        local code; code=$(jq -r '.code // "HALTED"' "$haltf" 2>/dev/null || echo HALTED)
+        d_warn "unresolved halt.json present ($code): $haltf" "inspect it, then \`coordinate.sh resume --config $CONF --reason <text>\` (not implemented this phase)"
+      else
+        d_warn "unresolved halt.json present (REJECTED above — not read): $haltf" "fix the file-level MISS above, then re-run doctor"
+      fi
     fi
     # lock dir (held = a watch is running; stale = dead PID, resume clears it).
     local lockd
     lockd=$(find "$repodir" -type d -name lock 2>/dev/null | head -1)
     if [ -n "$lockd" ]; then
-      _state_assert_dir "$lockd" "$root" "watch lock"
+      _state_assert_dir "$lockd" "$root" "watch lock" || true
       local pidf="" pid="" st="held"
       pidf=$(find "$lockd" -type f 2>/dev/null | head -1)
       if [ -n "$pidf" ]; then
-        _state_assert_file "$pidf" "$root" "lock pidfile"
-        pid=$(cat "$pidf" 2>/dev/null || echo "")
+        # cat runs ONLY when the assertion passed (a FIFO pidfile would hang it).
+        if _state_assert_file "$pidf" "$root" "lock pidfile"; then
+          pid=$(cat "$pidf" 2>/dev/null || echo "")
+        fi
       fi
       if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then st="stale"; fi
       d_warn "watch lock present ($st): $lockd" $([ "$st" = stale ] && echo "resume clears a stale lock after preflight" || echo "a watch is running — that is expected")
@@ -754,7 +822,9 @@ coord_doctor_state() {
     local led ffeat jerr prob lfeat
     for led in $(find "$repodir" -name ledger.json 2>/dev/null); do
       ffeat=$(basename "$(dirname "$led")")
-      _state_assert_file "$led" "$root" "ledger.json ($ffeat)"
+      # a rejected ledger (symlink / non-regular / bad mode) is NEVER read — the
+      # assertion already emitted its MISS; jq on a FIFO would hang forever.
+      _state_assert_file "$led" "$root" "ledger.json ($ffeat)" || continue
       if ! jerr=$(jq -e . "$led" 2>&1 >/dev/null); then
         d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) not JSON: ${jerr:-unreadable}" "inspect $led; remove only after confirming no dispatch is in flight"
         continue
