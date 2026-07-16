@@ -29,8 +29,10 @@ Git, full commit hashes, restrictive modes and no symlinks for any files actuall
 **Historical WITHIN otherwise-normative sections:** §2 decisions 2 (deterministic Bash) and 6
 (mandatory `drive.sh` delegation); §3's deterministic-restart-recovery and operational-traceability
 goals (given up in the §25 tradeoff); §4's `coordinate.sh` row and the Pi row's
-"through the existing driver contract" qualifier; §14's audit-event/halt.json/halt-hook/watcher-
-resource mechanics (they reference the historical §13/§16 machinery); §19's local-state writer,
+"through the existing driver contract" qualifier; §7's two `drive.sh` action phrases (the impl routes
+dispatch `pipeline-impl` directly; `drive.sh` is optional and operator-started only); §14's
+audit-event/halt.json/halt-hook/watcher-resource mechanics (they reference the historical §13/§16
+machinery); §17's `waiting_human_merge`/ledger-`waiting` bookkeeping steps; §19's local-state writer,
 lock, stale-lock `resume`, and audit-record mechanics.
 
 Approved: 2026-07-16
@@ -200,9 +202,9 @@ The business routes approved for coordinated mode are:
 |---|---|---|---|
 | `prd -> arch` | `Run pipeline-arch` | completed PRD entry; `to=prd` | CC: architecture |
 | `arch -> task` | `Run pipeline-task` | completed architecture entry; `to=arch` | CC: task decomposition/freeze |
-| `task -> impl` | `Run pipeline-impl` | completed task entry; `to=task`, or a valid impl retry/continuation below | Pi: start `drive.sh` impl span |
+| `task -> impl` | `Run pipeline-impl` | completed task entry; `to=task`, or a valid impl retry/continuation below | Pi: dispatch `pipeline-impl` *(the original "start `drive.sh` impl span" is HISTORICAL — §25; `drive.sh` is optional and operator-started only)* |
 | `impl -> impl` | `Run pipeline-impl` | `impl -> impl · completed|failed`; actionable todo card | Pi: continue or informed-retry |
-| `review -> impl` | `Run pipeline-impl` | `review -> impl · failed`; exactly one named actionable card | Pi: restart `drive.sh` |
+| `review -> impl` | `Run pipeline-impl` | `review -> impl · failed`; exactly one named actionable card | Pi: dispatch `pipeline-impl` *(the original "restart `drive.sh`" is HISTORICAL — §25)* |
 | `impl -> review` | `Run pipeline-review` | `impl -> review · completed`; every card is review | Codex: semantic review |
 | `impl -> hunt` | `Run pipeline-hunt` | `impl -> hunt · blocked`; named blocked card | CC: root-cause diagnosis |
 | `review -> hunt` | `Run pipeline-hunt` | `review -> hunt · blocked`; named blocked card or integration report | CC: root-cause diagnosis |
@@ -532,12 +534,12 @@ Rules:
 - `halt.json` is a current diagnostic snapshot, not the audit history. It carries the same diagnosis
   as the fatal audit event.
 
-## 17. Human merge gate
+## 17. Human merge gate — gate NORMATIVE; watcher bookkeeping HISTORICAL (§25)
 
 When the exact approved-review marker is observed, the coordinator:
 
-1. Records `waiting_human_merge`.
-2. Marks ledger state `waiting`.
+1. Records `waiting_human_merge`. — **HISTORICAL (§25): §16 audit machinery**
+2. Marks ledger state `waiting`. — **HISTORICAL (§25): §13 ledger machinery**
 3. Performs no Herdr send and has no merge-confirm command path.
 4. Continues read-only Git observation.
 
@@ -734,4 +736,5 @@ contract (§10), the human merge gate (§17), and the three-roles/three-models s
 operator as final gate. `doctor`/`status` (#13) are the playbook's session preflight. `drive.sh` is
 unchanged and remains the standalone impl-loop tool. A future deterministic dispatcher may revisit
 the historical subset enumerated in the status header (§8, §12's watch/resume, §13, §16, §18, and
-the historical fragments of §§2–4, 14, and 19) with this section as its first requirements input.
+the historical fragments of §§2–4, 7, 14, 17, and 19) with this section as its first requirements
+input.
