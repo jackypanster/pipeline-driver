@@ -200,6 +200,33 @@ fresh; seed_clones "$T"; mkdir -p "$T/elsewhere"; chmod 700 "$T/elsewhere"; ln -
 write_cfg "$T" "$T/link-parent/state"   # state NOT created
 assert_code "symlinked parent + absent state root -> CONFIG_INVALID" CONFIG_INVALID "$T"
 
+# ===== 16. (round-4 F5) NOTHING behind a rejected state root is ever read: with
+#      STATE_DIR a symlink to an external 0700 tree holding a valid-looking ledger,
+#      the old head emitted the root-symlink CONFIG_INVALID and then kept walking,
+#      printing 'ledger.json … file 0600' and 'ledger.json valid' from behind the
+#      rejected root. =====
+fresh; seed_clones "$T"
+write_cfg "$T" "$T/extlink"
+rk=$(state_dir_of "$T")            # key BEFORE the symlink exists (root absent = fine)
+mkdir -p "$T/ext/$rk/hello-cli"; chmod 700 "$T/ext" "$T/ext/$rk" "$T/ext/$rk/hello-cli"
+printf '{"feature":"hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","pane":"wB:p1","command":"pipeline-impl","delivery":"sent"}' > "$T/ext/$rk/hello-cli/ledger.json"
+chmod 600 "$T/ext/$rk/hello-cli/ledger.json"
+ln -s "$T/ext" "$T/extlink"
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]' \
+   && ! printf '%s' "$out" | grep -q 'ledger.json valid' \
+   && ! printf '%s' "$out" | grep -Eq 'ledger\.json.*file 0600'; then
+  ok "rejected state root -> traversal STOPS (nothing behind it read or reported ok)"
+else
+  bad "traversal after rejected root" "rc=$rc; $(printf '%s' "$out" | grep -iE 'ledger|state root' | head -5)"
+fi
+
+# ===== 17. (round-4 F6) STATE_DIR beneath a REGULAR FILE can never be created —
+#      'not created yet' would be a lie. The old head's parent walk checked only -L. =====
+fresh; seed_clones "$T"; printf 'x' > "$T/regfile"
+write_cfg "$T" "$T/regfile/state"
+assert_code "state root under a regular file -> CONFIG_INVALID" CONFIG_INVALID "$T"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

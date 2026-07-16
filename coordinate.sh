@@ -86,56 +86,76 @@ strip_userinfo() {
   '
 }
 
-# redact_remote <url>: safe-to-print form — keeps the scheme, drops userinfo.
-# Used on EVERY diagnostic/output path so https://alice:ghp_SECRET@host/... can
-# never reach stderr/stdout or a derived key (§14 sanitized-input / §19).
-redact_remote() { strip_userinfo "$1"; }
-
-# normalize_remote_for <workdir> <url>: map https / ssh / scp-like forms of the
-# SAME remote to ONE canonical identity, and canonicalize FILESYSTEM remotes
-# (file://, absolute, or relative paths) against the clone that declares them:
-# `remote.origin.url=origin.git` in four different clones names four DIFFERENT
-# local repositories, so the identity must be the RESOLVED physical path — a bare
-# string comparison would let distinct repos agree and share one state key.
-# (finding: relative filesystem remotes.) A scheme-less value is a network
-# (scp-like) form ONLY when it matches the FULL grammar `<host>:<path>` with a
-# hostname-charset host ([A-Za-z0-9._-], no '/') — anything else, including
-# values that still contain '@', is a local path. The scp host:path colon is
-# turned into '/' ONLY for that scp-like form (so an ssh:// port like host:2222
-# is NOT conflated with a path /2222). Verified network forms:
-#   https://alice:secret@github.com/acme/x.git   ssh://git@github.com:2222/a/x.git
-#   git@github.com:acme/x.git                     https://github.com/acme/x
-# all -> github.com/acme/x   (ssh ...:2222 keeps the :2222, distinct from /2222)
-normalize_remote_for() {
-  local wd=$1 stripped hostpart u
-  stripped=$(strip_userinfo "$2")
-  case "$stripped" in
-    file://*) _normalize_fs_remote "$wd" "${stripped#file://}"; return 0 ;;
-    *://*)
-      u=${stripped#*://}
-      u=${u%.git}
-      printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }'
-      return 0 ;;
+# _remote_kind <url> — classify the RAW value BEFORE any stripping (finding:
+# classification must precede sanitization — stripping user@ first turned the
+# literal local path 'x@../shared' into '../shared'). Echoes net-scheme / net-scp
+# / fs. A scheme-less value is scp-like ONLY on the FULL grammar
+#   [user@]host:path   (user: no '/' or '@'; host: [A-Za-z0-9][A-Za-z0-9._-]*)
+# — anything else (including values containing '@' or '?' or '#', all legal
+# filename bytes) is a filesystem path. file:// names a local path.
+_remote_kind() {
+  case "$1" in
+    file://*) printf 'fs'; return 0 ;;
+    *://*)    printf 'net-scheme'; return 0 ;;
   esac
-  hostpart=${stripped%%:*}
-  if [ "$hostpart" != "$stripped" ] \
-     && printf '%s' "$hostpart" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
-    u=$(printf '%s' "$stripped" | sed -E 's#([^/]*):#\1/#')   # scp host:path -> host/path
-    u=${u%.git}
-    printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }'
-    return 0
+  if printf '%s' "$1" | LC_ALL=C grep -Eq '^([^/@]+@)?[A-Za-z0-9][A-Za-z0-9._-]*:'; then
+    printf 'net-scp'
+  else
+    printf 'fs'
   fi
-  _normalize_fs_remote "$wd" "$stripped"
 }
 
-# _normalize_fs_remote <workdir> <path> — identity for a filesystem remote: the
-# PHYSICAL path resolved against the declaring clone, prefixed "file" so it can
-# never collide with a host identity. No .git strip (/srv/x and /srv/x.git are
-# genuinely different repos) and no lowercasing (paths are case-sensitive).
-_normalize_fs_remote() {
-  local wd=$1 p=$2
-  case "$p" in /*) ;; *) p="$wd/$p" ;; esac
-  printf 'file%s' "$(resolve_path "$p")"
+# redact_remote <url>: safe-to-print form. NETWORK forms are stripped of userinfo
+# and query/fragment so https://alice:ghp_SECRET@host/... can never reach
+# stderr/stdout or a derived key (§14 sanitized-input / §19). FILESYSTEM paths are
+# printed as-is: they are local paths, not credential carriers, and '@'/'?'/'#'
+# are legal filename bytes there (finding: no ?#/userinfo stripping on paths).
+redact_remote() {
+  case "$(_remote_kind "$1")" in
+    fs) printf '%s' "$1" ;;
+    *)  strip_userinfo "$1" ;;
+  esac
+}
+
+# normalize_remote_for <workdir> <url>: ONE canonical identity per REAL remote, in
+# DISJOINT TYPED NAMESPACES (finding: a bare 'file' prefix collided with a literal
+# hostname 'file' — https://file/…/shared.git aliased a local /…/shared):
+#   network:    net:<len>:<host[:port]/path>   userinfo + query/fragment + .git
+#               stripped, host lowercased. https/ssh/scp forms of one remote agree;
+#               an ssh:// port host:2222 stays distinct from a /2222 path segment.
+#   filesystem: fs:<len>:<physical path>       the value is preserved EXACTLY (no
+#               userinfo/query/fragment/.git stripping — '@', '?', '#' are legal
+#               filename bytes; /srv/x and /srv/x.git are different repos) and
+#               resolved against the DECLARING clone: `origin.git` in four clones
+#               names four different repositories.
+# <len> is the value's character length: a typed, length-prefixed encoding that no
+# crafted URL can forge across kinds — the kind tag is chosen by classification,
+# never taken from input. Classification runs on the RAW value BEFORE any
+# stripping (finding: 'x@../shared' is a literal local path, not userinfo).
+normalize_remote_for() {
+  local wd=$1 raw=$2 kind u v
+  kind=$(_remote_kind "$raw")
+  case "$kind" in
+    fs)
+      v=$raw
+      case "$v" in file://*) v=${v#file://} ;; esac
+      case "$v" in /*) ;; *) v="$wd/$v" ;; esac
+      v=$(resolve_path "$v")
+      printf 'fs:%d:%s' "${#v}" "$v"
+      ;;
+    net-scheme)
+      u=$(strip_userinfo "$raw"); u=${u#*://}; u=${u%.git}
+      v=$(printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }')
+      printf 'net:%d:%s' "${#v}" "$v"
+      ;;
+    net-scp)
+      u=$(strip_userinfo "$raw")
+      u=$(printf '%s' "$u" | sed -E 's#([^/]*):#\1/#')   # scp host:path -> host/path
+      u=${u%.git}
+      v=$(printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }')
+      printf 'net:%d:%s' "${#v}" "$v"
+      ;;
+  esac
 }
 
 # identity_has_dotseg <identity>: 0 (true) if it is empty or contains a '.'/'..'
@@ -173,7 +193,13 @@ resolve_path() {
   case "$p" in "") printf '%s' ""; return 0 ;; /*) ;; *) p="$PWD/$p" ;; esac
   base=$p
   while [ "$base" != "/" ] && [ ! -e "$base" ]; do base=$(dirname "$base"); done
-  [ "$base" = "/" ] && { printf '/'; return 0; }
+  if [ "$base" = "/" ]; then
+    # Nothing below / exists and / itself is never a symlink: the path IS its own
+    # physical form — return it WHOLE. Truncating to '/' collapsed every distinct
+    # nonexistent top-level path into one identity/key (finding: preserve the
+    # unresolved suffix when / is the longest existing ancestor).
+    printf '%s' "$p"; return 0
+  fi
   dir=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$base" 2>/dev/null) || dir=""
   [ -n "$dir" ] || dir=$base
   if [ "$base" = "$p" ]; then printf '%s' "$dir"
@@ -763,6 +789,12 @@ coord_doctor_state() {
       d_code CONFIG_INVALID "doctor:state" "$root" "parent of state root ($_p) is a symlink — §19 forbids symlinked state parents (blocking even before first write)" "remove the symlink $_p or point STATE_DIR outside a symlinked tree"
       break
     fi
+    # An EXISTING non-directory ancestor means the root can NEVER be created here —
+    # "not created yet" would be a lie. (finding: non-directory ancestors.)
+    if [ -e "$_p" ] && [ ! -d "$_p" ]; then
+      d_code CONFIG_INVALID "doctor:state" "$root" "ancestor of state root ($_p) exists but is not a directory — the state root can never be created beneath it" "point STATE_DIR at a creatable directory path"
+      break
+    fi
     _p=$(dirname "$_p")
   done
   if [ ! -d "$root" ]; then
@@ -777,33 +809,44 @@ coord_doctor_state() {
     return
   fi
   d_ok "state root exists: $root"
-  _state_assert_dir "$root" "$root" "state root" || true   # 0700, root itself not a symlink
+  # A REJECTED root poisons everything beneath it: stop — never read past a failed
+  # directory assertion (finding: stop traversal after a directory trust failure).
+  _state_assert_dir "$root" "$root" "state root" || return 0
   if [ -d "$repodir" ]; then
-    _state_assert_dir "$repodir" "$root" "repo state" || true
-    # feature subdirs: 0700, real (no symlinks).
+    _state_assert_dir "$repodir" "$root" "repo state" || return 0
+    # Per-feature (§13 layout: halt.json / lock / ledger.json live in the feature
+    # dir). A rejected feature dir's CONTENTS are never inspected.
     local featd
     for featd in "$repodir"/*/; do
       [ -d "$featd" ] || continue
       featd=${featd%/}
-      _state_assert_dir "$featd" "$root" "feature state ($(basename "$featd"))" || true
+      _state_assert_dir "$featd" "$root" "feature state ($(basename "$featd"))" || continue
+      _doctor_feature_state "$featd" "$root"
     done
-    # halt.json (unresolved halt blocks watch; resume is the only bypass). The jq
-    # read runs ONLY when the file assertion passed — never read a rejected path.
-    local haltf
-    haltf=$(find "$repodir" -name halt.json 2>/dev/null | head -1)
-    if [ -n "$haltf" ]; then
-      if _state_assert_file "$haltf" "$root" "halt.json"; then
-        local code; code=$(jq -r '.code // "HALTED"' "$haltf" 2>/dev/null || echo HALTED)
-        d_warn "unresolved halt.json present ($code): $haltf" "inspect it, then \`coordinate.sh resume --config $CONF --reason <text>\` (not implemented this phase)"
-      else
-        d_warn "unresolved halt.json present (REJECTED above — not read): $haltf" "fix the file-level MISS above, then re-run doctor"
-      fi
+  else
+    d_info "no state for repo key ${rkey:-<unknown>} (idle)"
+  fi
+}
+
+# _doctor_feature_state <featdir> <root> — halt/lock/ledger checks for ONE feature
+# whose directory assertion already PASSED. Every file read is gated on its own
+# assertion; a rejected entry is reported and never opened.
+_doctor_feature_state() {
+  local featd=$1 root=$2 ffeat; ffeat=$(basename "$featd")
+  # halt.json (unresolved halt blocks watch; resume is the only bypass).
+  local haltf="$featd/halt.json"
+  if [ -e "$haltf" ] || [ -L "$haltf" ]; then
+    if _state_assert_file "$haltf" "$root" "halt.json ($ffeat)"; then
+      local code; code=$(jq -r '.code // "HALTED"' "$haltf" 2>/dev/null || echo HALTED)
+      d_warn "unresolved halt.json present ($code): $haltf" "inspect it, then \`coordinate.sh resume --config $CONF --reason <text>\` (not implemented this phase)"
+    else
+      d_warn "unresolved halt.json present (REJECTED above — not read): $haltf" "fix the file-level MISS above, then re-run doctor"
     fi
-    # lock dir (held = a watch is running; stale = dead PID, resume clears it).
-    local lockd
-    lockd=$(find "$repodir" -type d -name lock 2>/dev/null | head -1)
-    if [ -n "$lockd" ]; then
-      _state_assert_dir "$lockd" "$root" "watch lock" || true
+  fi
+  # lock dir (held = a watch is running; stale = dead PID, resume clears it).
+  local lockd="$featd/lock"
+  if [ -e "$lockd" ] || [ -L "$lockd" ]; then
+    if _state_assert_dir "$lockd" "$root" "watch lock ($ffeat)"; then
       local pidf="" pid="" st="held"
       pidf=$(find "$lockd" -type f 2>/dev/null | head -1)
       if [ -n "$pidf" ]; then
@@ -813,36 +856,32 @@ coord_doctor_state() {
         fi
       fi
       if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then st="stale"; fi
-      d_warn "watch lock present ($st): $lockd" $([ "$st" = stale ] && echo "resume clears a stale lock after preflight" || echo "a watch is running — that is expected")
+      d_warn "watch lock present ($st): $lockd" "$([ "$st" = stale ] && echo "resume clears a stale lock after preflight" || echo "a watch is running — that is expected")"
     fi
-    # ledger.json integrity (§13 schema, not just valid JSON): feature / journal_seq
-    # / full 40-hex commit / target_role ∈ CC|PI|CODEX / pane / command name /
-    # delivery ∈ pending|sent|waiting, AND the ledger .feature must match its
-    # directory name. (finding: full §13 ledger schema.)
-    local led ffeat jerr prob lfeat
-    for led in $(find "$repodir" -name ledger.json 2>/dev/null); do
-      ffeat=$(basename "$(dirname "$led")")
-      # a rejected ledger (symlink / non-regular / bad mode) is NEVER read — the
-      # assertion already emitted its MISS; jq on a FIFO would hang forever.
-      _state_assert_file "$led" "$root" "ledger.json ($ffeat)" || continue
-      if ! jerr=$(jq -e . "$led" 2>&1 >/dev/null); then
-        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) not JSON: ${jerr:-unreadable}" "inspect $led; remove only after confirming no dispatch is in flight"
-        continue
-      fi
-      prob=$(ledger_schema_problem "$led")
-      if [ -n "$prob" ]; then
-        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) schema incomplete: $prob" "inspect $led; restore the full §13 schema (feature/seq/commit/role/pane/command/delivery)"
-        continue
-      fi
-      lfeat=$(jq -r '.feature // ""' "$led" 2>/dev/null)
-      if [ "$lfeat" != "$ffeat" ]; then
-        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json feature ($lfeat) != its directory name ($ffeat)" "move the ledger under <repo-key>/$lfeat/ or fix .feature"
-      else
-        d_ok "ledger.json valid ($ffeat: full §13 schema)"
-      fi
-    done
-  else
-    d_info "no state for repo key ${rkey:-<unknown>} (idle)"
+  fi
+  # ledger.json integrity (§13 schema, not just valid JSON): feature / journal_seq
+  # / full 40-hex commit / target_role ∈ CC|PI|CODEX / pane / command name /
+  # delivery ∈ pending|sent|waiting, AND the ledger .feature must match its
+  # directory name. (finding: full §13 ledger schema.) A rejected ledger (symlink /
+  # non-regular / bad mode) is NEVER read — jq on a FIFO would hang forever.
+  local led="$featd/ledger.json" jerr prob lfeat
+  if [ -e "$led" ] || [ -L "$led" ]; then
+    _state_assert_file "$led" "$root" "ledger.json ($ffeat)" || return 0
+    if ! jerr=$(jq -e . "$led" 2>&1 >/dev/null); then
+      d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) not JSON: ${jerr:-unreadable}" "inspect $led; remove only after confirming no dispatch is in flight"
+      return 0
+    fi
+    prob=$(ledger_schema_problem "$led")
+    if [ -n "$prob" ]; then
+      d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) schema incomplete: $prob" "inspect $led; restore the full §13 schema (feature/seq/commit/role/pane/command/delivery)"
+      return 0
+    fi
+    lfeat=$(jq -r '.feature // ""' "$led" 2>/dev/null)
+    if [ "$lfeat" != "$ffeat" ]; then
+      d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json feature ($lfeat) != its directory name ($ffeat)" "move the ledger under <repo-key>/$lfeat/ or fix .feature"
+    else
+      d_ok "ledger.json valid ($ffeat: full §13 schema)"
+    fi
   fi
 }
 

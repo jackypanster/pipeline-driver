@@ -51,9 +51,16 @@ set_all_origins() { local c; for c in obs cc pi codex; do git -C "$1/$c" remote 
 # identity strings under test are preserved verbatim while every fetch fails fast
 # as GIT_FETCH_FAILED, which the assertions below do not depend on.
 run_doctor() {
+  # Proxy state is FULLY isolated (finding: inherited HTTPS_PROXY/https_proxy take
+  # precedence over ALL_PROXY, and NO_PROXY can bypass it): both cases of every
+  # scheme proxy are forced to the refused local port and no-proxy lists cleared,
+  # so no inherited environment can route a fetch to a real network.
   env PATH=/usr/bin:/bin \
       GIT_SSH_COMMAND=/usr/bin/false GIT_ASKPASS=/usr/bin/false GIT_TERMINAL_PROMPT=0 \
       ALL_PROXY=http://127.0.0.1:1 all_proxy=http://127.0.0.1:1 \
+      HTTP_PROXY=http://127.0.0.1:1 http_proxy=http://127.0.0.1:1 \
+      HTTPS_PROXY=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 \
+      NO_PROXY= no_proxy= \
       bash "$COORD" doctor --config "$1/cfg" 2>&1
 }
 
@@ -123,8 +130,8 @@ fresh; seed "$T"
 set_all_origins "$T" "$T/origin.git"
 out=$(run_doctor "$T")
 if ! printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
-   && printf '%s' "$out" | grep -q 'normalized repo key: file%2F'; then
-  ok "same absolute filesystem remote x4 -> agreement + resolved-path key"
+   && printf '%s' "$out" | grep -q 'normalized repo key: fs%3A'; then
+  ok "same absolute filesystem remote x4 -> agreement + typed resolved-path key (fs:…)"
 else
   bad "absolute filesystem remote agreement" "$(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -4)"
 fi
@@ -140,6 +147,58 @@ if printf '%s' "$out" | grep -q 'github.com' \
   ok "query-string token stripped (no ghp_QUERYSECRET, no token= in any output)"
 else
   bad "query/fragment credential" "leaked: $(printf '%s' "$out" | grep -iE 'ghp_querysecret|token=' | head -3)"
+fi
+
+# ===== round-4 F1: 'x@../shared' is a LITERAL LOCAL PATH — no colon, and a host
+#      can't start with '.' — so classification must precede userinfo stripping.
+#      The old head stripped 'x@' first, turned four different per-clone targets
+#      into ONE ../shared, and accepted a shared key. =====
+fresh; seed "$T"
+set_all_origins "$T" "x@../shared"
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
+  ok "x@../shared classified as per-clone local path -> REMOTE_MISMATCH"
+else
+  bad "userinfo-lookalike local path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+fi
+
+# ===== round-4 F2: filesystem vs network identities are DISJOINT namespaces. On
+#      the old head a local /…/shared and https://file/…/shared.git both produced
+#      the string file/…/shared and were accepted as one remote. =====
+fresh; seed "$T"; mkdir -p "$T/shared"
+git -C "$T/obs" remote set-url origin "$T/shared"
+for c in cc pi codex; do git -C "$T/$c" remote set-url origin "https://file$T/shared.git"; done
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
+  ok "local path vs https://file…/… -> REMOTE_MISMATCH (typed namespaces disjoint)"
+else
+  bad "cross-kind namespace collision" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+fi
+
+# ===== round-4 F3: '#' (and '?') are legal FILENAME bytes in local paths — the old
+#      head stripped '#secret' pre-classification and accepted /…/one#secret and
+#      /…/one as the same repository. =====
+fresh; seed "$T"
+git -C "$T/obs" remote set-url origin "$T/one#secret"
+for c in cc pi codex; do git -C "$T/$c" remote set-url origin "$T/one"; done
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
+  ok "local one#secret vs one -> REMOTE_MISMATCH (no ?#-strip on filesystem paths)"
+else
+  bad "filesystem #-byte path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+fi
+
+# ===== round-4 F4: two DISTINCT nonexistent top-level paths must not collapse into
+#      one identity. The old head's resolve_path returned '/' when nothing below /
+#      existed, keying both as file%2F. =====
+fresh; seed "$T"
+git -C "$T/obs" remote set-url origin "/codex-pr13-a-$$/repo.git"
+for c in cc pi codex; do git -C "$T/$c" remote set-url origin "/codex-pr13-b-$$/repo.git"; done
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
+  ok "distinct nonexistent top-level paths -> REMOTE_MISMATCH (suffix preserved past /)"
+else
+  bad "nonexistent top-level resolution" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
 fi
 
 echo "----"
