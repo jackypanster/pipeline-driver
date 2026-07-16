@@ -1191,6 +1191,61 @@ coord_fatal() {
   exit 1
 }
 
+# ---- route table (design §7) ---------------------------------------------------
+# route_classify <from> <to> <status> <next_kind> — validates the parsed tail
+#   against the §7 allowlist. Both the header transition AND the NEXT_KIND must
+#   match (design: "do not equate the header arrow mechanically with the next
+#   command"). Sets DECISION_KIND (dispatch|merge-wait|complete), DECISION_ROLE
+#   (CC|PI|CODEX), DECISION_CMD (prefix to type; empty for impl-delegate),
+#   DECISION_CMDNAME (audit name), DECISION_DELEGATE (herdr|drive.sh). Returns 1
+#   and sets ROUTE_ERRCODE/ROUTE_ERRMSG on a protocol fatal (TRANSITION_ILLEGAL /
+#   NEXT_INVALID). Card-counter (§15) validation runs separately in the watch loop
+#   for the retry/rejection/blocked routes; this function owns only the transition
+#   allowlist. NB: FROM is best-effort (genesis ∅→prd leaves FROM empty).
+route_classify() {
+  local from=$1 to=$2 status=$3 nk=$4
+  DECISION_KIND=""; DECISION_ROLE=""; DECISION_CMD=""; DECISION_CMDNAME=""; DECISION_DELEGATE=""
+  ROUTE_ERRCODE=""; ROUTE_ERRMSG=""
+  # terminal: review->done completed (any NEXT_KIND — parse-tail marks it "other").
+  if [ "$to" = done ] && [ "$status" = completed ]; then
+    DECISION_KIND=complete; return 0
+  fi
+  # WAITING_HUMAN_MERGE: the EXACT marker is only valid on review->review completed.
+  if [ "$nk" = merge-wait ]; then
+    if [ "$to" = review ] && [ "$status" = completed ]; then DECISION_KIND=merge-wait; return 0; fi
+    ROUTE_ERRCODE=NEXT_INVALID; ROUTE_ERRMSG="merge-wait marker with to=$to status=$status — only review->review completed is a valid merge gate"; return 1
+  fi
+  case "$nk" in
+    run-arch)
+      [ "$status" = completed ] && [ "$to" = prd ] || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-arch requires a completed PRD entry (to=prd); got to=$to status=$status"; return 1; }
+      DECISION_KIND=dispatch; DECISION_ROLE=CC; DECISION_CMD=${CC_ARCH_CMD:-}; DECISION_CMDNAME=pipeline-arch; DECISION_DELEGATE=herdr ;;
+    run-task)
+      { [ "$status" = completed ] && { [ "$to" = arch ] || [ "$to" = hunt ]; }; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-task requires completed arch (to=arch) or hunt (to=hunt); got to=$to status=$status"; return 1; }
+      DECISION_KIND=dispatch; DECISION_ROLE=CC; DECISION_CMD=${CC_TASK_CMD:-}; DECISION_CMDNAME=pipeline-task; DECISION_DELEGATE=herdr ;;
+    run-impl)
+      # task->impl (start), impl->impl (continue/informed-retry), review->impl
+      # (changes-requested), hunt->impl (reset). All delegate to drive.sh.
+      case "$to" in
+        task) [ "$status" = completed ] || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="task->impl requires completed task; got status=$status"; return 1; } ;;
+        impl) { [ "$status" = completed ] || [ "$status" = failed ]; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="impl->impl requires completed|failed; got status=$status"; return 1; } ;;
+        *) ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-impl with unexpected to=$to (expected task|impl)"; return 1 ;;
+      esac
+      DECISION_KIND=dispatch; DECISION_ROLE=PI; DECISION_CMD=""; DECISION_CMDNAME=pipeline-impl; DECISION_DELEGATE=drive.sh ;;
+    run-review)
+      { [ "$status" = completed ] && [ "$to" = review ]; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-review requires impl->review completed (to=review); got to=$to status=$status"; return 1; }
+      DECISION_KIND=dispatch; DECISION_ROLE=CODEX; DECISION_CMD=${CODEX_REVIEW_CMD:-}; DECISION_CMDNAME=pipeline-review; DECISION_DELEGATE=herdr ;;
+    run-hunt)
+      { [ "$status" = blocked ] && { [ "$to" = hunt ] || [ "$from" = impl ] || [ "$from" = review ]; }; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-hunt requires a blocked impl/review->hunt; got from=$from to=$to status=$status"; return 1; }
+      DECISION_KIND=dispatch; DECISION_ROLE=CC; DECISION_CMD=${CC_HUNT_CMD:-}; DECISION_CMDNAME=pipeline-hunt; DECISION_DELEGATE=herdr ;;
+    run-*) ROUTE_ERRCODE=NEXT_INVALID; ROUTE_ERRMSG="unknown Run pipeline-<stage>: $nk"; return 1 ;;
+    "")
+      ROUTE_ERRCODE=NEXT_INVALID; ROUTE_ERRMSG="no usable NEXT_KIND from the tail handoff (to=$to status=$status)"; return 1 ;;
+    *)
+      ROUTE_ERRCODE=NEXT_INVALID; ROUTE_ERRMSG="unroutable NEXT_KIND=$nk (to=$to status=$status) — the coordinator never infers a route from prose"; return 1 ;;
+  esac
+  return 0
+}
+
 # ---- arg dispatch --------------------------------------------------------------
 usage() {
   cat >&2 <<EOF
