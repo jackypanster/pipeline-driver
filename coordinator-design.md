@@ -14,10 +14,24 @@ in Section 12, Section 13 (local delivery ledger), Section 16 (operational audit
 sequence in Section 21, the acceptance scenarios in Section 22, and the deterministic-mode rollout
 bullet in Section 23.
 
-**Normative for ANY coordinator, including the playbook:** Sections 1–7 and 9–11, the
-`doctor`/`status` contract in Section 12, the fail-closed requirements of Section 14, the
-business-route evidence rules of Section 15, the human-direct merge gate of Section 17, Section 19,
-and the `pipeline`-first half of Section 20 (merged as pipeline PR #44).
+**Normative for ANY coordinator, including the playbook:** the INVARIANTS of Sections 1–4 — journal
+authority (decision 1), one coordinator/one repo/one feature (decision 3), the pane/clone topology
+(decision 4), transport-is-not-state (decision 5), operator-started PRD and the direct-human merge
+confirm (decisions 7–8), attempts semantics and the business/fatal split (decisions 9–10), and §4's
+Git/journal, Herdr-adapter, CC/Pi/Codex-pane, and Operator role boundaries; Sections 5–7 and 9–11;
+the `doctor`/`status` contract in Section 12; §14's universal fail-closed principles (stop and send
+nothing more on the first system/protocol error; emit an actionable, sanitized where/input/reason/
+next_action diagnosis); §15's business-route evidence rules; §17's human-direct merge gate; §19's
+universal security invariants (no `eval` of configured data, argv-safe construction, read-only target
+Git, full commit hashes, restrictive modes and no symlinks for any files actually written); and the
+`pipeline`-first half of Section 20 (merged as pipeline PR #44).
+
+**Historical WITHIN otherwise-normative sections:** §2 decisions 2 (deterministic Bash) and 6
+(mandatory `drive.sh` delegation); §3's deterministic-restart-recovery and operational-traceability
+goals (given up in the §25 tradeoff); §4's `coordinate.sh` row and the Pi row's
+"through the existing driver contract" qualifier; §14's audit-event/halt.json/halt-hook/watcher-
+resource mechanics (they reference the historical §13/§16 machinery); §19's local-state writer,
+lock, stale-lock `resume`, and audit-record mechanics.
 
 Approved: 2026-07-16
 
@@ -58,19 +72,22 @@ human-relay restrictions remain in force.
 
 ## 2. Decisions
 
-The following decisions are frozen for the first implementation:
+The following decisions were frozen for the first implementation. (v1.3: decisions 2 and 6 are
+**HISTORICAL — superseded by §25**; the others remain normative.)
 
 1. The remote target repository's `.pipeline/<feature>/journal.md` tail is the only business-state
    authority. `.pipeline/current.json` is a cache and may never overrule the journal.
 2. The coordinator is deterministic Bash plus `jq`. It is not a fourth LLM agent and MUST NOT make a
-   semantic decision.
+   semantic decision. — **HISTORICAL (§25): coordinated mode v1 IS an LLM session; stage-output
+   judgment still belongs to Codex review, never to the coordinator.**
 3. One coordinator watches one target repository. The existing one-feature-in-flight contract remains.
 4. CC, Pi, and Codex each run in a long-lived Herdr pane backed by an independent clone of the target
    repository. They do not share a working tree.
 5. Herdr is a lightweight command transport. It is not the workflow state store, message queue, event
    log, completion signal, or Pub/Sub authority.
 6. `drive.sh` remains the impl-loop primitive. `coordinate.sh` owns cross-stage routing and delegates an
-   impl span to `drive.sh` rather than duplicating its card loop.
+   impl span to `drive.sh` rather than duplicating its card loop. — **HISTORICAL (§25): the delegation
+   proved unimplementable headless; `drive.sh` stays standalone-only.**
 7. The operator starts `pipeline-prd` in CC. Once PRD commits the first authorized journal entry, the
    coordinator owns normal handoffs until the final merge gate or a fail-fast stop.
 8. Only a direct operator message in the same Codex session that emitted the approval gate may confirm
@@ -87,8 +104,11 @@ The following decisions are frozen for the first implementation:
 
 - Remove manual CC -> Pi -> Codex command relays while keeping Git as the durable handoff.
 - Recover deterministically after a coordinator restart without silently duplicating stage work.
+  — **HISTORICAL (§25 tradeoff: given up with the watcher)**
 - Reject stale, malformed, ambiguous, or unauthorized state before any new command is delivered.
 - Make every observation, decision, delivery, halt, and human resume operationally traceable.
+  — **HISTORICAL (§25 tradeoff: the Git journal remains the business audit; the local operational
+  audit was watcher machinery)**
 - Preserve the existing freeze gate, write sets, retry budget, hunt routing, semantic review, and direct
   human merge confirmation.
 - Keep the channel replaceable: a future transport may replace Herdr without changing workflow state.
@@ -118,6 +138,10 @@ The following decisions are frozen for the first implementation:
 
 The coordinator MUST remain replaceable. No stage skill may depend on coordinator-local files; every
 stage rebuilds its business context from Git.
+
+(v1.3: the `coordinate.sh` row above and the Pi row's "through the existing driver contract"
+qualifier are **HISTORICAL — superseded by §25**; the Git/journal, `drive.sh`-standalone, Herdr
+adapter, CC/Pi/Codex pane, and Operator boundaries remain normative.)
 
 ## 5. Repository and pane topology
 
@@ -418,7 +442,12 @@ processing (it still reads idle): a record-less restart would queue a second sen
 In both windows only the durable `pending` mark forces the halt-and-inspect path instead of a masked
 failure or a duplicate.
 
-## 14. Fail-fast contract
+## 14. Fail-fast contract — principles NORMATIVE; audit/halt mechanics HISTORICAL (§25)
+
+(v1.3: the universal principles — stop and dispatch nothing more on the first system/protocol error,
+and emit an actionable, sanitized where/input/reason/next_action diagnosis — bind ANY coordinator.
+The concrete mechanics below that reference the historical §13/§16 machinery — the audit event, the
+`halt.json` snapshot, the halt hook, releasing watcher resources — are deterministic-watcher history.)
 
 At the first fatal condition the process MUST perform, in order:
 
@@ -531,7 +560,12 @@ gate is disarmed and review must run again; the coordinator cannot restore or im
 - `SIGINT`/`SIGTERM` records `watch_stopped` when possible and exits. If interrupted in `pending`, the
   next start detects delivery ambiguity and requires human resolution.
 
-## 19. Security and write safety
+## 19. Security and write safety — invariants NORMATIVE; local-state mechanics HISTORICAL (§25)
+
+(v1.3: the universal invariants — read-only target Git, no `eval` of configured data, argv-safe
+construction, full commit hashes, restrictive modes and symlink rejection for any files actually
+written — bind ANY coordinator. The local-state writer, lock, stale-lock `resume`, and audit-record
+mechanics below are deterministic-watcher history.)
 
 - The watcher reads target Git only. Stage agents remain the only writers of target artifacts/journal.
 - Shell runs with strict error handling. Expected non-zero outcomes are handled explicitly; errors are
@@ -699,4 +733,5 @@ spec), the dispatch envelope + stage stale guard (§9, merged in `pipeline` #44)
 contract (§10), the human merge gate (§17), and the three-roles/three-models separation with the
 operator as final gate. `doctor`/`status` (#13) are the playbook's session preflight. `drive.sh` is
 unchanged and remains the standalone impl-loop tool. A future deterministic dispatcher may revisit
-Sections 8/12–18 with this section as its first requirements input.
+the historical subset enumerated in the status header (§8, §12's watch/resume, §13, §16, §18, and
+the historical fragments of §§2–4, 14, and 19) with this section as its first requirements input.
