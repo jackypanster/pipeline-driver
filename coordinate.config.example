@@ -1,0 +1,68 @@
+# coordinate.config — config for coordinate.sh, the deterministic cross-stage
+# coordinator. Copy to coordinate.config and edit. Sourced by bash, so:
+# VAR=value, no spaces around '='.
+#
+# coordinate.sh validates EVERY value before doing anything else (design §11)
+# and never `eval`s a configured command — command prefixes are data, appended
+# to a safely-constructed argv. Run `coordinate.sh doctor --config <path>` to
+# diagnose this file in place (read-only; touches network only for one fetch).
+#
+# SCOPE: one coordinator watches one target repository. The watcher and the
+# three role clones (CC / Pi / Codex) MUST all resolve to the SAME normalized
+# remote identity and trunk branch — coordinate.sh normalizes https/ssh/scp-like
+# forms of the same remote to one canonical key (design §5, §11).
+
+# A local clone of the target repo used ONLY for observation. The coordinator
+# fetches origin/<BRANCH> here and reads via `git show` — it never checks out
+# or writes target state. Must be an independent clone, not one of the role
+# clones below.
+OBSERVER_WORKDIR=/absolute/path/to/observer-clone
+
+# Trunk branch (where .pipeline metadata + journal live). Often main/master.
+# Every clone below must agree on this branch.
+BRANCH=main
+
+# Independent local clones backing the three long-lived role panes. Each has a
+# stable absolute path and a unique Herdr pane whose cwd is that clone (or a
+# descendant of it). All four workdirs (observer + these three) must share one
+# normalized remote identity.
+CC_WORKDIR=/absolute/path/to/cc-clone
+PI_WORKDIR=/absolute/path/to/pi-clone
+CODEX_WORKDIR=/absolute/path/to/codex-clone
+
+# Optional runtime-issued pane pins. cwd discovery is used when a pin is unset;
+# when set, the pin overrides discovery but MUST still resolve to that role's
+# clone and MUST NOT be the pane running coordinate.sh itself. Pane ids are
+# runtime-issued and die with the pane — re-pin from `herdr pane list`.
+# CC_PANE_ID=wA:p1
+# PI_PANE_ID=wB:p1
+# CODEX_PANE_ID=wC:p1
+
+# Stage command prefixes for each role. Non-empty single-line strings; the
+# coordinator appends the escaped dispatch envelope (repo/branch/feature/seq/
+# commit) as data — these are never interpreted by a shell.
+CC_ARCH_CMD=/pipeline-arch
+CC_TASK_CMD=/pipeline-task
+CC_HUNT_CMD=/pipeline-hunt
+PI_IMPL_CMD=/skill:pipeline-impl
+CODEX_REVIEW_CMD='$pipeline-review'
+
+# Polling / readiness / stage budgets. Positive base-10 integers.
+# POLL_SECS: no-change Git polling interval (no change is not an error).
+# PANE_READY_TIMEOUT_MS: bound for waiting to deliver before the stage begins (<= 600000).
+# STAGE_TIMEOUT_SECS: bound on a delivered stage producing neither a newer journal
+#                     entry nor a valid human-merge wait (<= 86400).
+POLL_SECS=30
+PANE_READY_TIMEOUT_MS=60000
+STAGE_TIMEOUT_SECS=2700
+
+# Optional halt hook: invoked as an argv vector (no shell expansion) with the
+# SOLE argument being the absolute halt.json path, under a bounded timeout. Must
+# be an absolute, executable, REGULAR file (never a symlink) when set. It
+# receives no prompts/tokens and cannot authorize resume.
+# ON_HALT_EXEC=/absolute/path/to/notifier
+
+# Optional state root (default: ${XDG_STATE_HOME:-$HOME/.local/state}/pipeline-driver).
+# MUST be outside every configured clone. Created 0700; files 0600. Writes reject
+# symlink destinations and use exclusive random same-directory temp files.
+# STATE_DIR=/absolute/path/to/pipeline-driver-state
