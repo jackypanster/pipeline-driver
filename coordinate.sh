@@ -289,10 +289,8 @@ bounded_run_ms() {
 }
 
 # authority_of <pane> <timeout_ms> — echoes "1" (authoritative) / "0" (not, incl.
-# unreadable). The SAME single `herdr agent explain` read yields both the state
-# and the authority flag (drive.sh herdr_agent_sample pattern, reimplemented here
-# for multi-role use; never sourced from drive.sh). Authoritative = a lifecycle
-# hook OR a MATCHED manifest rule, with NO always-idle fallback in effect.
+# unreadable). Authoritative = a lifecycle hook OR a MATCHED manifest rule, with NO
+# always-idle fallback in effect.
 authority_of() {
   local pane=$1 ms=$2 json
   json=$(bounded_run_ms "$ms" herdr agent explain "$pane" --json 2>/dev/null) || json=""
@@ -300,6 +298,19 @@ authority_of() {
   printf '%s' "$json" | jq -r \
     'if (((.screen_detection_skip_reason == "full_lifecycle_hook_authority") or (.matched_rule != null))
          and (.fallback_reason == null)) then "1" else "0" end' 2>/dev/null || printf '0'
+}
+
+# pane_sample <pane> <timeout_ms> — echoes "<state> <authority>" from ONE
+# `herdr agent explain` read (§10/§24.2: authority + lifecycle state come from the
+# same sample). state is lowercased; authority is 1/0. Empty state + authority 0
+# on an unreadable sample. (design §8: sample the target pane's lifecycle.)
+pane_sample() {
+  local pane=$1 ms=$2 json
+  json=$(bounded_run_ms "$ms" herdr agent explain "$pane" --json 2>/dev/null) || json=""
+  [ -n "$json" ] || { printf ' 0'; return 0; }
+  printf '%s' "$json" | jq -r '
+    (if (((.screen_detection_skip_reason == "full_lifecycle_hook_authority") or (.matched_rule != null)) and (.fallback_reason == null)) then "1" else "0" end) as $a
+    | "\((.state // "") | tostring | ascii_downcase) \($a)"' 2>/dev/null || printf ' 0'
 }
 
 # ---- config validation (design §11) --------------------------------------------
@@ -1101,12 +1112,28 @@ ledger_read() {
 # ledger_write <seq> <commit> <role> <pane> <command-name> <delivery> — atomic
 #   0600 write of the full §13 ledger record.
 ledger_write() {
-  local seq=$1 commit=$2 role=$3 pane=$4 cmdname=$5 delivery=$6
-  jq -nc --arg feature "$W_FEATURE" --argjson seq "$seq" --arg commit "$commit" \
-        --arg role "$role" --arg pane "$pane" --arg command "$cmdname" --arg delivery "$delivery" \
-    '{feature:$feature, journal_seq:$seq, journal_commit:$commit, target_role:$role,
-      pane:$pane, command:$command, delivery:$delivery}' \
-    | atomic_write "$(ledger_path)" 600
+  local seq=$1 commit=$2 role=$3 pane=$4 cmdname=$5 delivery=$6 sent=${7:-}
+  if [ -n "$sent" ]; then
+    jq -nc --arg feature "$W_FEATURE" --argjson seq "$seq" --arg commit "$commit" \
+          --arg role "$role" --arg pane "$pane" --arg command "$cmdname" --arg delivery "$delivery" \
+          --argjson sent_at "$sent" \
+      '{feature:$feature, journal_seq:$seq, journal_commit:$commit, target_role:$role,
+        pane:$pane, command:$command, delivery:$delivery, sent_at:$sent_at}' \
+      | atomic_write "$(ledger_path)" 600
+  else
+    jq -nc --arg feature "$W_FEATURE" --argjson seq "$seq" --arg commit "$commit" \
+          --arg role "$role" --arg pane "$pane" --arg command "$cmdname" --arg delivery "$delivery" \
+      '{feature:$feature, journal_seq:$seq, journal_commit:$commit, target_role:$role,
+        pane:$pane, command:$command, delivery:$delivery}' \
+      | atomic_write "$(ledger_path)" 600
+  fi
+}
+
+# ledger_get <key> — read one field from the current ledger (empty if absent).
+ledger_get() {
+  local led; led=$(ledger_path)
+  [ -f "$led" ] && [ ! -L "$led" ] || { printf ''; return 0; }
+  jq -r --arg k "$1" '.[$k] // ""' "$led" 2>/dev/null || printf ''
 }
 
 # ledger_clear  — remove the dispatch record (back to observed-idle) atomically:
@@ -1246,6 +1273,407 @@ route_classify() {
   return 0
 }
 
+sleep_ms() { perl -e 'select(undef,undef,undef,$ARGV[0]/1000)' "$1" 2>/dev/null || sleep 1; }
+
+# ---- watch reconcile helpers (design §8) ---------------------------------------
+# Globals produced by the read helpers each cycle.
+OBSERVED_COMMIT=""; W_CTL_MODE=""; W_PHASE="idle"; W_LAST_COMMIT=""; W_STOPPING=0
+SEQ=""; STATUS=""; FROM=""; TO=""; NEXT=""; NEXT_KIND=""; W_CUR=""; W_CTL=""; W_J=""
+
+# coord_fetch — fetch origin in OBSERVER_WORKDIR. First-occurrence fatal.
+coord_fetch() {
+  git -C "$OBSERVER_WORKDIR" fetch origin --quiet 2>/dev/null \
+    || coord_fatal GIT_FETCH_FAILED "watch:fetch" "$OBSERVER_WORKDIR" "git fetch origin failed" "check network / remote access / auth from $OBSERVER_WORKDIR"
+  OBSERVED_COMMIT=$(git -C "$OBSERVER_WORKDIR" rev-parse "origin/$BRANCH" 2>/dev/null) || \
+    coord_fatal REMOTE_REF_MISSING "watch:fetch" "origin/$BRANCH" "origin/$BRANCH missing after fetch" "confirm BRANCH=$BRANCH matches the remote trunk"
+}
+
+# coord_read_feature — reads current.json (feature slug) + control.json from the
+# fetched trunk. Sets W_FEATURE (validated) and W_CTL_MODE (coordinated|human|none).
+coord_read_feature() {
+  W_FEATURE=""; W_CTL_MODE="none"; W_CUR=""; W_CTL=""
+  W_CUR=$(show_remote ".pipeline/current.json") || W_CUR=""
+  if [ -z "$W_CUR" ] || ! printf '%s' "$W_CUR" | jq -e . >/dev/null 2>&1; then
+    return 0   # no active feature / human mode
+  fi
+  local feat; feat=$(printf '%s' "$W_CUR" | jq -r '.feature // empty' 2>/dev/null) || feat=""
+  [ -n "$feat" ] || return 0
+  valid_feature_slug "$feat" \
+    || coord_fatal CONFIG_INVALID "watch:feature" "<redacted-slug>" "feature slug from .pipeline/current.json on origin/$BRANCH is malformed or unsafe" "inspect .pipeline/current.json on origin/$BRANCH"
+  W_FEATURE=$feat
+  W_CTL=$(show_remote ".pipeline/$W_FEATURE/control.json") || W_CTL=""
+  if [ -n "$W_CTL" ]; then
+    if printf '%s' "$W_CTL" | jq -e '.schema_version == 1 and .merge_gate == "human-direct"' >/dev/null 2>&1; then
+      W_CTL_MODE=$(printf '%s' "$W_CTL" | jq -r '.mode // empty' 2>/dev/null)
+      case "$W_CTL_MODE" in coordinated|human) ;; *) W_CTL_MODE=human ;; esac
+    else
+      coord_fatal CONTROL_MALFORMED "watch:control" ".pipeline/$W_FEATURE/control.json" "control.json malformed or violates schema (schema_version/mode/merge_gate)" "inspect .pipeline/$W_FEATURE/control.json on origin/$BRANCH"
+    fi
+  fi
+}
+
+# coord_read_tail — parse the journal tail for W_FEATURE. Fatal on parse error.
+coord_read_tail() {
+  SEQ=""; STATUS=""; FROM=""; TO=""; NEXT=""; NEXT_KIND=""
+  W_J=$(show_remote ".pipeline/$W_FEATURE/journal.md") || W_J=""
+  [ -n "$W_J" ] || coord_fatal JOURNAL_MALFORMED "watch:journal" ".pipeline/$W_FEATURE/journal.md" "coordinated feature $W_FEATURE has no journal.md on origin/$BRANCH" "commit a .pipeline/$W_FEATURE/journal.md"
+  local parse_err=""
+  # shellcheck disable=SC1090
+  eval "$(printf '%s' "$W_J" | awk -f "$AWK" 2>/dev/null)"
+  case "${PARSE_ERR:-}" in
+    malformed-header) coord_fatal JOURNAL_MALFORMED "watch:journal" ".pipeline/$W_FEATURE/journal.md" "journal tail header malformed (non-numeric seq, or seq/status/to incomplete)" "inspect the tail entry of .pipeline/$W_FEATURE/journal.md" ;;
+    no-entries)       coord_fatal JOURNAL_MALFORMED "watch:journal" ".pipeline/$W_FEATURE/journal.md" "coordinated feature $W_FEATURE journal has no entries" "commit the first journal entry" ;;
+  esac
+}
+
+# coord_watch_panes — preflight: prove every role pane resolves and is lifecycle-
+# authoritative (§24.2). Reuses resolve_role_pane + authority_of; fatal on failure.
+PANES_JSON=""
+coord_watch_panes() {
+  PANES_JSON=$(bounded_run_ms "$PANE_LIST_TIMEOUT_MS" herdr pane list 2>/dev/null) || PANES_JSON=""
+  if [ -z "$PANES_JSON" ] || ! printf '%s' "$PANES_JSON" | jq -e . >/dev/null 2>&1; then
+    coord_fatal DEPENDENCY_MISSING "watch:preflight:panes" "herdr pane list" "'herdr pane list' returned no JSON" "is Herdr running? (herdr status)"
+  fi
+  local role workdir pin pane auth
+  for role in CC PI CODEX; do
+    case "$role" in CC) workdir=$CC_WORKDIR; pin=${CC_PANE_ID:-} ;; PI) workdir=$PI_WORKDIR; pin=${PI_PANE_ID:-} ;; *) workdir=$CODEX_WORKDIR; pin=${CODEX_PANE_ID:-} ;; esac
+    resolve_role_pane "$role" "$workdir" "$pin" "$PANES_JSON" "$COORD_SELF_PANE" \
+      || coord_fatal "${RES_CODE:-PANE_NOT_FOUND}" "watch:preflight:panes:$role" "$workdir" "$role pane: ${RES_MSG:-unresolved}" "see coordinate.config.example (${role}_PANE_ID / role clone cwd)"
+    pane=$RES_PANE; auth=$(authority_of "$pane" "$AUTH_TIMEOUT_MS")
+    [ "$auth" = 1 ] || coord_fatal AGENT_STATUS_INVALID "watch:preflight:panes:$role" "$pane" "$role pane $pane agent status NOT authoritative (no lifecycle hook / no MATCHED rule)" "attach that agent's Herdr integration (§24.2)"
+  done
+}
+
+# resolve one role pane (fatal on failure), using the cached PANES_JSON.
+resolve_role_or_fatal() {  # <role>
+  local role=$1 workdir pin
+  case "$role" in CC) workdir=$CC_WORKDIR; pin=${CC_PANE_ID:-} ;; PI) workdir=$PI_WORKDIR; pin=${PI_PANE_ID:-} ;; *) workdir=$CODEX_WORKDIR; pin=${CODEX_PANE_ID:-} ;; esac
+  resolve_role_pane "$role" "$workdir" "$pin" "$PANES_JSON" "$COORD_SELF_PANE" \
+    || coord_fatal "${RES_CODE:-PANE_NOT_FOUND}" "watch:dispatch:pane:$role" "$workdir" "$role pane: ${RES_MSG:-unresolved}" "see coordinate.config.example"
+  RES_PANE="$RES_PANE"
+}
+
+# wait_ready <pane> — 0 once the pane is AUTHORITATIVE and IDLE/done within the
+# PANE_READY_TIMEOUT_MS budget; nonzero on timeout, lost authority, or blocked.
+wait_ready() {
+  local pane=$1 deadline sample st auth
+  deadline=$(( $(date +%s) * 1000 + PANE_READY_TIMEOUT_MS ))
+  while [ "$W_STOPPING" != 1 ]; do
+    sample=$(pane_sample "$pane" "$AUTH_TIMEOUT_MS"); sample=${sample:-" 0"}
+    st=${sample%% *}; auth=${sample##* }
+    [ "$auth" = 1 ] || return 1
+    case "$st" in idle|done) return 0 ;; blocked|error) return 1 ;; esac
+    [ $(( $(date +%s) * 1000 )) -ge "$deadline" ] && return 1
+    sleep_ms 50
+  done
+  return 1
+}
+
+# audit helper: commit one event, fatal AUDIT_WRITE_FAILED on append failure.
+audit_or_die() {  # <featdir>
+  audit_commit "$1" || coord_fatal AUDIT_WRITE_FAILED "watch:audit" "$1/events.jsonl" "append to events.jsonl failed" "check the state dir perms/space ($1)"
+}
+
+# deliver_herdr — the §13 sequence for a non-impl route (typed envelope).
+deliver_herdr() {
+  local role=$DECISION_ROLE cmd=$DECISION_CMD cmdname=$DECISION_CMDNAME
+  local workdir pane envelope
+  case "$role" in CC) workdir=$CC_WORKDIR ;; PI) workdir=$PI_WORKDIR ;; *) workdir=$CODEX_WORKDIR ;; esac
+  resolve_role_or_fatal "$role"; pane=$RES_PANE
+  wait_ready "$pane" || coord_fatal PANE_NOT_READY_TIMEOUT "watch:dispatch:ready:$role" "$pane" "$role pane $pane not authoritatively idle within ${PANE_READY_TIMEOUT_MS}ms" "inspect the pane; relax PANE_READY_TIMEOUT_MS, or resume after it is idle"
+  # §8 step 7: re-fetch; if the ref moved, DISCARD the decision and reconcile.
+  git -C "$OBSERVER_WORKDIR" fetch origin --quiet 2>/dev/null \
+    || coord_fatal GIT_FETCH_FAILED "watch:dispatch:fetch" "$OBSERVER_WORKDIR" "pre-dispatch fetch failed" "check network / auth from $OBSERVER_WORKDIR"
+  local nc; nc=$(git -C "$OBSERVER_WORKDIR" rev-parse "origin/$BRANCH" 2>/dev/null)
+  if [ "$nc" != "$OBSERVED_COMMIT" ]; then
+    A_EVENT="observed"; A_RESULT="ref-moved-pre-send; stale decision discarded"; audit_or_die "$W_FEATDIR"; A_EVENT=""; A_RESULT=""
+    return 0   # reconcile the new commit next cycle
+  fi
+  A_EVENT="dispatch_pending"; A_TARGET_ROLE="$role"; A_PANE="$pane"; A_ACTION="$cmdname"
+  A_SEQ="$SEQ"; A_COMMIT="$OBSERVED_COMMIT"; A_TRANSITION="$FROM->$TO"; A_STATUS="$STATUS"
+  audit_or_die "$W_FEATDIR"
+  A_EVENT=""; A_TARGET_ROLE=""; A_PANE=""; A_ACTION=""; A_SEQ=""; A_COMMIT=""; A_TRANSITION=""; A_STATUS=""
+  ledger_write "$SEQ" "$OBSERVED_COMMIT" "$role" "$pane" "$cmdname" pending \
+    || coord_fatal LEDGER_CORRUPT "watch:dispatch:ledger" "$(ledger_path)" "atomic pending ledger write failed" "check $W_FEATDIR"
+  envelope="repo=$workdir branch=$BRANCH feature=$W_FEATURE expected_seq=$SEQ expected_commit=$OBSERVED_COMMIT"
+  if ! bounded_run_ms "$((STAGE_TIMEOUT_SECS*1000))" herdr pane run "$pane" "$cmd $envelope" 2>/dev/null; then
+    coord_fatal HERDR_SEND_FAILED "watch:dispatch:send:$role" "$pane" "herdr pane run exited nonzero (command name: $cmdname)" "inspect the pane; resume after the transport is healthy"
+  fi
+  ledger_write "$SEQ" "$OBSERVED_COMMIT" "$role" "$pane" "$cmdname" sent "$(date +%s)" \
+    || coord_fatal LEDGER_CORRUPT "watch:dispatch:ledger" "$(ledger_path)" "atomic sent ledger write failed" "check $W_FEATDIR"
+  A_EVENT="dispatch_sent"; A_TARGET_ROLE="$role"; A_PANE="$pane"; A_ACTION="$cmdname"; A_SEQ="$SEQ"; A_COMMIT="$OBSERVED_COMMIT"
+  A_TRANSITION="$FROM->$TO"; A_STATUS="$STATUS"
+  audit_or_die "$W_FEATDIR"
+  A_EVENT=""; A_TARGET_ROLE=""; A_PANE=""; A_ACTION=""; A_SEQ=""; A_COMMIT=""; A_TRANSITION=""; A_STATUS=""
+  W_PHASE=waiting
+}
+
+# deliver_impl_span — delegate an impl route to drive.sh (design §20). Generates
+# a 0600 drive.config in the feature state dir and runs drive.sh as a BOUNDED
+# subprocess. drive.sh owns the impl span: it types IMPL_SLASH_CMD + repo/branch
+# itself, so coordinate.sh does NOT type the envelope on impl routes. The pipeline
+# stale-dispatch guard still protects (drive.sh only dispatches after its own
+# fetch+parse). drive.sh exit 0 ⇒ reconcile; a contract-valid failed/blocked tail
+# is a business transition; anything else ⇒ fatal carrying drive.sh's exit.
+deliver_impl_span() {
+  local role=PI cmdname=pipeline-impl pane workdir
+  workdir=$PI_WORKDIR
+  resolve_role_or_fatal "$role"; pane=$RES_PANE
+  wait_ready "$pane" || coord_fatal PANE_NOT_READY_TIMEOUT "watch:dispatch:ready:PI" "$pane" "Pi pane not authoritatively idle within ${PANE_READY_TIMEOUT_MS}ms" "inspect the pane; relax PANE_READY_TIMEOUT_MS, or resume after it is idle"
+  git -C "$OBSERVER_WORKDIR" fetch origin --quiet 2>/dev/null \
+    || coord_fatal GIT_FETCH_FAILED "watch:dispatch:fetch" "$OBSERVER_WORKDIR" "pre-dispatch fetch failed" "check network / auth from $OBSERVER_WORKDIR"
+  local nc; nc=$(git -C "$OBSERVER_WORKDIR" rev-parse "origin/$BRANCH" 2>/dev/null)
+  if [ "$nc" != "$OBSERVED_COMMIT" ]; then
+    A_EVENT="observed"; A_RESULT="ref-moved-pre-send; stale decision discarded"; audit_or_die "$W_FEATDIR"; A_EVENT=""; A_RESULT=""
+    return 0
+  fi
+  A_EVENT="dispatch_pending"; A_TARGET_ROLE="$role"; A_PANE="$pane"; A_ACTION="drive.sh"
+  A_SEQ="$SEQ"; A_COMMIT="$OBSERVED_COMMIT"; A_TRANSITION="$FROM->$TO"; A_STATUS="$STATUS"
+  audit_or_die "$W_FEATDIR"
+  A_EVENT=""; A_TARGET_ROLE=""; A_PANE=""; A_ACTION=""; A_SEQ=""; A_COMMIT=""; A_TRANSITION=""; A_STATUS=""
+  ledger_write "$SEQ" "$OBSERVED_COMMIT" "$role" "$pane" "drive.sh" pending \
+    || coord_fatal LEDGER_CORRUPT "watch:dispatch:ledger" "$(ledger_path)" "atomic pending ledger write failed" "check $W_FEATDIR"
+  local dcfg="$W_FEATDIR/drive.config.$$"
+  printf 'WORKDIR=%s\nBRANCH=%s\nFEATURE=%s\nIMPL_TRANSPORT=herdr\nHERDR_PANE_ID=%s\nIMPL_SLASH_CMD=%s\nCARD_TIMEOUT=%s\n' \
+    "$OBSERVER_WORKDIR" "$BRANCH" "$W_FEATURE" "$pane" "$PI_IMPL_CMD" "$STAGE_TIMEOUT_SECS" \
+    | atomic_write "$dcfg" 600 || coord_fatal LEDGER_CORRUPT "watch:dispatch:drive.config" "$dcfg" "could not write drive.config" "check $W_FEATDIR"
+  local out rc
+  if out=$(bounded_run_ms "$((STAGE_TIMEOUT_SECS*1000))" "$HERE/drive.sh" "$dcfg" 2>&1); then :; fi
+  rc=$?
+  rm -f -- "$dcfg" 2>/dev/null || true
+  # drive.sh rc 0 ⇒ span ran; reconcile the (possibly advanced) journal next cycle.
+  # nonzero ⇒ drive.sh halted at a stop-point; surface a bounded sanitized excerpt.
+  if [ "$rc" -ne 0 ] && [ "$rc" != 124 ]; then
+    local excerpt=""; excerpt=$(printf '%s' "$out" | tail -3 | tr '\n' ' ' | cut -c1-200)
+    coord_fatal AGENT_ENDED_WITHOUT_HANDOFF "watch:dispatch:drive.sh" "exit=$rc" "drive.sh exited nonzero without advancing the journal (command: drive.sh)" "inspect the Pi pane / drive.sh output; resume after the span is healthy. Sanitized tail: ${excerpt:+$excerpt}<none>"
+  fi
+  # rc 0 (or 124 timeout): record sent + reconcile. The next cycle reads the tail:
+  # a contract-valid failed/blocked tail reconciles as a business transition (§15).
+  ledger_write "$SEQ" "$OBSERVED_COMMIT" "$role" "$pane" "drive.sh" sent "$(date +%s)" \
+    || coord_fatal LEDGER_CORRUPT "watch:dispatch:ledger" "$(ledger_path)" "atomic sent ledger write failed" "check $W_FEATDIR"
+  A_EVENT="dispatch_sent"; A_TARGET_ROLE="$role"; A_PANE="$pane"; A_ACTION="drive.sh"; A_SEQ="$SEQ"; A_COMMIT="$OBSERVED_COMMIT"
+  A_TRANSITION="$FROM->$TO"; A_STATUS="$STATUS"
+  audit_or_die "$W_FEATDIR"
+  A_EVENT=""; A_TARGET_ROLE=""; A_PANE=""; A_ACTION=""; A_SEQ=""; A_COMMIT=""; A_TRANSITION=""; A_STATUS=""
+  W_PHASE=waiting
+}
+
+# reconcile_once — one §8 cycle. Uses W_FEATURE/W_PHASE; sets W_PHASE.
+reconcile_once() {
+  [ "$W_STOPPING" = 1 ] && return 0
+  coord_fetch
+  coord_read_feature
+  # observe-only: no active coordinated feature.
+  if [ -z "$W_FEATURE" ] || [ "$W_CTL_MODE" != coordinated ]; then
+    if [ "$W_LAST_COMMIT" != "$OBSERVED_COMMIT" ]; then
+      A_EVENT="observed"; A_COMMIT="$OBSERVED_COMMIT"; A_FEATURE="$W_FEATURE"; audit_or_die "$W_FEATDIR"; A_EVENT=""; A_COMMIT=""; A_FEATURE=""
+      W_LAST_COMMIT=$OBSERVED_COMMIT
+    fi
+    W_PHASE=observe; return 0
+  fi
+  coord_read_tail
+  # No feature state dir yet for THIS feature? set it up + lock.
+  if [ -z "$W_FEATDIR" ] || [ "${W_FEATDIR##*/}" != "$W_FEATURE" ]; then
+    setup_feature_state "$W_FEATURE"
+  fi
+  local l_delivery l_commit l_seq l_pane l_role
+  l_delivery=""; l_commit=""; l_seq=""; l_pane=""; l_role=""
+  if ledger=$(ledger_read 2>/dev/null); then
+    l_feature=$(printf '%s' "$ledger" | cut -f1)
+    l_seq=$(printf '%s' "$ledger" | cut -f2)
+    l_commit=$(printf '%s' "$ledger" | cut -f3)
+    l_role=$(printf '%s' "$ledger" | cut -f4)
+    l_pane=$(printf '%s' "$ledger" | cut -f5)
+    l_delivery=$(printf '%s' "$ledger" | cut -f7)
+  fi
+  # WAITING / no-redeliver: a sent/waiting dispatch for the current commit is
+  # observed until the journal advances (§13 rule 5).
+  if [ "$l_delivery" = sent ] || [ "$l_delivery" = waiting ]; then
+    if [ "$l_commit" = "$OBSERVED_COMMIT" ]; then
+      waiting_cycle "$l_role" "$l_pane"
+      return 0
+    fi
+    # journal advanced past the dispatched commit — reconcile the new tail below.
+    :
+  fi
+  # classify + dispatch a NEW transition.
+  dispatch_transition
+}
+
+# dispatch_transition — classify the current tail and act (§7/§13).
+dispatch_transition() {
+  route_classify "$FROM" "$TO" "$STATUS" "$NEXT_KIND" \
+    || coord_fatal "$ROUTE_ERRCODE" "watch:route" "transition=$FROM->$TO status=$STATUS next=$NEXT_KIND" "$ROUTE_ERRMSG" "inspect the journal tail for .pipeline/$W_FEATURE on origin/$BRANCH"
+  case "$DECISION_KIND" in
+    complete)
+      A_EVENT="completed"; A_SEQ="$SEQ"; A_COMMIT="$OBSERVED_COMMIT"; A_TRANSITION="$FROM->$TO"; audit_or_die "$W_FEATDIR"
+      A_EVENT=""; A_SEQ=""; A_COMMIT=""; A_TRANSITION=""
+      ledger_clear || coord_fatal LEDGER_CORRUPT "watch:complete" "$(ledger_path)" "ledger clear failed" "check $W_FEATDIR"
+      W_PHASE=idle; return 0 ;;
+    merge-wait)
+      ledger_write "$SEQ" "$OBSERVED_COMMIT" CODEX "" "pipeline-review" waiting \
+        || coord_fatal LEDGER_CORRUPT "watch:merge-wait" "$(ledger_path)" "ledger waiting write failed" "check $W_FEATDIR"
+      A_EVENT="waiting_human_merge"; A_SEQ="$SEQ"; A_COMMIT="$OBSERVED_COMMIT"; audit_or_die "$W_FEATDIR"
+      A_EVENT=""; A_SEQ=""; A_COMMIT=""
+      W_PHASE=merge-wait; return 0 ;;
+    dispatch)
+      if [ "$DECISION_DELEGATE" = drive.sh ]; then deliver_impl_span
+      else deliver_herdr; fi ;;
+  esac
+}
+
+# waiting_cycle <role> <pane> — observe a delivered stage until the journal
+# advances or a fatal condition (§8 step 9 / §18). Never redelivers.
+waiting_cycle() {
+  local role=$1 pane=$2 sample st auth sent_at age
+  sample=$(pane_sample "$pane" "$AUTH_TIMEOUT_MS"); sample=${sample:-" 0"}
+  st=${sample%% *}; auth=${sample##* }
+  [ "$auth" = 1 ] || coord_fatal AGENT_STATUS_INVALID "watch:waiting:$role" "$pane" "$role pane $pane lost lifecycle authority mid-stage" "attach the agent's Herdr integration; resume after it is authoritative"
+  case "$st" in
+    blocked|error)
+      coord_fatal AGENT_ENDED_WITHOUT_HANDOFF "watch:waiting:$role" "$pane" "$role pane $pane is authoritatively $st — stage ended without the promised handoff" "inspect the pane; resume after the journal advances or the pane recovers" ;;
+    idle|done)
+      coord_fatal AGENT_ENDED_WITHOUT_HANDOFF "watch:waiting:$role" "$pane" "$role pane $pane is authoritatively $st with the journal unchanged — stage ended without a handoff" "inspect the pane; resume after the journal advances" ;;
+  esac
+  sent_at=$(ledger_get sent_at)
+  if [ -n "$sent_at" ]; then
+    age=$(( $(date +%s) - sent_at ))
+    [ "$age" -le "$STAGE_TIMEOUT_SECS" ] \
+      || coord_fatal STAGE_TIMEOUT "watch:waiting:$role" "$pane" "stage exceeded STAGE_TIMEOUT_SECS (${age}s > $STAGE_TIMEOUT_SECS) with no newer journal entry" "inspect the pane; raise STAGE_TIMEOUT_SECS or resume after the stage advances"
+  fi
+  if [ "$W_PHASE" != waiting ]; then
+    A_EVENT="waiting"; A_TARGET_ROLE="$role"; A_PANE="$pane"; A_SEQ="$SEQ"; A_COMMIT="$OBSERVED_COMMIT"; audit_or_die "$W_FEATDIR"
+    A_EVENT=""; A_TARGET_ROLE=""; A_PANE=""; A_SEQ=""; A_COMMIT=""
+  fi
+  W_PHASE=waiting
+}
+
+# setup_feature_state <feature> — compute W_RKEY/W_FEATDIR, create the dir chain,
+# and acquire the lock. Fatal LOCK_HELD/LOCK_STALE on contention. Idempotent.
+setup_feature_state() {
+  local feat=$1
+  W_FEATURE=$feat
+  W_RKEY=$(repo_key_from "$OBSERVER_WORKDIR" 2>/dev/null) || \
+    coord_fatal REMOTE_MISMATCH "watch:state" "$OBSERVER_WORKDIR" "observer has no usable remote.origin.url" "git -C $OBSERVER_WORKDIR remote add origin <url>"
+  W_REPOROOT=$(state_root)
+  W_FEATDIR="$W_REPOROOT/$W_RKEY/$W_FEATURE"
+  state_setup_dirs "$W_FEATDIR" || coord_fatal CONFIG_INVALID "watch:state" "$W_FEATDIR" "state dir setup refused: $STATE_SETUP_ERR" "point STATE_DIR at a creatable, non-symlinked directory"
+  # an unresolved halt blocks watch — resume is the only bypass.
+  if [ -e "$W_FEATDIR/halt.json" ] && [ ! -L "$W_FEATDIR/halt.json" ]; then
+    local code; code=$(jq -r '.code // "HALTED"' "$W_FEATDIR/halt.json" 2>/dev/null || echo HALTED)
+    coord_fatal "$code" "watch:halt" "$W_FEATDIR/halt.json" "an unresolved halt.json is present ($code) — plain watch cannot bypass it" "run \`coordinate.sh resume --config $CONF --reason <text>\` after fixing the recorded condition"
+  fi
+  # acquire lock (only ONE watcher per feature).
+  if ! lock_acquire "$W_FEATDIR"; then
+    if [ "$LOCK_STATE" = held ]; then
+      coord_fatal LOCK_HELD "watch:lock" "$W_FEATDIR/lock" "another watch holds the feature lock (pid $LOCK_PID)" "stop the other watcher, or resume if it is stale"
+    else
+      coord_fatal LOCK_STALE "watch:lock" "$W_FEATDIR/lock" "a stale lock is present (recorded pid $LOCK_PID not alive)" "run \`coordinate.sh resume --config $CONF --reason <text>\` to clear it after confirming no watch is running"
+    fi
+  fi
+  # startup with a pending ledger ⇒ DELIVERY_AMBIGUOUS (design §13; never auto-resolve).
+  local d; d=$(ledger_get delivery 2>/dev/null || echo "")
+  if [ "$d" = pending ]; then
+    coord_fatal DELIVERY_AMBIGUOUS "watch:startup" "$(ledger_path)" "ledger is in the ambiguous `pending` state — the write-ahead mark survived a restart" "run \`coordinate.sh resume --config $CONF --reason <text> --pending retry|mark-sent\` after inspecting the pane"
+  fi
+  A_EVENT="watch_started"; audit_or_die "$W_FEATDIR"; A_EVENT=""
+}
+
+# ---- watch / resume commands (design §8/§12) -----------------------------------
+cmd_watch() {
+  local d
+  for d in git jq herdr perl; do
+    command -v "$d" >/dev/null 2>&1 || coord_fatal DEPENDENCY_MISSING "watch:deps" "$d" "$d not on PATH" "install $d"
+  done
+  validate_config || {
+    local first="${CFG_V[0]:-}" fc fi2 fr
+    if [ -n "$first" ]; then IFS=$'\t' read -r fc fi2 fr <<< "$first"; fi
+    coord_fatal "${fc:-CONFIG_INVALID}" "watch:config" "${fi2:-$CONF}" "${fr:-config validation failed}" "edit $CONF (coordinate.config.example)"
+  }
+  local k v
+  for k in AUTH_TIMEOUT_MS PANE_LIST_TIMEOUT_MS; do
+    v="${!k:-}"; is_pos_int "$v" || coord_fatal CONFIG_INVALID "watch:config" "$k=$v" "$k is not a positive integer" "unset $k or set COORD_$k to a positive ms budget"
+  done
+  coord_watch_panes
+  trap 'W_STOPPING=1' INT TERM
+  local cycles=0 max=${COORD_WATCH_MAX_CYCLES:-0}
+  while [ "$W_STOPPING" != 1 ]; do
+    reconcile_once
+    cycles=$((cycles+1))
+    if [ "$max" -gt 0 ] && [ "$cycles" -ge "$max" ]; then break; fi
+    sleep "$POLL_SECS" 2>/dev/null || sleep 1
+  done
+  if [ "$W_STOPPING" = 1 ] && [ -n "${W_FEATURE:-}" ] && [ -n "${W_FEATDIR:-}" ]; then
+    A_EVENT="watch_stopped"; A_RESULT="signal"; audit_commit "$W_FEATDIR" 2>/dev/null || true; A_EVENT=""; A_RESULT=""
+  fi
+  lock_release
+  note "coordinate.sh watch: stopped"
+}
+
+cmd_resume() {
+  [ -n "$REASON" ] || { echo "coordinate.sh resume requires --reason <text>" >&2; exit 2; }
+  local d
+  for d in git jq herdr perl; do
+    command -v "$d" >/dev/null 2>&1 || coord_die DEPENDENCY_MISSING "resume:deps" "$d" "$d not on PATH" "install $d"
+  done
+  validate_config || {
+    local first="${CFG_V[0]:-}" fc fi2 fr
+    if [ -n "$first" ]; then IFS=$'\t' read -r fc fi2 fr <<< "$first"; fi
+    coord_die "${fc:-CONFIG_INVALID}" "resume:config" "${fi2:-$CONF}" "${fr:-config validation failed}" "edit $CONF"
+  }
+  # Determine the active feature from the LOCAL observer HEAD (no fetch loop).
+  local cur feat="" rkey
+  rkey=$(repo_key_from "$OBSERVER_WORKDIR" 2>/dev/null) || coord_die REMOTE_MISMATCH "resume:state" "$OBSERVER_WORKDIR" "observer has no usable remote.origin.url" "git -C $OBSERVER_WORKDIR remote add origin <url>"
+  cur=$(git -C "$OBSERVER_WORKDIR" show "HEAD:.pipeline/current.json" 2>/dev/null) || cur=""
+  if [ -n "$cur" ]; then feat=$(printf '%s' "$cur" | jq -r '.feature // empty' 2>/dev/null) || feat=""; fi
+  # Fall back to the single feature subdir if any.
+  if [ -z "$feat" ]; then
+    local rd; rd="$(state_root)/$rkey"
+    if [ -d "$rd" ]; then feat=$(cd "$rd" 2>/dev/null && ls -1dt */ 2>/dev/null | head -1); feat=${feat%/}; fi
+  fi
+  if [ -n "$feat" ]; then
+    valid_feature_slug "$feat" || coord_die CONFIG_INVALID "resume:feature" "<redacted-slug>" "feature slug is malformed or unsafe" "inspect .pipeline/current.json"
+    W_FEATURE=$feat; W_RKEY=$rkey; W_FEATDIR="$(state_root)/$rkey/$feat"
+    state_setup_dirs "$W_FEATDIR" || coord_die CONFIG_INVALID "resume:state" "$W_FEATDIR" "state dir setup refused: $STATE_SETUP_ERR" "point STATE_DIR at a creatable directory"
+    # stale lock: clear HERE and only here (after confirming the recorded PID is dead).
+    if [ -d "$W_FEATDIR/lock" ]; then
+      local pidf="$W_FEATDIR/lock/pid" rpid=""
+      [ -f "$pidf" ] && [ ! -L "$pidf" ] && rpid=$(cat "$pidf" 2>/dev/null || echo "")
+      if [ -n "$rpid" ] && kill -0 "$rpid" 2>/dev/null; then
+        coord_die LOCK_HELD "resume:lock" "$W_FEATDIR/lock" "a live watch holds the lock (pid $rpid) — resume cannot clear it" "stop that watcher first"
+      fi
+      rm -f -- "$pidf" 2>/dev/null || true; rmdir "$W_FEATDIR/lock" 2>/dev/null || true
+    fi
+    # pending ledger ⇒ REQUIRE exactly one --pending flag (design §13).
+    local delivery; delivery=$(ledger_get delivery 2>/dev/null || echo "")
+    if [ "$delivery" = pending ]; then
+      case "${PENDING_ACTION:-}" in
+        retry)
+          ledger_clear || coord_die LEDGER_CORRUPT "resume:pending" "$(ledger_path)" "ledger clear failed" "check $W_FEATDIR"
+          A_EVENT="resume"; A_RESULT="pending=retry (redispatch)"; A_NEXT_ACTION="start watch"; audit_commit "$W_FEATDIR" 2>/dev/null || true; A_EVENT=""; A_RESULT=""; A_NEXT_ACTION="" ;;
+        mark-sent)
+          local seq commit role pane
+          seq=$(ledger_get journal_seq); commit=$(ledger_get journal_commit); role=$(ledger_get target_role); pane=$(ledger_get pane)
+          ledger_write "$seq" "$commit" "$role" "$pane" "$(ledger_get command)" sent "$(date +%s)" \
+            || coord_die LEDGER_CORRUPT "resume:pending" "$(ledger_path)" "ledger mark-sent failed" "check $W_FEATDIR"
+          A_EVENT="resume"; A_RESULT="pending=mark-sent (enter WAITING)"; A_NEXT_ACTION="start watch"; audit_commit "$W_FEATDIR" 2>/dev/null || true; A_EVENT=""; A_RESULT=""; A_NEXT_ACTION="" ;;
+        *)
+          coord_die DELIVERY_AMBIGUOUS "resume:pending" "$(ledger_path)" "ledger is `pending`; resume requires exactly one of --pending retry | --pending mark-sent" "inspect the pane transcript, then re-run resume with the chosen flag" ;;
+      esac
+    fi
+    # clear halt.json (preflight passing IS the guard for most codes) + audit.
+    if [ -e "$W_FEATDIR/halt.json" ] && [ ! -L "$W_FEATDIR/halt.json" ]; then
+      local prior; prior=$(jq -r '.code // "HALTED"' "$W_FEATDIR/halt.json" 2>/dev/null || echo HALTED)
+      A_EVENT="resume"; A_ERROR_CODE="$prior"; A_NEXT_ACTION="start watch"; audit_commit "$W_FEATDIR" 2>/dev/null || true
+      A_EVENT=""; A_ERROR_CODE=""; A_NEXT_ACTION=""
+      rm -f -- "$W_FEATDIR/halt.json" || coord_die AUDIT_WRITE_FAILED "resume:halt" "$W_FEATDIR/halt.json" "could not remove halt.json" "inspect $W_FEATDIR"
+    else
+      A_EVENT="resume"; A_NEXT_ACTION="start watch"; audit_commit "$W_FEATDIR" 2>/dev/null || true; A_EVENT=""; A_NEXT_ACTION=""
+    fi
+  fi
+  note "coordinate.sh resume: state repaired; start watch with \`coordinate.sh watch --config $CONF\`"
+}
+
 # ---- arg dispatch --------------------------------------------------------------
 usage() {
   cat >&2 <<EOF
@@ -1254,17 +1682,18 @@ usage: coordinate.sh <subcommand> --config <path> [--reason <text]
 subcommands:
   doctor   read-only full preflight (deps / config / remote / journal / panes / authority / state)
   status   read-only local state summary (one human line + one JSON object)
-  watch    not implemented this phase — see coordinator-design.md
-  resume   not implemented this phase — see coordinator-design.md
+  watch    acquire the lock + run the reconcile loop (dispatches when authorized)
+  resume   rerun preflight + repair halt/lock/pending state (never starts watch)
 EOF
 }
 
 SUBCMD="${1:-}"; shift || true
-CONF=""; REASON=""
+CONF=""; REASON=""; PENDING_ACTION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --config) [ $# -ge 2 ] || { echo "coordinate.sh: --config needs a path" >&2; exit 2; }; CONF=$2; shift 2 ;;
     --reason) [ $# -ge 2 ] || { echo "coordinate.sh: --reason needs text" >&2; exit 2; }; REASON=$2; shift 2 ;;
+    --pending) [ $# -ge 2 ] || { echo "coordinate.sh: --pending needs retry|mark-sent" >&2; exit 2; }; PENDING_ACTION=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "coordinate.sh: unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -1286,12 +1715,19 @@ case "$SUBCMD" in
     cmd_status
     ;;
   watch)
-    echo "coordinate.sh watch: not implemented in this phase — see coordinator-design.md" >&2
-    exit 1
+    [ -n "$CONF" ] || { echo "coordinate.sh: watch requires --config <path>" >&2; usage; exit 2; }
+    [ -f "$CONF" ] || coord_die CONFIG_INVALID "watch:arg-parse" "$CONF" "config file not found" "create it from coordinate.config.example"
+    # shellcheck disable=SC1090
+    . "$CONF" || coord_die CONFIG_INVALID "watch:load_config" "$CONF" "config file failed to source (bash syntax error)" "fix the bash syntax in $CONF"
+    cmd_watch
     ;;
   resume)
-    echo "coordinate.sh resume: not implemented in this phase — see coordinator-design.md" >&2
-    exit 1
+    [ -n "$CONF" ] || { echo "coordinate.sh: resume requires --config <path>" >&2; usage; exit 2; }
+    [ -f "$CONF" ] || coord_die CONFIG_INVALID "resume:arg-parse" "$CONF" "config file not found" "create it from coordinate.config.example"
+    # shellcheck disable=SC1090
+    . "$CONF" || coord_die CONFIG_INVALID "resume:load_config" "$CONF" "config file failed to source (bash syntax error)" "fix the bash syntax in $CONF"
+    case "${PENDING_ACTION:-}" in ""|retry|mark-sent) ;; *) echo "coordinate.sh: --pending must be retry|mark-sent" >&2; exit 2 ;; esac
+    cmd_resume
     ;;
   "")
     usage; exit 2
