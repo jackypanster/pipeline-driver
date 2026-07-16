@@ -168,6 +168,38 @@ fresh; seed "$T"
   git commit -qam badjournal && git push -q origin main )
 assert_code "malformed journal tail -> JOURNAL_MALFORMED" JOURNAL_MALFORMED
 
+# ===== 8. (finding 5) coordinated mode + MISSING journal.md -> BLOCKING =====
+fresh; seed "$T"
+( cd "$T/obs"
+  git rm -q .pipeline/hello-cli/journal.md
+  git commit -qm nojournal && git push -q origin main )
+assert_code "coordinated + missing journal -> JOURNAL_MALFORMED" JOURNAL_MALFORMED
+
+# ===== 9. (finding 5) coordinated mode + EMPTY journal (no entries) -> BLOCKING =====
+fresh; seed "$T"
+( cd "$T/obs"
+  : > .pipeline/hello-cli/journal.md   # committed but empty -> awk: no-entries
+  git commit -qam emptyjournal && git push -q origin main )
+assert_code "coordinated + empty journal -> JOURNAL_MALFORMED" JOURNAL_MALFORMED
+
+# ===== 10. (finding 5) HUMAN mode + missing journal -> informational (NOT blocking)
+#           control.json mode=human, journal removed: doctor must NOT emit
+#           JOURNAL_MALFORMED for the journal, and with panes otherwise happy it
+#           exits 0 with a warning (not a miss). =====
+fresh; seed "$T"
+( cd "$T/obs"
+  printf '{"schema_version":1,"mode":"human","merge_gate":"human-direct"}' > .pipeline/hello-cli/control.json
+  git rm -q .pipeline/hello-cli/journal.md
+  git commit -aqm human && git push -q origin main )
+hr_out=$(run_doctor); hr_rc=$?
+if [ "$hr_rc" -eq 0 ] \
+   && ! printf '%s' "$hr_out" | grep -q '\[JOURNAL_MALFORMED\]' \
+   && printf '%s' "$hr_out" | grep -qi 'no journal.md'; then
+  ok "human + missing journal -> informational (rc=0, no JOURNAL_MALFORMED)"
+else
+  bad "human + missing journal" "rc=$hr_rc; expected rc=0 + no JOURNAL_MALFORMED + 'no journal.md' warn; got: $(printf '%s' "$hr_out" | grep -i 'journal\|doctor:' | head -6)"
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

@@ -380,16 +380,32 @@ cmd_doctor() {
           d_code CONTROL_MALFORMED "control.json malformed or violates schema (schema_version/mode/merge_gate)" "inspect .pipeline/$FEATURE/control.json on origin/$BRANCH"
         fi
 
+        # mode drives whether the journal authority is REQUIRED: a coordinated
+        # feature cannot pass §12 preflight without a usable authoritative tail;
+        # human / no-control mode stays informational (finding: journal authority).
+        local ctl_mode="" j_required=0
+        [ -n "$CTL" ] && ctl_mode=$(printf '%s' "$CTL" | jq -r '.mode // empty' 2>/dev/null)
+        [ "$ctl_mode" = "coordinated" ] && j_required=1
+
         J=$(show_remote ".pipeline/$FEATURE/journal.md") || J=""
         if [ -z "$J" ]; then
-          d_warn "no journal.md for $FEATURE on origin/$BRANCH" "feature may be pre-first-commit"
+          if [ "$j_required" = "1" ]; then
+            d_code JOURNAL_MALFORMED "coordinated feature $FEATURE has no journal.md on origin/$BRANCH (authoritative tail required in coordinated mode)" "commit a .pipeline/$FEATURE/journal.md"
+          else
+            d_warn "no journal.md for $FEATURE on origin/$BRANCH" "human mode — feature may be pre-first-commit"
+          fi
         else
           local SEQ="" STATUS="" FROM="" TO="" NEXT="" NEXT_KIND="" PARSE_ERR=""
           # shellcheck disable=SC1090
           eval "$(printf '%s' "$J" | awk -f "$AWK" 2>/dev/null)"
           case "${PARSE_ERR:-}" in
-            malformed-header) d_code JOURNAL_MALFORMED "journal tail header malformed (seq/status/to incomplete)" "inspect the tail entry of .pipeline/$FEATURE/journal.md on origin/$BRANCH" ;;
-            no-entries)       d_warn "journal has no entries yet" "feature is pre-first-commit" ;;
+            malformed-header) d_code JOURNAL_MALFORMED "journal tail header malformed (non-numeric seq, or seq/status/to incomplete)" "inspect the tail entry of .pipeline/$FEATURE/journal.md on origin/$BRANCH" ;;
+            no-entries)
+              if [ "$j_required" = "1" ]; then
+                d_code JOURNAL_MALFORMED "coordinated feature $FEATURE journal has no entries on origin/$BRANCH" "the authoritative tail is required in coordinated mode — commit the first journal entry"
+              else
+                d_warn "journal has no entries yet" "feature is pre-first-commit"
+              fi ;;
             "")               d_ok "journal tail: SEQ=$SEQ STATUS=$STATUS FROM=$FROM TO=$TO NEXT=${NEXT:-<empty>} NEXT_KIND=${NEXT_KIND:-<none>}" ;;
           esac
         fi
