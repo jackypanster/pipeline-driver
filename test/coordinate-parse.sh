@@ -48,6 +48,29 @@ else
   fail=$((fail+1)); echo "FAIL malformed header          -> expected PARSE_ERR=malformed-header, got: $m"
 fi
 
+# --- finding 3: a NON-NUMERIC seq on a trailing physical-tail header ("## seq=x")
+#      MUST make the parse fail (PARSE_ERR), never silently route the prior valid
+#      seq=7 entry. The parser now treats "## seq=" as an entry boundary regardless
+#      of the seq token's shape, and flags a non-numeric seq as malformed.
+m=$(parse "$HERE/fixtures/coord-physical-tail.md")
+if printf '%s' "$m" | grep -q 'PARSE_ERR=malformed-header'; then
+  pass=$((pass+1)); echo "ok   physical-tail seq=x       -> PARSE_ERR=malformed-header (prior seq=7 NOT routed)"
+else
+  fail=$((fail+1)); echo "FAIL physical-tail seq=x       -> expected PARSE_ERR=malformed-header, got: $m"
+fi
+
+# --- finding 4: an EMPTY to-stage ("impl→ · completed") MUST parse-fail. TO is the
+#      token IMMEDIATELY adjacent to the arrow; the parser must NOT scan forward into
+#      the status token and accept "completed" as TO.
+m=$(parse "$HERE/fixtures/coord-empty-to.md")
+if printf '%s' "$m" | grep -q 'PARSE_ERR=malformed-header' \
+   && printf '%s' "$m" | grep -q 'TO=;' \
+   && ! printf '%s' "$m" | grep -q 'TO=completed'; then
+  pass=$((pass+1)); echo "ok   empty TO (adjacency)      -> PARSE_ERR + TO empty (not TO=completed)"
+else
+  fail=$((fail+1)); echo "FAIL empty TO (adjacency)      -> got: $m"
+fi
+
 # --- a near-miss merge-wait line (trailing word) MUST classify as 'other', not
 #      merge-wait — the marker is matched EXACTLY (coordinator-design §7.1).
 T=$(mktemp); trap 'rm -f "$T"' EXIT
@@ -60,6 +83,24 @@ Await human-direct merge confirmation in this reviewer session please.
 <<< END
 EOF
 assert_tail6 "merge marker near-miss"   "$T" 5 completed review review "" other
+
+# --- finding 2: the U+2192 arrow offset MUST come from length(arrow), never a
+#      hardcoded 3. Under gawk in a UTF-8 locale index()/substr()/length() count
+#      CHARS, so a hardcoded +3 yields TO=pl (not TO=impl) on "impl→impl". Assert
+#      TO=impl under LC_ALL=en_US.UTF-8 gawk. SKIP cleanly when gawk or the locale
+#      is unavailable (the fix uses length() so it is correct wherever awk runs).
+if command -v gawk >/dev/null 2>&1 \
+   && locale -a 2>/dev/null | grep -Eq '^en_US\.UTF-8$|^en_US\.utf8$'; then
+  gout=$(LC_ALL=en_US.UTF-8 gawk -f "$AWK" "$HERE/fixtures/coord-impl-impl.md" 2>/dev/null)
+  if printf '%s' "$gout" | grep -q 'TO=impl' \
+     && ! printf '%s' "$gout" | grep -q 'TO=pl'; then
+    pass=$((pass+1)); echo "ok   gawk UTF-8 arrow offset   -> TO=impl (length()-derived, not hardcoded +3)"
+  else
+    fail=$((fail+1)); echo "FAIL gawk UTF-8 arrow offset   -> expected TO=impl under gawk UTF-8, got: $gout"
+  fi
+else
+  echo "skip gawk UTF-8 arrow offset   -> gawk or en_US.UTF-8 locale unavailable on this host"
+fi
 
 echo "----"
 echo "passed=$pass failed=$fail"
