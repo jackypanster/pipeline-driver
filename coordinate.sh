@@ -1136,15 +1136,15 @@ ledger_get() {
   jq -r --arg k "$1" '.[$k] // ""' "$led" 2>/dev/null || printf ''
 }
 
-# ledger_clear  — remove the dispatch record (back to observed-idle) atomically:
-#   rewrite to an "idle" marker (delivery="idle"), so status/doctor still see a
-#   valid record but watch treats it as no in-flight dispatch.
+# ledger_clear  — remove the dispatch record (back to observed-idle). §13's ledger
+#   records "the current dispatch"; after completion/retry-authorization there is
+#   none, so the honest state is an ABSENT file (a synthetic delivery="idle" record
+#   would violate the very §13 schema doctor enforces).
 ledger_clear() {
-  jq -nc --arg feature "$W_FEATURE" --argjson seq 0 --arg commit "" \
-        --arg role "" --arg pane "" --arg command "" --arg delivery "idle" \
-    '{feature:$feature, journal_seq:$seq, journal_commit:"", target_role:"",
-      pane:"", command:"", delivery:"idle"}' \
-    | atomic_write "$(ledger_path)" 600
+  local led; led=$(ledger_path)
+  [ -L "$led" ] && return 1
+  rm -f -- "$led" 2>/dev/null || return 1
+  return 0
 }
 
 # ---- lock (§13/§19) -------------------------------------------------------------
@@ -1197,6 +1197,7 @@ coord_fatal() {
     jq -nc --arg ts "$(now_iso)" --arg code "$code" --arg where "$where" --arg input "$input" \
           --arg reason "$reason" --arg next_action "$action" --arg resume_guard "$guard" \
           --arg feature "${W_FEATURE:-}" --arg remote_identity "${W_RKEY:-}" --arg branch "${BRANCH:-}" '
+      def n(e): if (e|type)=="string" and (e|length)>0 then e else null end;
       {timestamp:$ts, code:$code, where:$where, input:$input, reason:$reason,
        next_action:$next_action, resume_guard:$resume_guard,
        feature:n($feature), remote_identity:n($remote_identity), branch:n($branch)}' \
@@ -1247,22 +1248,30 @@ route_classify() {
       [ "$status" = completed ] && [ "$to" = prd ] || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-arch requires a completed PRD entry (to=prd); got to=$to status=$status"; return 1; }
       DECISION_KIND=dispatch; DECISION_ROLE=CC; DECISION_CMD=${CC_ARCH_CMD:-}; DECISION_CMDNAME=pipeline-arch; DECISION_DELEGATE=herdr ;;
     run-task)
-      { [ "$status" = completed ] && { [ "$to" = arch ] || [ "$to" = hunt ]; }; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-task requires completed arch (to=arch) or hunt (to=hunt); got to=$to status=$status"; return 1; }
+      # prd/arch convention writes prev→current (arch completed = prd→arch? no —
+      # ARCH completing writes prd→arch and hands to task via to=arch); hunt
+      # writes current→routed (hunt→task). Exactly two evidence shapes (§7):
+      #   to=arch · completed   (architecture done → decompose)
+      #   hunt→task · completed (hunt re-split/re-spec)
+      if { [ "$to" = arch ] && [ "$status" = completed ]; } \
+         || { [ "$from" = hunt ] && [ "$to" = task ] && [ "$status" = completed ]; }; then :
+      else ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-task requires a completed arch entry (to=arch) or hunt→task · completed; got $from->$to · $status"; return 1; fi
       DECISION_KIND=dispatch; DECISION_ROLE=CC; DECISION_CMD=${CC_TASK_CMD:-}; DECISION_CMDNAME=pipeline-task; DECISION_DELEGATE=herdr ;;
     run-impl)
-      # task->impl (start), impl->impl (continue/informed-retry), review->impl
-      # (changes-requested), hunt->impl (reset). All delegate to drive.sh.
-      case "$to" in
-        task) [ "$status" = completed ] || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="task->impl requires completed task; got status=$status"; return 1; } ;;
-        impl) { [ "$status" = completed ] || [ "$status" = failed ]; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="impl->impl requires completed|failed; got status=$status"; return 1; } ;;
-        *) ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-impl with unexpected to=$to (expected task|impl)"; return 1 ;;
-      esac
+      # §7 impl-bound rows, exact: task completed (to=task · completed),
+      # impl→impl · completed|failed, review→impl · failed (never completed),
+      # hunt→impl · completed (reset budget). All delegate to drive.sh.
+      if { [ "$to" = task ] && [ "$status" = completed ] && [ "$from" != hunt ]; } \
+         || { [ "$from" = impl ] && [ "$to" = impl ] && { [ "$status" = completed ] || [ "$status" = failed ]; }; } \
+         || { [ "$from" = review ] && [ "$to" = impl ] && [ "$status" = failed ]; } \
+         || { [ "$from" = hunt ] && [ "$to" = impl ] && [ "$status" = completed ]; }; then :
+      else ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-impl outside the §7 allowlist: $from->$to · $status (valid: to=task·completed, impl→impl·completed|failed, review→impl·failed, hunt→impl·completed)"; return 1; fi
       DECISION_KIND=dispatch; DECISION_ROLE=PI; DECISION_CMD=""; DECISION_CMDNAME=pipeline-impl; DECISION_DELEGATE=drive.sh ;;
     run-review)
-      { [ "$status" = completed ] && [ "$to" = review ]; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-review requires impl->review completed (to=review); got to=$to status=$status"; return 1; }
+      { [ "$from" = impl ] && [ "$to" = review ] && [ "$status" = completed ]; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-review requires impl→review · completed; got $from->$to · $status"; return 1; }
       DECISION_KIND=dispatch; DECISION_ROLE=CODEX; DECISION_CMD=${CODEX_REVIEW_CMD:-}; DECISION_CMDNAME=pipeline-review; DECISION_DELEGATE=herdr ;;
     run-hunt)
-      { [ "$status" = blocked ] && { [ "$to" = hunt ] || [ "$from" = impl ] || [ "$from" = review ]; }; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-hunt requires a blocked impl/review->hunt; got from=$from to=$to status=$status"; return 1; }
+      { [ "$to" = hunt ] && [ "$status" = blocked ] && { [ "$from" = impl ] || [ "$from" = review ]; }; } || { ROUTE_ERRCODE=TRANSITION_ILLEGAL; ROUTE_ERRMSG="Run pipeline-hunt requires impl→hunt · blocked or review→hunt · blocked; got $from->$to · $status"; return 1; }
       DECISION_KIND=dispatch; DECISION_ROLE=CC; DECISION_CMD=${CC_HUNT_CMD:-}; DECISION_CMDNAME=pipeline-hunt; DECISION_DELEGATE=herdr ;;
     run-*) ROUTE_ERRCODE=NEXT_INVALID; ROUTE_ERRMSG="unknown Run pipeline-<stage>: $nk"; return 1 ;;
     "")
@@ -1274,6 +1283,72 @@ route_classify() {
 }
 
 sleep_ms() { perl -e 'select(undef,undef,undef,$ARGV[0]/1000)' "$1" 2>/dev/null || sleep 1; }
+
+# ---- §15 mechanical card validation ---------------------------------------------
+# cards_read — "status<TAB>attempts" per tasks/*.md of W_FEATURE, read from the
+# OBSERVED trunk (git show; never a worktree). Emits nothing when no cards exist.
+cards_read() {
+  local f
+  git -C "$OBSERVER_WORKDIR" ls-tree --name-only "origin/$BRANCH" ".pipeline/$W_FEATURE/tasks/" 2>/dev/null \
+  | while IFS= read -r f; do
+      case "$f" in *.md) ;; *) continue ;; esac
+      git -C "$OBSERVER_WORKDIR" show "origin/$BRANCH:$f" 2>/dev/null | awk '
+        /^status:/   { s=$2 } /^attempts:/ { a=$2 }
+        END { printf "%s\t%s\n", (s==""?"?":s), (a==""?"?":a) }'
+    done
+}
+
+# cards_validate <kind> — §15 evidence checks for the routed transition, purely
+# MECHANICAL (the coordinator validates that the named target/budget exists; it
+# never chooses a route from card contents). kind ∈ run-impl|run-review|run-hunt|
+# run-arch|run-task|merge-wait|complete. Sets CARD_ERR on a violation; the caller
+# fatalizes CARD_STATE_INVALID. Counter/status disagreements (attempts>=3 without
+# blocked, blocked without >=3, non-integer attempts) are violations on EVERY kind.
+CARD_ERR=""
+cards_validate() {
+  local kind=$1 s a n_todo=0 n_review=0 n_blocked=0 n_done=0 n_total=0
+  CARD_ERR=""
+  local cards; cards=$(cards_read)
+  if [ -z "$cards" ]; then
+    case "$kind" in
+      run-impl|run-review|merge-wait|complete)
+        CARD_ERR="no task cards on origin/$BRANCH — a $kind transition requires card evidence" ;;
+      run-hunt)
+        git -C "$OBSERVER_WORKDIR" ls-tree --name-only "origin/$BRANCH" ".pipeline/$W_FEATURE/reviews/" 2>/dev/null \
+          | grep -q 'integration-[0-9]*\.md$' \
+          || CARD_ERR="a Run pipeline-hunt route requires a blocked card or a reviews/integration-NN.md report (found neither)" ;;
+    esac
+    return 0
+  fi
+  while IFS=$'\t' read -r s a; do
+    [ -n "$s" ] || continue
+    n_total=$((n_total+1))
+    case "$a" in ''|'?'|*[!0-9]*) CARD_ERR="a card carries a non-integer attempts value ('$a')"; return 0 ;; esac
+    case "$s" in
+      todo|in-progress|review) [ "$a" -lt 3 ] || { CARD_ERR="card status=$s with attempts=$a — >=3 must be blocked (§15 breaker)"; return 0; } ;;
+      blocked)                 [ "$a" -ge 3 ] || { CARD_ERR="card status=blocked with attempts=$a — disagrees with the >=3 breaker"; return 0; } ;;
+      done) ;;
+      *) CARD_ERR="card carries unknown status '$s'"; return 0 ;;
+    esac
+    case "$s" in
+      todo) n_todo=$((n_todo+1)) ;; review) n_review=$((n_review+1)) ;;
+      blocked) n_blocked=$((n_blocked+1)) ;; done) n_done=$((n_done+1)) ;;
+    esac
+  done <<< "$cards"
+  case "$kind" in
+    run-impl)   [ "$n_todo" -ge 1 ] || CARD_ERR="a Run pipeline-impl route requires >=1 actionable todo card (found none of $n_total)" ;;
+    run-review) [ "$n_review" -eq "$n_total" ] || CARD_ERR="a Run pipeline-review route requires EVERY card at status=review ($n_review/$n_total)" ;;
+    merge-wait) [ "$n_review" -eq "$n_total" ] || CARD_ERR="the human-merge wait requires every card at status=review ($n_review/$n_total)" ;;
+    complete)   [ "$n_done" -eq "$n_total" ] || CARD_ERR="review->done requires every card done ($n_done/$n_total)" ;;
+    run-hunt)
+      if [ "$n_blocked" -lt 1 ]; then
+        git -C "$OBSERVER_WORKDIR" ls-tree --name-only "origin/$BRANCH" ".pipeline/$W_FEATURE/reviews/" 2>/dev/null \
+          | grep -q 'integration-[0-9]*\.md$' \
+          || CARD_ERR="a Run pipeline-hunt route requires a blocked card or a reviews/integration-NN.md report (found neither)"
+      fi ;;
+  esac
+  return 0
+}
 
 # ---- watch reconcile helpers (design §8) ---------------------------------------
 # Globals produced by the read helpers each cycle.
@@ -1303,9 +1378,11 @@ coord_read_feature() {
   W_FEATURE=$feat
   W_CTL=$(show_remote ".pipeline/$W_FEATURE/control.json") || W_CTL=""
   if [ -n "$W_CTL" ]; then
-    if printf '%s' "$W_CTL" | jq -e '.schema_version == 1 and .merge_gate == "human-direct"' >/dev/null 2>&1; then
-      W_CTL_MODE=$(printf '%s' "$W_CTL" | jq -r '.mode // empty' 2>/dev/null)
-      case "$W_CTL_MODE" in coordinated|human) ;; *) W_CTL_MODE=human ;; esac
+    # The COMPLETE authorization tuple (CONTRACT §Coordinated mode): schema_version
+    # AND mode AND merge_gate — a bogus mode is CONTROL_MALFORMED, never silently
+    # downgraded to human.
+    if printf '%s' "$W_CTL" | jq -e '.schema_version == 1 and (.mode == "human" or .mode == "coordinated") and .merge_gate == "human-direct"' >/dev/null 2>&1; then
+      W_CTL_MODE=$(printf '%s' "$W_CTL" | jq -r '.mode')
     else
       coord_fatal CONTROL_MALFORMED "watch:control" ".pipeline/$W_FEATURE/control.json" "control.json malformed or violates schema (schema_version/mode/merge_gate)" "inspect .pipeline/$W_FEATURE/control.json on origin/$BRANCH"
     fi
@@ -1396,7 +1473,9 @@ deliver_herdr() {
   ledger_write "$SEQ" "$OBSERVED_COMMIT" "$role" "$pane" "$cmdname" pending \
     || coord_fatal LEDGER_CORRUPT "watch:dispatch:ledger" "$(ledger_path)" "atomic pending ledger write failed" "check $W_FEATDIR"
   envelope="repo=$workdir branch=$BRANCH feature=$W_FEATURE expected_seq=$SEQ expected_commit=$OBSERVED_COMMIT"
-  if ! bounded_run_ms "$((STAGE_TIMEOUT_SECS*1000))" herdr pane run "$pane" "$cmd $envelope" 2>/dev/null; then
+  # Typing is a fast CLI call — bound it by the transport budget, not the stage
+  # budget (a wedged daemon must not hold dispatch for STAGE_TIMEOUT_SECS).
+  if ! bounded_run_ms "$PANE_LIST_TIMEOUT_MS" herdr pane run "$pane" "$cmd $envelope" >/dev/null 2>&1; then
     coord_fatal HERDR_SEND_FAILED "watch:dispatch:send:$role" "$pane" "herdr pane run exited nonzero (command name: $cmdname)" "inspect the pane; resume after the transport is healthy"
   fi
   ledger_write "$SEQ" "$OBSERVED_COMMIT" "$role" "$pane" "$cmdname" sent "$(date +%s)" \
@@ -1434,12 +1513,17 @@ deliver_impl_span() {
   ledger_write "$SEQ" "$OBSERVED_COMMIT" "$role" "$pane" "drive.sh" pending \
     || coord_fatal LEDGER_CORRUPT "watch:dispatch:ledger" "$(ledger_path)" "atomic pending ledger write failed" "check $W_FEATDIR"
   local dcfg="$W_FEATDIR/drive.config.$$"
-  printf 'WORKDIR=%s\nBRANCH=%s\nFEATURE=%s\nIMPL_TRANSPORT=herdr\nHERDR_PANE_ID=%s\nIMPL_SLASH_CMD=%s\nCARD_TIMEOUT=%s\n' \
-    "$OBSERVER_WORKDIR" "$BRANCH" "$W_FEATURE" "$pane" "$PI_IMPL_CMD" "$STAGE_TIMEOUT_SECS" \
+  # Values are single-quoted (with '\'' escaping) — a command prefix with spaces or
+  # '$' must survive drive.sh's `source` verbatim; DRIVE_DEFAULTS is pointed at
+  # /dev/null so the operator's global drive.defaults can never leak into a
+  # coordinated span (determinism: the generated config is the whole config).
+  _sq() { printf "%s" "$1" | sed "s/'/'\\\\''/g"; }
+  printf "WORKDIR='%s'\nBRANCH='%s'\nFEATURE='%s'\nIMPL_TRANSPORT=herdr\nHERDR_PANE_ID='%s'\nIMPL_SLASH_CMD='%s'\nCARD_TIMEOUT='%s'\nPOLL_SECS='%s'\n" \
+    "$(_sq "$OBSERVER_WORKDIR")" "$(_sq "$BRANCH")" "$(_sq "$W_FEATURE")" "$(_sq "$pane")" "$(_sq "$PI_IMPL_CMD")" "$(_sq "$STAGE_TIMEOUT_SECS")" "$(_sq "$POLL_SECS")" \
     | atomic_write "$dcfg" 600 || coord_fatal LEDGER_CORRUPT "watch:dispatch:drive.config" "$dcfg" "could not write drive.config" "check $W_FEATDIR"
-  local out rc
-  if out=$(bounded_run_ms "$((STAGE_TIMEOUT_SECS*1000))" "$HERE/drive.sh" "$dcfg" 2>&1); then :; fi
-  rc=$?
+  unset -f _sq
+  local out="" rc=0
+  out=$(bounded_run_ms "$((STAGE_TIMEOUT_SECS*1000))" env DRIVE_DEFAULTS=/dev/null "$HERE/drive.sh" "$dcfg" 2>&1) || rc=$?
   rm -f -- "$dcfg" 2>/dev/null || true
   # drive.sh rc 0 ⇒ span ran; reconcile the (possibly advanced) journal next cycle.
   # nonzero ⇒ drive.sh halted at a stop-point; surface a bounded sanitized excerpt.
@@ -1463,12 +1547,29 @@ reconcile_once() {
   [ "$W_STOPPING" = 1 ] && return 0
   coord_fetch
   coord_read_feature
-  # observe-only: no active coordinated feature.
+  # observe-only: no active coordinated feature. AUTOMATION_AUTH_CHANGED (§6):
+  # a feature that ALREADY has coordinated state (a ledger from a prior dispatch)
+  # whose control.json disappears or drops to human mode is NOT a pause — fatal.
   if [ -z "$W_FEATURE" ] || [ "$W_CTL_MODE" != coordinated ]; then
-    if [ "$W_LAST_COMMIT" != "$OBSERVED_COMMIT" ]; then
-      A_EVENT="observed"; A_COMMIT="$OBSERVED_COMMIT"; A_FEATURE="$W_FEATURE"; audit_or_die "$W_FEATDIR"; A_EVENT=""; A_COMMIT=""; A_FEATURE=""
-      W_LAST_COMMIT=$OBSERVED_COMMIT
+    # The check must work ACROSS RESTARTS: compute the would-be feature state dir
+    # even when this process never set W_FEATDIR up (the downgrade may have
+    # happened while no watcher ran).
+    local _chk="$W_FEATDIR"
+    if [ -n "$W_FEATURE" ] && { [ -z "$_chk" ] || [ "${_chk##*/}" != "$W_FEATURE" ]; }; then
+      local _rk; _rk=$(repo_key_from "$OBSERVER_WORKDIR" 2>/dev/null) || _rk=""
+      [ -n "$_rk" ] && _chk="$(state_root)/$_rk/$W_FEATURE" || _chk=""
     fi
+    if [ -n "$W_FEATURE" ] && [ -n "$_chk" ] && [ -f "$_chk/ledger.json" ]; then
+      W_FEATDIR="$_chk"   # so the fatal's audit/halt land in the feature's state dir
+      coord_fatal AUTOMATION_AUTH_CHANGED "watch:control" ".pipeline/$W_FEATURE/control.json" \
+        "the feature has coordinated dispatch state (a ledger) but control.json no longer authorizes coordinated mode (now: ${W_CTL_MODE})" \
+        "restore .pipeline/$W_FEATURE/control.json on origin/$BRANCH, or resolve the feature by human relay and resume"
+    fi
+    # No state dir yet in observe mode — nothing to audit into; stay quiet.
+    if [ -n "$_chk" ] && [ -d "$_chk" ] && [ "$W_LAST_COMMIT" != "$OBSERVED_COMMIT" ]; then
+      A_EVENT="observed"; A_COMMIT="$OBSERVED_COMMIT"; audit_or_die "$_chk"; A_EVENT=""; A_COMMIT=""
+    fi
+    W_LAST_COMMIT=$OBSERVED_COMMIT
     W_PHASE=observe; return 0
   fi
   coord_read_tail
@@ -1500,10 +1601,15 @@ reconcile_once() {
   dispatch_transition
 }
 
-# dispatch_transition — classify the current tail and act (§7/§13).
+# dispatch_transition — classify the current tail and act (§7/§13/§15).
 dispatch_transition() {
   route_classify "$FROM" "$TO" "$STATUS" "$NEXT_KIND" \
     || coord_fatal "$ROUTE_ERRCODE" "watch:route" "transition=$FROM->$TO status=$STATUS next=$NEXT_KIND" "$ROUTE_ERRMSG" "inspect the journal tail for .pipeline/$W_FEATURE on origin/$BRANCH"
+  # §15 mechanical card evidence for the classified kind.
+  local _vkind="$DECISION_KIND"
+  [ "$DECISION_KIND" = dispatch ] && _vkind="$NEXT_KIND"
+  cards_validate "$_vkind"
+  [ -z "$CARD_ERR" ] || coord_fatal CARD_STATE_INVALID "watch:route:cards" "transition=$FROM->$TO next=$NEXT_KIND" "$CARD_ERR" "inspect .pipeline/$W_FEATURE/tasks/ on origin/$BRANCH — the journal and the card state disagree"
   case "$DECISION_KIND" in
     complete)
       A_EVENT="completed"; A_SEQ="$SEQ"; A_COMMIT="$OBSERVED_COMMIT"; A_TRANSITION="$FROM->$TO"; audit_or_die "$W_FEATDIR"
@@ -1558,8 +1664,12 @@ setup_feature_state() {
   W_REPOROOT=$(state_root)
   W_FEATDIR="$W_REPOROOT/$W_RKEY/$W_FEATURE"
   state_setup_dirs "$W_FEATDIR" || coord_fatal CONFIG_INVALID "watch:state" "$W_FEATDIR" "state dir setup refused: $STATE_SETUP_ERR" "point STATE_DIR at a creatable, non-symlinked directory"
-  # an unresolved halt blocks watch — resume is the only bypass.
-  if [ -e "$W_FEATDIR/halt.json" ] && [ ! -L "$W_FEATDIR/halt.json" ]; then
+  # an unresolved halt blocks watch — resume is the only bypass. A SYMLINKED
+  # halt.json is never read or silently skipped: it is a §19 violation of its own.
+  if [ -L "$W_FEATDIR/halt.json" ]; then
+    coord_fatal CONFIG_INVALID "watch:halt" "$W_FEATDIR/halt.json" "halt.json is a symlink — §19 forbids symlinked state paths" "remove the symlink; restore halt.json as a regular file (or remove it via resume)"
+  fi
+  if [ -e "$W_FEATDIR/halt.json" ]; then
     local code; code=$(jq -r '.code // "HALTED"' "$W_FEATDIR/halt.json" 2>/dev/null || echo HALTED)
     coord_fatal "$code" "watch:halt" "$W_FEATDIR/halt.json" "an unresolved halt.json is present ($code) — plain watch cannot bypass it" "run \`coordinate.sh resume --config $CONF --reason <text>\` after fixing the recorded condition"
   fi
@@ -1574,7 +1684,7 @@ setup_feature_state() {
   # startup with a pending ledger ⇒ DELIVERY_AMBIGUOUS (design §13; never auto-resolve).
   local d; d=$(ledger_get delivery 2>/dev/null || echo "")
   if [ "$d" = pending ]; then
-    coord_fatal DELIVERY_AMBIGUOUS "watch:startup" "$(ledger_path)" "ledger is in the ambiguous `pending` state — the write-ahead mark survived a restart" "run \`coordinate.sh resume --config $CONF --reason <text> --pending retry|mark-sent\` after inspecting the pane"
+    coord_fatal DELIVERY_AMBIGUOUS "watch:startup" "$(ledger_path)" "ledger is in the ambiguous 'pending' state — the write-ahead mark survived a restart" "run \`coordinate.sh resume --config $CONF --reason <text> --pending retry|mark-sent\` after inspecting the pane"
   fi
   A_EVENT="watch_started"; audit_or_die "$W_FEATDIR"; A_EVENT=""
 }
@@ -1596,11 +1706,9 @@ cmd_watch() {
   done
   coord_watch_panes
   trap 'W_STOPPING=1' INT TERM
-  local cycles=0 max=${COORD_WATCH_MAX_CYCLES:-0}
   while [ "$W_STOPPING" != 1 ]; do
     reconcile_once
-    cycles=$((cycles+1))
-    if [ "$max" -gt 0 ] && [ "$cycles" -ge "$max" ]; then break; fi
+    [ "$W_STOPPING" = 1 ] && break
     sleep "$POLL_SECS" 2>/dev/null || sleep 1
   done
   if [ "$W_STOPPING" = 1 ] && [ -n "${W_FEATURE:-}" ] && [ -n "${W_FEATDIR:-}" ]; then
@@ -1658,7 +1766,7 @@ cmd_resume() {
             || coord_die LEDGER_CORRUPT "resume:pending" "$(ledger_path)" "ledger mark-sent failed" "check $W_FEATDIR"
           A_EVENT="resume"; A_RESULT="pending=mark-sent (enter WAITING)"; A_NEXT_ACTION="start watch"; audit_commit "$W_FEATDIR" 2>/dev/null || true; A_EVENT=""; A_RESULT=""; A_NEXT_ACTION="" ;;
         *)
-          coord_die DELIVERY_AMBIGUOUS "resume:pending" "$(ledger_path)" "ledger is `pending`; resume requires exactly one of --pending retry | --pending mark-sent" "inspect the pane transcript, then re-run resume with the chosen flag" ;;
+          coord_die DELIVERY_AMBIGUOUS "resume:pending" "$(ledger_path)" "ledger is 'pending'; resume requires exactly one of --pending retry | --pending mark-sent" "inspect the pane transcript, then re-run resume with the chosen flag" ;;
       esac
     fi
     # clear halt.json (preflight passing IS the guard for most codes) + audit.
