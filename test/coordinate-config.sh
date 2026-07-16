@@ -102,6 +102,55 @@ sed -i.bak -e "s#^CC_WORKDIR=.*#CC_WORKDIR=$T/obs#" \
         -e "s#^CODEX_WORKDIR=.*#CODEX_WORKDIR=$T/obs#" "$T/cfg"; rm -f "$T/cfg.bak"
 assert_code "all workdirs = one clone -> WORKDIR_INVALID" WORKDIR_INVALID "$T"
 
+# ===== (finding 2) four SUBDIRS of one clone are not independent — distinct
+#      realpaths but the same git repo. The old head's realpath-distinct check
+#      passed them; the new head compares git top-level/common-dir identities. =====
+fresh
+git init -q --bare "$T/origin.git"; git clone -q "$T/origin.git" "$T/main" >/dev/null 2>&1
+mkdir -p "$T/main/s1" "$T/main/s2" "$T/main/s3" "$T/main/s4"
+cat > "$T/cfg" <<EOF
+OBSERVER_WORKDIR=$T/main/s1
+BRANCH=main
+CC_WORKDIR=$T/main/s2
+PI_WORKDIR=$T/main/s3
+CODEX_WORKDIR=$T/main/s4
+CC_ARCH_CMD=/pipeline-arch
+CC_TASK_CMD=/pipeline-task
+CC_HUNT_CMD=/pipeline-hunt
+PI_IMPL_CMD=/skill:pipeline-impl
+CODEX_REVIEW_CMD='\$pipeline-review'
+POLL_SECS=30
+PANE_READY_TIMEOUT_MS=60000
+STAGE_TIMEOUT_SECS=2700
+EOF
+assert_code "four subdirs of one clone -> WORKDIR_INVALID" WORKDIR_INVALID "$T"
+
+# ===== (finding 2) WORKTREES of one clone are not independent — each is its own
+#      top-level but they share one git common-dir. The new head's common-dir
+#      pairwise-distinct check catches them; the old head passed them. =====
+fresh
+git init -q --bare "$T/origin.git"; git clone -q "$T/origin.git" "$T/main" >/dev/null 2>&1
+( cd "$T/main"; git checkout -q -b main; printf x > f; git add -A; git commit -qm s )
+git -C "$T/main" worktree add -q "$T/wt1" -b wt1 2>/dev/null
+git -C "$T/main" worktree add -q "$T/wt2" -b wt2 2>/dev/null
+git -C "$T/main" worktree add -q "$T/wt3" -b wt3 2>/dev/null
+cat > "$T/cfg" <<EOF
+OBSERVER_WORKDIR=$T/main
+BRANCH=main
+CC_WORKDIR=$T/wt1
+PI_WORKDIR=$T/wt2
+CODEX_WORKDIR=$T/wt3
+CC_ARCH_CMD=/pipeline-arch
+CC_TASK_CMD=/pipeline-task
+CC_HUNT_CMD=/pipeline-hunt
+PI_IMPL_CMD=/skill:pipeline-impl
+CODEX_REVIEW_CMD='\$pipeline-review'
+POLL_SECS=30
+PANE_READY_TIMEOUT_MS=60000
+STAGE_TIMEOUT_SECS=2700
+EOF
+assert_code "worktrees of one clone -> WORKDIR_INVALID" WORKDIR_INVALID "$T"
+
 # ===== 4. remote mismatch (one clone tracks a different origin) =====
 fresh; seed_clones "$T"; write_cfg "$T"
 git init -q --bare "$T/other.git"
@@ -177,16 +226,19 @@ fresh; seed_clones "$T"; write_cfg "$T"
 printf 'STATE_DIR=%s/state\n' "$T" >> "$T/cfg"
 assert_cfg_ok "STATE_DIR outside clones" "$T"
 
-# ===== (finding 10) every doctor miss carries the FULL §14 tuple: where / input /
-#      next_action (resume_guard where meaningful), not just [CODE] + prose. =====
+# ===== (finding 10) every doctor miss carries the COMPLETE §14 tuple — where /
+#      input / next_action / resume_guard (resume_guard now UNCONDITIONAL) — not
+#      just [CODE] + prose. Must FAIL on the old head, which printed only [CODE] +
+#      a fix: line (no labeled tuple, no resume_guard). =====
 fresh; seed_clones "$T"; write_cfg "$T"
 sed -i.bak 's#^POLL_SECS=.*#POLL_SECS=not-a-num#' "$T/cfg"; rm -f "$T/cfg.bak"
 tuple_out=$(run_doctor "$T")
-if printf '%s' "$tuple_out" | grep -q '\[CONFIG_INVALID\] POLL_SECS not a positive integer' \
+if printf '%s' "$tuple_out" | grep -q '\[CONFIG_INVALID\] reason: POLL_SECS not a positive integer' \
    && printf '%s' "$tuple_out" | grep -q 'where: doctor:config' \
    && printf '%s' "$tuple_out" | grep -q 'input: POLL_SECS' \
-   && printf '%s' "$tuple_out" | grep -q 'next_action: edit'; then
-  ok "§14 tuple present (where/input/next_action) on a config miss"
+   && printf '%s' "$tuple_out" | grep -q 'next_action: edit' \
+   && printf '%s' "$tuple_out" | grep -q 'resume_guard:'; then
+  ok "§14 tuple complete (where/input/next_action/resume_guard) on a config miss"
 else
   bad "§14 tuple" "missing tuple fields; got: $(printf '%s' "$tuple_out" | grep -A1 CONFIG_INVALID | head -4)"
 fi

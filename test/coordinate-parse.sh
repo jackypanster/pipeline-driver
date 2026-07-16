@@ -59,6 +59,17 @@ else
   fail=$((fail+1)); echo "FAIL physical-tail seq=x       -> expected PARSE_ERR=malformed-header, got: $m"
 fi
 
+# --- finding 3: a seq token that is digits followed by a NON-delimiter char
+#      ("7x", "7.5") MUST parse-fail, never truncate to SEQ=7. The old regex
+#      /^[0-9]+([^0-9]|$)/ accepted any non-digit after the prefix.
+m=$(parse "$HERE/fixtures/coord-seq-7x.md")
+if printf '%s' "$m" | grep -q 'PARSE_ERR=malformed-header' \
+   && ! printf '%s' "$m" | grep -q 'SEQ=7;'; then
+  pass=$((pass+1)); echo "ok   seq=7x token            -> PARSE_ERR (not truncated to SEQ=7)"
+else
+  fail=$((fail+1)); echo "FAIL seq=7x token            -> expected PARSE_ERR + SEQ not 7; got: $m"
+fi
+
 # --- finding 4: an EMPTY to-stage ("impl→ · completed") MUST parse-fail. TO is the
 #      token IMMEDIATELY adjacent to the arrow; the parser must NOT scan forward into
 #      the status token and accept "completed" as TO.

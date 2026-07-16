@@ -67,10 +67,11 @@
 
 /^## seq=/ {
     hcount++
-    # seq: ASCII prefix strip. A NON-numeric remainder (e.g. "seq=x") marks this
-    # entry malformed — see the header comment above.
+    # seq: ASCII prefix strip. The complete base-10 token MUST be followed by the
+    # journal field delimiter (a space) or end-of-line — anything else (7x, 7.5,
+    # 7-x) is a malformed sequence, not a truncated "7". (finding: exact seq token.)
     s = $0; sub(/^## seq=/, "", s)
-    if (s ~ /^[0-9]+([^0-9]|$)/) { sub(/[^0-9].*$/, "", s); seq = s; seq_bad = 0 }
+    if (s ~ /^[0-9]+( |$)/) { sub(/[^0-9].*$/, "", s); seq = s; seq_bad = 0 }
     else                          { seq = "";                 seq_bad = 1 }
 
     # status: the keyword that sits right before " · by=" (anchored, so a status

@@ -127,12 +127,47 @@ fresh; seed "$T"
 git -C "$T/codex" checkout -q -b wrong-branch 2>/dev/null || git -C "$T/codex" symbolic-ref HEAD refs/heads/wrong-branch
 assert_code "codex clone not on BRANCH -> REMOTE_MISMATCH" REMOTE_MISMATCH
 
-# ===== (finding 1) globally unique role panes: CC and CODEX pinned to the SAME
-#      pane (distinct clones) -> PANE_UNAUTHORIZED. Defense-in-depth: distinct-
-#      workdirs passes, but the pane collision must still block (design §5/§11). =====
-fresh; seed "$T"
-{ grep -v '^CODEX_PANE_ID=' "$T/cfg"; printf 'CC_PANE_ID=wA:p1\nCODEX_PANE_ID=wA:p1\n'; } > "$T/cfg.new" && mv "$T/cfg.new" "$T/cfg"
-assert_code "CC and CODEX share pane -> PANE_UNAUTHORIZED" PANE_UNAUTHORIZED
+# ===== (finding 1) globally unique role panes — the per-role cwd check CANNOT
+#      catch a pane claimed by two roles when one workdir nests the other: CC_WORKDIR
+#      ($T/repo) is the PARENT of CODEX_WORKDIR ($T/repo/codex), so a pane at the
+#      CODEX cwd is "under" BOTH and discovery resolves it for both roles. Only the
+#      global-uniqueness guard catches the collision. The old head has no guard, so
+#      both roles resolve the same pane and doctor exits 0. =====
+fresh
+rm -rf "$T"; mkdir -p "$T"
+git init -q --bare "$T/origin.git"
+for c in obs repo pi; do git clone -q "$T/origin.git" "$T/$c" >/dev/null 2>&1; done
+git clone -q "$T/origin.git" "$T/repo/codex" >/dev/null 2>&1   # independent clone nested in repo's worktree
+for c in obs repo pi repo/codex; do git -C "$T/$c" symbolic-ref HEAD refs/heads/main; done
+( cd "$T/obs"; git checkout -q -b main
+  mkdir -p .pipeline/hello-cli
+  printf '{"feature":"hello-cli","stage":"impl"}' > .pipeline/current.json
+  printf '{"schema_version":1,"mode":"coordinated","merge_gate":"human-direct"}' > .pipeline/hello-cli/control.json
+  cp "$HERE/fixtures/coord-impl-impl.md" .pipeline/hello-cli/journal.md
+  git add -A && git commit -qm seed && git push -q origin main )
+cat > "$T/cfg" <<EOF
+OBSERVER_WORKDIR=$T/obs
+BRANCH=main
+CC_WORKDIR=$T/repo
+PI_WORKDIR=$T/pi
+CODEX_WORKDIR=$T/repo/codex
+CC_ARCH_CMD=/pipeline-arch
+CC_TASK_CMD=/pipeline-task
+CC_HUNT_CMD=/pipeline-hunt
+PI_IMPL_CMD=/skill:pipeline-impl
+CODEX_REVIEW_CMD='\$pipeline-review'
+POLL_SECS=30
+PANE_READY_TIMEOUT_MS=60000
+STAGE_TIMEOUT_SECS=2700
+EOF
+cat > "$T/list.json" <<EOF
+{"result":{"panes":[
+  {"pane_id":"wX:p1","agent":"claude","agent_status":"idle","cwd":"$T/repo/codex","foreground_cwd":"$T/repo/codex"},
+  {"pane_id":"wY:p1","agent":"pi","agent_status":"idle","cwd":"$T/pi","foreground_cwd":"$T/pi"}
+]}}
+EOF
+stub_herdr "$T"
+assert_code "nested-workdir shared pane -> PANE_UNAUTHORIZED" PANE_UNAUTHORIZED
 
 # ===== 2. missing pane (no agent-bearing pane in the CODEX workdir) =====
 fresh; seed "$T"
@@ -143,12 +178,15 @@ cat > "$T/list.json" <<EOF
 ]}}
 EOF
 assert_code "missing CODEX pane -> PANE_NOT_FOUND" PANE_NOT_FOUND
-# (finding 10) that pane miss MUST carry the §14 tuple (where/input/next_action).
+# (finding 10) that pane miss MUST carry the COMPLETE §14 tuple —
+# where/input/next_action/resume_guard. resume_guard is the new unconditional field
+# (absent on the old head).
 tup=$(run_doctor)
 if printf '%s' "$tup" | grep -q 'where: doctor:panes:CODEX' \
    && printf '%s' "$tup" | grep -q 'input:' \
-   && printf '%s' "$tup" | grep -q 'next_action:'; then
-  ok "§14 tuple present on doctor pane miss (where/input/next_action)"
+   && printf '%s' "$tup" | grep -q 'next_action:' \
+   && printf '%s' "$tup" | grep -q 'resume_guard:'; then
+  ok "§14 tuple complete on doctor pane miss (where/input/next_action/resume_guard)"
 else
   bad "§14 tuple (doctor pane)" "got: $(printf '%s' "$tup" | grep -A1 PANE_NOT_FOUND | head -4)"
 fi
@@ -219,6 +257,25 @@ if [ "$hr_rc" -eq 0 ] \
   ok "human + missing journal -> informational (rc=0, no JOURNAL_MALFORMED)"
 else
   bad "human + missing journal" "rc=$hr_rc; expected rc=0 + no JOURNAL_MALFORMED + 'no journal.md' warn; got: $(printf '%s' "$hr_out" | grep -i 'journal\|doctor:' | head -6)"
+fi
+
+# ===== (finding 4) doctor must validate the feature slug BEFORE output or git-show.
+#      A current.json whose feature decodes to a newline + a forged MISS line was
+#      printed verbatim (and used in show_remote paths) on the old head; the new head
+#      rejects it with CONFIG_INVALID and never prints the forged content. =====
+fresh; seed "$T"
+( cd "$T/obs"
+  printf '{"feature":"x\\nMISS [FAKE_CODE] forged","stage":"impl"}' > .pipeline/current.json
+  git commit -aqm badfeat && git push -q origin main )
+f4=$(run_doctor); f4rc=$?
+if [ "$f4rc" -ne 0 ] \
+   && printf '%s' "$f4" | grep -q '\[CONFIG_INVALID\]' \
+   && printf '%s' "$f4" | grep -q 'where: doctor:feature' \
+   && ! printf '%s' "$f4" | grep -q 'FAKE_CODE' \
+   && ! printf '%s' "$f4" | grep -q 'forged'; then
+  ok "doctor feature-slug injection -> CONFIG_INVALID (forged MISS not printed)"
+else
+  bad "doctor feature slug" "rc=$f4rc; expected CONFIG_INVALID + doctor:feature + no FAKE_CODE/forged; got: $(printf '%s' "$f4" | grep -iE 'feature|fake|forged|config_invalid|current.json carries' | head -5)"
 fi
 
 echo "----"

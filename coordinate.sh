@@ -66,37 +66,66 @@ coord_die() {
 note() { printf '%s\n' "$*" >&2; }
 
 # ---- remote-identity normalization (design §11/§13/§19) ------------------------
-# redact_remote <url>: strip credential userinfo (user[:password]@) from a remote
-# URL for SAFE display. Keeps the scheme. Used on EVERY diagnostic/output path so a
-# secret embedded as https://alice:ghp_SECRET@host/... can never reach stderr/
-# stdout or a derived key (§14 sanitized-input / §19; finding: credential sanitize).
-redact_remote() {
-  printf '%s' "$1" | sed -E 's#(^[a-zA-Z][a-zA-Z0-9+.-]*://)?[A-Za-z0-9._~%+-]+(:[^@/]*)?@#\1#'
+# strip_userinfo <url>: remove the URL userinfo component (everything up to and
+# including the LAST '@') from the AUTHORITY section — greedy and character-class-
+# FREE, so a password containing URI sub-delims (! $ & ' ( ) * + , ; =) or . _ ~ % -
+# can never survive into a normalized identity, key, or diagnostic. Works for any
+# scheme AND the scheme-less scp-like user@host:path form. (findings: credential
+# sanitize + port/path collision.)
+strip_userinfo() {
+  printf '%s' "$1" | perl -ne '
+    chomp;
+    my ($s, $rest) = m{^([a-zA-Z][a-zA-Z0-9+.\-]*://)(.*)$} ? ($1,$2) : ("",$_);
+    my ($auth, $tail) = $rest =~ m{^([^/]*)(.*)$} ? ($1,$2) : ($rest,"");
+    $auth =~ s/^.*\@//;          # drop userinfo through the terminal @
+    print "$s$auth$tail\n";
+  '
 }
 
+# redact_remote <url>: safe-to-print form — keeps the scheme, drops userinfo.
+# Used on EVERY diagnostic/output path so https://alice:ghp_SECRET@host/... can
+# never reach stderr/stdout or a derived key (§14 sanitized-input / §19).
+redact_remote() { strip_userinfo "$1"; }
+
 # normalize_remote <url>: map https / ssh / scp-like forms of the SAME remote to
-# ONE canonical key — scheme-stripped, userinfo-stripped FIRST, .git-stripped,
-# scp-colon -> /, host lowercased; path case preserved. Credential stripping runs
-# before everything else so the derived §13 repo key never carries a secret.
-# Verified forms:
-#   https://alice:secret@github.com/acme/x.git   ssh://git@github.com/acme/x.git
+# ONE canonical identity. The scp host:path colon is turned into '/' ONLY for the
+# scheme-less scp-like form (so an ssh:// port like host:2222 is NOT conflated with
+# a path /2222); scheme-bearing URLs keep their host:port colon. Verified forms:
+#   https://alice:secret@github.com/acme/x.git   ssh://git@github.com:2222/a/x.git
 #   git@github.com:acme/x.git                     https://github.com/acme/x
-# all -> github.com/acme/x
+# all -> github.com/acme/x   (ssh ...:2222 keeps the :2222, distinct from /2222)
 normalize_remote() {
-  printf '%s' "$1" \
-    | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[A-Za-z0-9._~%+-]+(:[^@/]*)?@##; s#\.git$##; s#([^/]*):#\1/#' \
-    | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }'
+  local url has_scheme
+  url=$(strip_userinfo "$1")
+  case "$url" in
+    *://*) has_scheme=1; url=${url#*://} ;;   # ssh://host[:port]/path / https://host/path
+    *)     has_scheme=0 ;;                       # scp-like host:path OR a local filesystem path
+  esac
+  url=${url%.git}
+  if [ "$has_scheme" = "0" ]; then
+    url=$(printf '%s' "$url" | sed -E 's#([^/]*):#\1/#')   # scp host:path -> host/path
+  fi
+  printf '%s' "$url" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }'
+}
+
+# identity_has_dotseg <identity>: 0 (true) if it is empty or contains a '.'/'..'
+# segment — such identities are REJECTED because the repo key would escape the
+# state root (e.g. remote ".." -> repodir $root/..).
+identity_has_dotseg() {
+  printf '%s' "$1" | awk -F/ '{for(i=1;i<=NF;i++) if($i=="."||$i==".."){f=1}} END{exit f?0:1}'
 }
 
 # repo_key_from <workdir> — single-segment, COLLISION-SAFE key from origin.url.
-# The normalized identity is percent-encoded (jq @uri) so structural separators are
-# preserved: github.com/a/b_c and github.com/a_b/c map to DIFFERENT keys (finding:
-# collision-safe key). Empty on failure.
+# The normalized identity is percent-encoded (jq @uri) so structural separators
+# survive injectively (host:port vs host/path, a/b_c vs a_b/c). Identities with '.'
+# or '..' segments are rejected (empty output, return 1).
 repo_key_from() {
-  local url
+  local url norm
   url=$(git -C "$1" config --get remote.origin.url 2>/dev/null) || url=""
   [ -n "$url" ] || return 1
-  normalize_remote "$url" | jq -rR '@uri'
+  norm=$(normalize_remote "$url")
+  identity_has_dotseg "$norm" && return 1
+  printf '%s' "$norm" | jq -rR '@uri'
 }
 
 state_root() {
@@ -135,13 +164,14 @@ is_pos_int() {  # <value>
 
 # valid_feature_slug <slug> — 0 iff <slug> is safe to use as a SINGLE path
 # component under the repo state dir. Rejects empty, '.', '..', any '/', leading
-# '-', whitespace, control chars, and anything outside [A-Za-z0-9._-] — so a
-# malicious feature read from HEAD's current.json (or a tampered state subdir)
-# can never traverse into another repo/feature state namespace (finding: slug).
+# '-', newline/tab/CR (grep is line-based, so an embedded newline would otherwise
+# let a forged second line pass the allowlist), and anything outside
+# [A-Za-z0-9._-] — so a malicious feature read from HEAD's current.json (or a
+# tampered state subdir) can never traverse or inject forged output. (finding: slug.)
 valid_feature_slug() {
   local s=$1
   [ -n "$s" ] || return 1
-  case "$s" in -*|*/*|*".."*) return 1 ;; esac
+  case "$s" in -*|*/*|*".."*|*$'\n'*|*$'\t'*|*$'\r'*) return 1 ;; esac
   printf '%s' "$s" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
 }
 
@@ -184,9 +214,13 @@ bounded_run_ms() {
     ualarm(int($ms * 1000));
     waitpid($pid, 0);
     my $rc = $? >> 8;
+    my $sig = $? & 127;
     $armed = 0; ualarm(0);        # disarm: the leader exited of its own accord
     $drain->();                   # but a descendant may still hold stdout
-    exit $rc;
+    # Propagate a signal death as 128+signal (nonzero) — a child that printed
+    # plausible output and then crashed (e.g. self-SIGTERM) MUST NOT report rc=0,
+    # or a caller could authorize off truncated output ($? >> 8 alone yields 0).
+    exit($sig ? 128 + $sig : $rc);
   ' -- "$ms" "$@"
 }
 
@@ -237,6 +271,35 @@ validate_config() {
   _cfg_distinct CC      CODEX  "$rp_cc"  "$rp_cx"
   _cfg_distinct PI      CODEX  "$rp_pi"  "$rp_cx"
   unset -f _cfg_distinct
+  # 1c. workdirs must be INDEPENDENT clones, not just distinct paths — each must be
+  # its own repo TOP-LEVEL (catches subdirs of one clone) and the four must share NO
+  # git common-dir (catches subdirs AND worktrees of one clone). (finding: independent
+  # clones.) The realpath check above is fooled by four subdirs of one clone.
+  local _tl _rpwd _cd_obs _cd_cc _cd_pi _cd_cx
+  _common_dir_of() { git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null; }
+  for wdvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
+    wd="${!wdvar:-}"
+    [ -d "$wd" ] && git -C "$wd" rev-parse --git-dir >/dev/null 2>&1 || continue
+    _tl=$(git -C "$wd" rev-parse --show-toplevel 2>/dev/null || echo "")
+    _rpwd=$(resolve_path "$wd")
+    if [ -n "$_tl" ] && [ -n "$_rpwd" ] && [ "$(resolve_path "$_tl")" != "$_rpwd" ]; then
+      cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar ($wd) is not its own repo top-level (git toplevel: $_tl) — subdir of another clone/worktree is not an independent clone"
+    fi
+    case "$wdvar" in
+      OBSERVER_WORKDIR) _cd_obs=$(_common_dir_of "$wd") ;;
+      CC_WORKDIR)       _cd_cc=$(_common_dir_of "$wd") ;;
+      PI_WORKDIR)       _cd_pi=$(_common_dir_of "$wd") ;;
+      CODEX_WORKDIR)    _cd_cx=$(_common_dir_of "$wd") ;;
+    esac
+  done
+  _cd_distinct() { if [ -n "$3" ] && [ -n "$4" ] && [ "$3" = "$4" ]; then cfg_violation WORKDIR_INVALID "$1/$2" "$1 and $2 share the same git common-dir ($3) — not independent clones (subdirs or worktrees of one clone)"; fi; }
+  _cd_distinct OBSERVER CC    "$_cd_obs" "$_cd_cc"
+  _cd_distinct OBSERVER PI    "$_cd_obs" "$_cd_pi"
+  _cd_distinct OBSERVER CODEX "$_cd_obs" "$_cd_cx"
+  _cd_distinct CC      PI     "$_cd_cc"  "$_cd_pi"
+  _cd_distinct CC      CODEX  "$_cd_cc"  "$_cd_cx"
+  _cd_distinct PI      CODEX  "$_cd_pi"  "$_cd_cx"
+  unset -f _cd_distinct _common_dir_of
   # 2. remote-identity agreement across all four clones that resolved above.
   norm=""; ok_abs=1
   for wdvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
@@ -247,7 +310,14 @@ validate_config() {
     if [ "$ok_abs" = "1" ]; then
       url=$(git -C "$wd" config --get remote.origin.url 2>/dev/null) || url=""
       if [ -z "$url" ]; then cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar has no remote.origin.url"
-      elif [ -z "$norm" ]; then norm=$(normalize_remote "$url")
+      elif [ -z "$norm" ]; then
+        norm=$(normalize_remote "$url")
+        # reject identities with '.'/'..' segments — the repo key would escape the
+        # state root (e.g. remote ".." -> repodir $root/..). (finding: dot-segment key)
+        if identity_has_dotseg "$norm"; then
+          cfg_violation CONFIG_INVALID "$wdvar" "$wdvar normalizes to an identity with a '.'/'..' segment ($norm) — refused as a repo-state key"
+          norm=""
+        fi
       elif [ "$(normalize_remote "$url")" != "$norm" ]; then
         cfg_violation REMOTE_MISMATCH "$wdvar" "$wdvar remote ($(redact_remote "$url")) != observer ($norm)"
       fi
@@ -355,13 +425,16 @@ cmd_doctor() {
   d_warn() { printf 'warn  %s\n      %s\n' "$1" "$2"; warn=$((warn+1)); }
   d_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; bad=$((bad+1)); }
   # d_code <CODE> <where> <input> <reason> <next_action> [resume_guard] — drive.sh
-  # d_miss shape with the FULL §14 tuple (where/input/reason/next_action, plus
-  # resume_guard where meaningful) so a caller can match the exact failure AND a
-  # human has every field the fail-fast contract requires (finding: §14 tuple).
+  # d_miss shape with the FULL §14 tuple, ALWAYS including resume_guard (the 6th
+  # arg defaults to the standard "fix, then re-doctor; resume never bypasses it" so
+  # every MISS carries all five named fields the fail-fast contract requires).
+  # (finding: §14 tuple — complete + unconditional resume_guard.)
   d_code() {
-    printf 'MISS  [%s] %s\n' "$1" "$4"
-    printf '      where: %s | input: %s | next_action: %s\n' "$2" "$3" "$5"
-    [ -n "${6:-}" ] && printf '      resume_guard: %s\n' "$6"
+    printf 'MISS  [%s] reason: %s
+' "$1" "$4"
+    printf '      where: %s | input: %s | next_action: %s | resume_guard: %s
+' \
+      "$2" "$3" "$5" "${6:-fix the above, then re-run \`coordinate.sh doctor --config <cfg>\`; resume never bypasses it}"
     bad=$((bad+1))
   }
 
@@ -386,6 +459,16 @@ cmd_doctor() {
   else
     d_ok "config valid ($CONF): workdirs/remote/branch/commands/timeouts all pass §11"
   fi
+  # Runtime watchdog knobs (env): MUST be positive integers. ualarm(0) on a zero/
+  # non-positive budget DISABLES the watchdog (finding: bounded knobs), so a wedged
+  # Herdr daemon would hang preflight. Reject them up front.
+  local _k _v
+  for _k in AUTH_TIMEOUT_MS PANE_LIST_TIMEOUT_MS; do
+    _v="${!_k:-}"
+    if ! is_pos_int "$_v"; then
+      d_code CONFIG_INVALID "doctor:config" "$_k=$_v" "$_k is not a positive integer (a zero/non-positive budget would disable the bounded-exec watchdog)" "unset $_k for the default, or set COORD_${_k} to a positive millisecond budget"
+    fi
+  done
 
   # Downstream sections read the clones; skip them if any workdir is unusable.
   # (NB: do NOT use `_` as the loop var — bash overwrites it with each command's
@@ -440,6 +523,16 @@ cmd_doctor() {
         d_warn ".pipeline/current.json unreadable (cache; treated as no active feature)" "non-fatal — current.json is a cache (design §2)"
       else
         FEATURE=$(printf '%s' "$CUR" | jq -r '.feature // empty' 2>/dev/null) || FEATURE=""
+        # The feature slug is UNTRUSTED (read from the remote current.json) and is
+        # used in `git show` paths and output — validate it BEFORE any use so a
+        # crafted slug ('..', '/', newline + forged MISS text) can neither traverse
+        # nor inject forged diagnostic lines. (finding: doctor feature slug.)
+        if [ -n "$FEATURE" ] && ! valid_feature_slug "$FEATURE"; then
+          d_code CONFIG_INVALID "doctor:feature" "<redacted-slug>" \
+            "feature slug from .pipeline/current.json on origin/$BRANCH is malformed or unsafe (must be a simple name [A-Za-z0-9][A-Za-z0-9._-]*)" \
+            "inspect .pipeline/current.json on origin/$BRANCH; do not pass the raw value to any path"
+          FEATURE=""
+        fi
         [ -n "$FEATURE" ] && d_ok "active feature: $FEATURE" || d_info "current.json carries no .feature (human mode / idle)"
       fi
 
@@ -575,16 +668,19 @@ _state_assert_file() {
   if [ "$perm" = "600" ]; then d_ok "$label file 0600 ($p)"
   else d_code CONFIG_INVALID "doctor:state" "$p" "$label file mode is ${perm:-?} (expected 0600) — §19" "chmod 600 $p"; fi
 }
-# ledger_schema_problem <file> — echoes the first missing/invalid §13 schema field
-# (feature / journal_seq / journal_commit[40-hex] / target_role / pane / delivery ∈
-# pending|sent|waiting), or "" if the ledger carries the full schema.
+# ledger_schema_problem <file> — echoes the first missing/invalid §13 record
+# field, or "" if the ledger is complete: feature / journal_seq (INTEGER) /
+# journal_commit (40-hex) / target_role ∈ CC|PI|CODEX / pane / command NAME /
+# delivery ∈ pending|sent|waiting. Fractional seqs, unknown roles, and a missing
+# command name are all corrupt. (finding: full §13 ledger schema.)
 ledger_schema_problem() {
   jq -r '
     if (.feature | type) != "string" or .feature == "" then "missing .feature"
-    elif (.journal_seq | type) != "number" then "missing/invalid .journal_seq"
+    elif (.journal_seq | type) != "number" or (.journal_seq | floor) != .journal_seq then "missing/invalid .journal_seq (need integer)"
     elif (.journal_commit | type) != "string" or (.journal_commit | test("^[0-9a-f]{40}$") | not) then "missing/invalid .journal_commit (need 40-hex)"
-    elif (.target_role | type) != "string" or .target_role == "" then "missing .target_role"
+    elif (.target_role | type) != "string" or (.target_role | IN("CC","PI","CODEX") | not) then "missing/invalid .target_role (need CC|PI|CODEX)"
     elif (.pane | type) != "string" or .pane == "" then "missing .pane"
+    elif (.command | type) != "string" or .command == "" then "missing .command (command name)"
     elif (.delivery | type) != "string" or (.delivery | IN("pending","sent","waiting") | not) then "missing/invalid .delivery (need pending|sent|waiting)"
     else "" end
   ' "$1" 2>/dev/null
@@ -596,11 +692,30 @@ coord_doctor_state() {
   rkey=$(repo_key_from "$OBSERVER_WORKDIR" 2>/dev/null) || rkey=""
   repodir="$root/${rkey:-<unknown>}"
   if [ ! -d "$root" ]; then
-    d_info "state root not created yet: $root (created 0700 on first write; design §13)"
+    # Distinguish "absent" (fine — created on first write) from a dangling
+    # symlink or a non-directory entry at the state root (BLOCKING). (finding:
+    # dangling/state-root type.)
+    if [ -L "$root" ] || [ -e "$root" ]; then
+      d_code CONFIG_INVALID "doctor:state" "$root" "state root is a symlink (dangling or not) or a non-directory entry — cannot treat as uninitialized" "remove $root (or point STATE_DIR at a real directory)"
+    else
+      d_info "state root not created yet: $root (created 0700 on first write; design §13)"
+    fi
     return
   fi
   d_ok "state root exists: $root"
-  _state_assert_dir "$root" "$root" "state root"          # 0700, no symlinks
+  _state_assert_dir "$root" "$root" "state root"          # 0700, root itself not a symlink
+  # Validate every EXISTING PARENT component up to / — a symlinked parent ABOVE the
+  # configured root would redirect the whole state tree elsewhere. _state_assert_dir
+  # only walks DOWN to the root boundary, so the parent chain is checked separately.
+  # (finding: symlinked state parents.)
+  local _p; _p=$(dirname "$root")
+  while [ "$_p" != "/" ] && [ -n "$_p" ]; do
+    if [ -L "$_p" ]; then
+      d_code CONFIG_INVALID "doctor:state" "$root" "parent of state root ($_p) is a symlink — §19 forbids symlinked state parents" "remove the symlink $_p or point STATE_DIR outside a symlinked tree"
+      break
+    fi
+    _p=$(dirname "$_p")
+  done
   if [ -d "$repodir" ]; then
     _state_assert_dir "$repodir" "$root" "repo state"
     # feature subdirs: 0700, real (no symlinks).
@@ -633,8 +748,10 @@ coord_doctor_state() {
       d_warn "watch lock present ($st): $lockd" $([ "$st" = stale ] && echo "resume clears a stale lock after preflight" || echo "a watch is running — that is expected")
     fi
     # ledger.json integrity (§13 schema, not just valid JSON): feature / journal_seq
-    # / full 40-hex commit / target_role / pane / delivery ∈ pending|sent|waiting.
-    local led ffeat jerr prob
+    # / full 40-hex commit / target_role ∈ CC|PI|CODEX / pane / command name /
+    # delivery ∈ pending|sent|waiting, AND the ledger .feature must match its
+    # directory name. (finding: full §13 ledger schema.)
+    local led ffeat jerr prob lfeat
     for led in $(find "$repodir" -name ledger.json 2>/dev/null); do
       ffeat=$(basename "$(dirname "$led")")
       _state_assert_file "$led" "$root" "ledger.json ($ffeat)"
@@ -644,7 +761,12 @@ coord_doctor_state() {
       fi
       prob=$(ledger_schema_problem "$led")
       if [ -n "$prob" ]; then
-        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) schema incomplete: $prob" "inspect $led; restore the full §13 schema (feature/seq/commit/role/pane/delivery)"
+        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) schema incomplete: $prob" "inspect $led; restore the full §13 schema (feature/seq/commit/role/pane/command/delivery)"
+        continue
+      fi
+      lfeat=$(jq -r '.feature // ""' "$led" 2>/dev/null)
+      if [ "$lfeat" != "$ffeat" ]; then
+        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json feature ($lfeat) != its directory name ($ffeat)" "move the ledger under <repo-key>/$lfeat/ or fix .feature"
       else
         d_ok "ledger.json valid ($ffeat: full §13 schema)"
       fi
@@ -657,8 +779,16 @@ coord_doctor_state() {
 # ---- status (read-only; design §12) -------------------------------------------
 cmd_status() {
   validate_config || {
-    local first="${CFG_V[0]:-CONFIG_INVALID: unknown}"
-    coord_die "${first%%:*}" "status:validate_config" "$CONF" "${first#*: }" "edit $CONF (coordinate.config.example)"
+    # Decode the SAME tab tuple validate_config now writes (CODE<TAB>input<TAB>reason)
+    # so status surfaces a stable CONFIG_INVALID instead of the raw record. (finding:
+    # §14 tuple — one encoding, decoded consistently everywhere.)
+    local first="${CFG_V[0]:-}"
+    local fcode finput freason
+    if [ -n "$first" ]; then
+      IFS=$'\t' read -r fcode finput freason <<< "$first"
+    fi
+    coord_die "${fcode:-CONFIG_INVALID}" "status:validate_config" "${finput:-$CONF}" \
+      "${freason:-config validation failed}" "edit $CONF (coordinate.config.example documents each rule)"
   }
   local root rkey repodir feat="" cur
   root=$(state_root)
@@ -751,13 +881,6 @@ EOF
 }
 
 SUBCMD="${1:-}"; shift || true
-# Internal test hooks (double-underscore, hidden from usage). They bypass --config
-# arg-parsing so coordinate.sh's pure helpers are exercisable by the regression
-# suite without a full config / Herdr topology. NOT a public API.
-case "$SUBCMD" in
-  __repo-key)    repo_key_from "$1"; exit $? ;;   # <workdir> -> collision-safe key
-  __bounded-run) bounded_run_ms "$@"; exit $? ;;  # <ms> <cmd...> -> bounded exec
-esac
 CONF=""; REASON=""
 while [ $# -gt 0 ]; do
   case "$1" in

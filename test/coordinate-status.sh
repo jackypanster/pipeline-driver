@@ -49,6 +49,13 @@ run_status() {
   env STATE_DIR="$T/state" PATH=/usr/bin:/bin bash "$COORD" status --config "$T/cfg"
 }
 
+# rkey_of <root>: the repo key coordinate.sh derives, read from status's OWN JSON
+# output (no test hook, no formula drift — works on any head that emits repo_key).
+rkey_of() {
+  env STATE_DIR="$1/state" PATH=/usr/bin:/bin bash "$COORD" status --config "$1/cfg" 2>/dev/null \
+    | sed -n '2p' | jq -r '.repo_key // empty' 2>/dev/null
+}
+
 # ===== 1. no state dir at all -> idle + valid JSON (jq . round-trip) =====
 fresh; seed "$T"
 out=$(run_status); rc=$?
@@ -64,7 +71,7 @@ else
 
 # ===== 2. ledger present -> 'observed' carries last-observed seq/commit/delivery =====
 fresh; seed "$T"
-rkey=$(bash "$COORD" __repo-key "$T/obs")
+rkey=$(rkey_of "$T")
 featdir="$T/state/$rkey/hello-cli"
 mkdir -p "$featdir"; chmod 700 "$featdir"
 cat > "$featdir/ledger.json" <<EOF
@@ -81,7 +88,7 @@ else
 
 # ===== 3. unresolved halt.json -> state=halted, code surfaced in the JSON =====
 fresh; seed "$T"
-rkey=$(bash "$COORD" __repo-key "$T/obs")
+rkey=$(rkey_of "$T")
 featdir="$T/state/$rkey/hello-cli"; mkdir -p "$featdir"; chmod 700 "$featdir"
 printf '{"code":"REMOTE_MISMATCH","where":"watch"}' > "$featdir/halt.json"
 out=$(run_status); rc=$?
@@ -93,7 +100,7 @@ else
 
 # ===== 4. corrupt ledger.json -> LEDGER_CORRUPT, non-zero, valid JSON error object =====
 fresh; seed "$T"
-rkey=$(bash "$COORD" __repo-key "$T/obs")
+rkey=$(rkey_of "$T")
 featdir="$T/state/$rkey/hello-cli"; mkdir -p "$featdir"; chmod 700 "$featdir"
 printf 'this is not { json' > "$featdir/ledger.json"
 out=$(run_status); rc=$?
@@ -112,6 +119,22 @@ if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'CONFIG_INVALID'; then
   ok "invalid config -> CONFIG_INVALID (status validates before reading state)"
 else
   bad "invalid config" "rc=$rc; out=$(printf '%s' "$out" | head -8)"; fi
+
+# ===== 7. (finding 10) status decodes the SAME tab tuple validate_config writes —
+#      a config violation surfaces a CLEAN code/input/reason, not the raw tab
+#      record. The old head parsed CFG_V with the colon format and printed the whole
+#      tab-separated tuple as the code, so this MUST fail there. =====
+fresh; seed "$T"
+sed -i.bak 's#^POLL_SECS=.*#POLL_SECS=not-a-num#' "$T/cfg"; rm -f "$T/cfg.bak"
+out=$(run_status 2>&1); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -Eq '^code: +CONFIG_INVALID *$' \
+   && printf '%s' "$out" | grep -q '^input:.*POLL_SECS' \
+   && printf '%s' "$out" | grep -q '^reason:.*not a positive integer' \
+   && ! printf '%s' "$out" | grep -q $'\t'; then
+  ok "status decodes the tab tuple (clean code/input/reason, no raw-record leakage)"
+else
+  bad "status tab decode" "rc=$rc; out=$(printf '%s' "$out" | head -6)"; fi
 
 # ===== 6. (finding 11) malicious feature slug from current.json must NOT traverse.
 #      The feature is read from HEAD and concatenated into a state path; a slug

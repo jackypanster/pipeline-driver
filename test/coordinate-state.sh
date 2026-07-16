@@ -14,7 +14,12 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 COORD="$HERE/../coordinate.sh"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 unset HERDR_PANE_ID HERDR_PANE_CWD_MATCH HERDR_ENV HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID 2>/dev/null || true
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Resolve the temp dir to its PHYSICAL path (macOS $TMPDIR is under /var -> /private/var,
+# a symlink). The new symlinked-parent check walks the state root's ancestor chain,
+# so a temp base behind a system symlink would false-positive; a physical base keeps
+# the "valid state" cases clean and lets the symlinked-parent case be constructed
+# explicitly.
+TMP=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$(mktemp -d)"); trap 'rm -rf "$TMP"' EXIT
 pass=0 fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s\n     %s\n' "$1" "$2"; }
@@ -64,18 +69,22 @@ assert_no_code() {  # <label> <code> <root>: code MUST NOT appear (valid state)
   else bad "$1" "unexpected [$2] in output: $(printf '%s' "$out" | grep "$2" | head -3)"; fi
 }
 
-# state_root_of <root>: the repo-key state dir path, via the same key coordinate.sh
-# derives (no drift).
-state_dir_of() { bash "$COORD" __repo-key "$1/obs"; }
+# state_dir_of <root>: the repo key coordinate.sh derives, read from doctor's OWN
+# "normalized repo key:" output (no test hook, no formula drift).
+state_dir_of() {
+  env PATH=/usr/bin:/bin bash "$COORD" doctor --config "$1/cfg" 2>/dev/null \
+    | awk '/^ok    normalized repo key:/ {sub(/^ok    normalized repo key: /,""); print; exit}'
+}
 
 # mkstate <root> <mode_dirs> <mode_files>: create a 0700/0600 state tree for the
-# repo with one feature carrying a full-schema ledger. Modes overridable per case.
+# repo with one feature carrying a full-§13-schema ledger (incl. command name).
+# Modes overridable per case.
 mkstate() {
   local root=$1 dmode=$2 fmode=$3 repodir feat
   repodir="$root/state/$(state_dir_of "$root")"
   feat="$repodir/hello-cli"
   mkdir -p "$feat"; chmod "$dmode" "$root/state" "$repodir" "$feat"
-  printf '{"feature":"hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","pane":"wB:p1","delivery":"sent"}' > "$feat/ledger.json"
+  printf '{"feature":"hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","pane":"wB:p1","command":"pipeline-impl","delivery":"sent"}' > "$feat/ledger.json"
   chmod "$fmode" "$feat/ledger.json"
 }
 
@@ -123,9 +132,37 @@ assert_code "ledger {} (schema-incomplete) -> LEDGER_CORRUPT" LEDGER_CORRUPT "$T
 # ===== 9. ledger schema-incomplete: bad delivery value -> LEDGER_CORRUPT =====
 fresh; seed_clones "$T"; write_cfg "$T" "$T/state"; mkstate "$T" 700 600
 repodir="$T/state/$(state_dir_of "$T")"; feat="$repodir/hello-cli"
-printf '{"feature":"hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","pane":"wB:p1","delivery":"bogus"}' > "$feat/ledger.json"
+printf '{"feature":"hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","pane":"wB:p1","command":"pipeline-impl","delivery":"bogus"}' > "$feat/ledger.json"
 chmod 600 "$feat/ledger.json"
 assert_code "ledger delivery=bogus -> LEDGER_CORRUPT" LEDGER_CORRUPT "$T"
+
+# ===== 10. (finding 8) ledger missing the command NAME -> LEDGER_CORRUPT. The old
+#      head accepted this (no command field in the schema). =====
+fresh; seed_clones "$T"; write_cfg "$T" "$T/state"; mkstate "$T" 700 600
+repodir="$T/state/$(state_dir_of "$T")"; feat="$repodir/hello-cli"
+printf '{"feature":"hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","pane":"wB:p1","delivery":"sent"}' > "$feat/ledger.json"
+chmod 600 "$feat/ledger.json"
+assert_code "ledger missing .command -> LEDGER_CORRUPT" LEDGER_CORRUPT "$T"
+
+# ===== 11. (finding 8) ledger feature != directory name -> LEDGER_CORRUPT =====
+fresh; seed_clones "$T"; write_cfg "$T" "$T/state"; mkstate "$T" 700 600
+repodir="$T/state/$(state_dir_of "$T")"; feat="$repodir/hello-cli"
+printf '{"feature":"not-hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","pane":"wB:p1","command":"pipeline-impl","delivery":"sent"}' > "$feat/ledger.json"
+chmod 600 "$feat/ledger.json"
+assert_code "ledger feature != dir name -> LEDGER_CORRUPT" LEDGER_CORRUPT "$T"
+
+# ===== 12. (finding 7) DANGLING symlink at STATE_DIR -> CONFIG_INVALID (not "absent").
+#      The old head reported "state root not created yet" and exited 0. =====
+fresh; seed_clones "$T"; write_cfg "$T" "$T/dangle"; ln -s "$T/no-such-target" "$T/dangle"
+assert_code "dangling STATE_DIR symlink -> CONFIG_INVALID" CONFIG_INVALID "$T"
+
+# ===== 13. (finding 7) symlinked PARENT above the state root -> CONFIG_INVALID.
+#      link-parent -> elsewhere; STATE_DIR=$T/link-parent/state. The state root itself
+#      is a real 0700 dir (so the old head's root mode/type checks pass); only the NEW
+#      parent-chain check catches the symlinked parent. Old head reported it valid. =====
+fresh; seed_clones "$T"; mkdir -p "$T/elsewhere"; chmod 700 "$T/elsewhere"; ln -s "$T/elsewhere" "$T/link-parent"
+write_cfg "$T" "$T/link-parent/state"; mkdir -p "$T/link-parent/state"; chmod 700 "$T/link-parent/state"
+assert_code "symlinked parent of state root -> CONFIG_INVALID" CONFIG_INVALID "$T"
 
 echo "----"
 echo "passed=$pass failed=$fail"
