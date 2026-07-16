@@ -4,6 +4,15 @@ Status: **Approved for implementation**
 
 Approved: 2026-07-16
 
+Revision: v1.1 (2026-07-16) — trims duplicate protection mechanisms while keeping every safety
+invariant. The dispatch envelope is plain fields (the hashed dispatch identifier is dropped); delivery
+is at-least-once, backed by the mandatory stage stale-dispatch guard and the pane readiness check (the
+two-phase `pending`/`sent` ledger and the `--pending retry|mark-sent` recovery protocol are dropped);
+the operational audit is a plain append-only log (event-sourcing correlation fields and startup
+whole-file validation are dropped). Journal authority, the route allowlist, fail-fast, `control.json`
+authorization, atomic review outcome, and the human-direct merge gate are unchanged. Section 24 records
+the known v1 limitations.
+
 Audience: implementation agents, reviewers, and operators
 
 Implementation repositories: `pipeline-driver` and `pipeline`
@@ -188,7 +197,7 @@ The process has these internal states:
 |---|---|---|
 | `IDLE` | No coordinated feature is currently actionable | Observe a new remote commit |
 | `VALIDATING` | Preflight or pre-dispatch checks are running | `IDLE`, `DISPATCHING`, or `FATAL` |
-| `DISPATCHING` | Ledger is `pending`; Herdr send is in progress | `WAITING` or `FATAL` |
+| `DISPATCHING` | Herdr send is in progress | `WAITING` or `FATAL` |
 | `WAITING` | Delivery is `sent`; waiting for a newer journal commit | New valid transition or `FATAL` |
 | `WAITING_HUMAN_MERGE` | Codex emitted the exact direct-human gate | `review -> done`, rejection route, or `FATAL` |
 | `FATAL` | No further dispatch is permitted | Non-zero process exit only |
@@ -204,7 +213,7 @@ Normal loop:
 6. Validate the state against the route table and derive an immutable dispatch envelope.
 7. Fetch once more before sending. If the ref changed, discard the stale decision and reconcile the new
    commit. A valid concurrent advance is not an error; an illegal new state is fatal.
-8. Atomically persist `pending`, send through Herdr, then atomically persist `sent`.
+8. Send through Herdr, then atomically persist `sent` on confirmed CLI acceptance.
 9. Observe Git and the authoritative Herdr agent lifecycle until the journal advances, an exact human
    merge wait appears, or a fatal condition occurs.
 
@@ -221,21 +230,12 @@ branch=<trunk branch>
 feature=<feature slug>
 expected_seq=<journal sequence observed by coordinator>
 expected_commit=<full observed trunk commit>
-dispatch_id=<deterministic SHA-256 identifier>
 ```
 
-`dispatch_id` is SHA-256 over the length-delimited tuple:
-
-```text
-normalized_remote_identity
-feature
-expected_seq
-expected_next_stage
-expected_commit
-```
-
-Length delimiting is mandatory; string concatenation with a punctuation separator is not sufficient.
-The exact encoding MUST be documented in implementation tests and shared by `status` output.
+The dispatch identity is the plain tuple `(feature, expected_seq, expected_commit)`; it is already
+unique per dispatch, and the stage guard below verifies every field individually, so no derived hash
+identifier exists. Logs and `status` output display a dispatch as `<feature>@seq<N>/<short-commit>`;
+the envelope itself always carries the full commit hash.
 
 Before any write, every coordinated stage skill MUST:
 
@@ -323,7 +323,7 @@ The future public commands are:
 coordinate.sh doctor --config <path>
 coordinate.sh watch --config <path>
 coordinate.sh status --config <path>
-coordinate.sh resume --config <path> --reason <text> [--pending retry|mark-sent]
+coordinate.sh resume --config <path> --reason <text>
 ```
 
 ### `doctor`
@@ -345,13 +345,10 @@ form suitable for agents. It never contacts a model and never changes ledger sta
 ### `resume`
 
 Require a non-empty human reason, rerun full preflight, record the human resume event, and resume only
-after the original guard is satisfied. If ledger state is ambiguous `pending`, require exactly one:
-
-- `--pending retry`: the operator inspected the pane and authorizes redelivery;
-- `--pending mark-sent`: the operator inspected the pane and confirms delivery occurred.
-
-The choice, reason, prior fatal event ID, and resulting state MUST be audited. Coordinator code never
-selects either option automatically.
+after the original guard is satisfied. Resume never chooses between delivery interpretations: after
+preflight the loop re-observes Git and follows the normal dispatch path. Redelivery is safe because the
+stage stale-dispatch guard refuses any seq that was already consumed and the pane readiness check
+refuses a busy pane. The reason, prior fatal code, and resulting state MUST be audited.
 
 ## 13. Local delivery state
 
@@ -366,21 +363,26 @@ The default state root is `${XDG_STATE_HOME:-$HOME/.local/state}/pipeline-driver
   lock/            # atomic single-watcher lock directory
 ```
 
-`ledger.json` records the current workflow/dispatch IDs, observed Git state, target role/pane, command
-name (not full prompt), and delivery state `pending`, `sent`, or `waiting`. Updates use an exclusive
-same-directory temporary file followed by atomic rename. Predictable temp names and symlink-following
-writes are forbidden.
+`ledger.json` records the observed Git state and the last confirmed dispatch: feature, journal seq,
+full commit, target role/pane, command name (not full prompt), and delivery state `sent` or `waiting`.
+Updates use an exclusive same-directory temporary file followed by atomic rename. Predictable temp
+names and symlink-following writes are forbidden.
 
 Delivery sequence:
 
-1. Append `dispatch_pending` to the audit log.
-2. Atomically write ledger state `pending`.
-3. Execute `herdr pane run`.
-4. On confirmed CLI success, atomically write `sent` and append `dispatch_sent`.
-5. While the journal commit is unchanged, do not redeliver.
+1. Append `dispatch_attempt` to the audit log.
+2. Execute `herdr pane run`.
+3. On confirmed CLI success, atomically write ledger state `sent` and append `dispatch_sent`.
+4. While the journal commit is unchanged and the ledger records `sent` for the current seq, delivery
+   is confirmed: do not redeliver, keep waiting.
 
-A crash after step 2 and before step 4 is intentionally ambiguous. On restart it produces
-`DELIVERY_AMBIGUOUS`, writes a halt snapshot, and requires the human `resume` choice above.
+Delivery is at-least-once by design. A crash between step 2 and step 3 leaves no ledger record; on
+restart the coordinator reruns preflight, re-observes Git, and follows the normal dispatch path for
+whatever state it finds. Two existing guards make that safe without a bespoke ambiguity protocol: the
+mandatory stage stale-dispatch guard refuses any duplicate whose journal seq was already consumed, and
+the pane readiness check refuses to type into a busy pane. In the narrow case where the crashed
+dispatch is still running, readiness times out, the coordinator halts normally, and the operator
+resumes once the pane is idle or the journal has advanced.
 
 ## 14. Fail-fast contract
 
@@ -408,7 +410,7 @@ Stable fatal codes include:
 | Configuration | `CONFIG_INVALID`, `DEPENDENCY_MISSING`, `WORKDIR_INVALID`, `REMOTE_MISMATCH` |
 | Git | `GIT_FETCH_FAILED`, `REMOTE_REF_MISSING`, `GIT_OBJECT_UNREADABLE` |
 | Protocol | `CONTROL_MALFORMED`, `AUTOMATION_AUTH_CHANGED`, `JOURNAL_MALFORMED`, `JOURNAL_SEQ_INVALID`, `TRANSITION_ILLEGAL`, `NEXT_INVALID`, `CARD_STATE_INVALID` |
-| Local state | `LOCK_HELD`, `LOCK_STALE`, `LEDGER_CORRUPT`, `DELIVERY_AMBIGUOUS`, `AUDIT_CORRUPT`, `AUDIT_WRITE_FAILED` |
+| Local state | `LOCK_HELD`, `LOCK_STALE`, `LEDGER_CORRUPT`, `AUDIT_WRITE_FAILED` |
 | Pane/transport | `PANE_NOT_FOUND`, `PANE_AMBIGUOUS`, `PANE_SELF`, `PANE_UNAUTHORIZED`, `PANE_NOT_READY_TIMEOUT`, `HERDR_SEND_FAILED` |
 | Execution | `AGENT_STATUS_INVALID`, `AGENT_ENDED_WITHOUT_HANDOFF`, `STAGE_TIMEOUT` |
 
@@ -438,31 +440,34 @@ Git journal and coordinator audit have different jobs:
 - `events.jsonl` is the local operational audit: observations, validations, dispatch delivery, waits,
   fatal stops, and human resumes.
 
-Each JSONL event MUST contain:
+Each JSONL event carries these fields, present where applicable to the event type:
 
 ```text
-schema_version, timestamp, event_seq
-workflow_id, process_run_id, event_id, correlation_id, causation_id
+timestamp, event
 remote_identity, branch, feature
 journal_commit, journal_seq, transition, stage_status
 action, target_role, pane_id, result, duration_ms
 error_code, error_context, next_action
 ```
 
-Event types include `watch_started`, `observed`, `validated`, `dispatch_pending`, `dispatch_sent`,
+Event types include `watch_started`, `observed`, `validated`, `dispatch_attempt`, `dispatch_sent`,
 `waiting`, `business_transition`, `waiting_human_merge`, `fatal`, `resume`, `completed`, and
 `watch_stopped`.
 
 Rules:
 
-- One compact JSON object per line; append only; monotonically increasing `event_seq` per workflow.
-- Validate the complete file on startup. Malformed JSON or a sequence gap is fatal.
+- One compact JSON object per line; append only. There is exactly one sequential writer, so wall-clock
+  timestamps order events; no event sequence number or correlation/causation chain exists.
+- The log is diagnostic output, not workflow input: the coordinator never reads it back to make a
+  decision, and startup does not validate historical content. A failed append is fatal
+  (`AUDIT_WRITE_FAILED`).
 - Never log credentials, auth environment values, complete prompts, complete commands, complete pane
   output, source-file bodies, or unrestricted stderr.
 - Store only the command name, identifiers, timings, and a bounded sanitized stderr excerpt.
 - Preserve logs per workflow without automatic rotation in v1. Cleanup is a separate explicit operator
   action, not coordinator behavior.
-- `halt.json` is a current diagnostic index, not the audit history. It references the fatal `event_id`.
+- `halt.json` is a current diagnostic snapshot, not the audit history. It carries the same diagnosis
+  as the fatal audit event.
 
 ## 17. Human merge gate
 
@@ -489,8 +494,9 @@ gate is disarmed and review must run again; the coordinator cannot restore or im
   the watcher still fails closed as `AGENT_ENDED_WITHOUT_HANDOFF`. The operator answers in CC, lets CC
   finish and commit, then explicitly resumes. The coordinator does not inspect prose to distinguish a
   question from an incomplete stage.
-- `SIGINT`/`SIGTERM` records `watch_stopped` when possible and exits. If interrupted in `pending`, the
-  next start detects delivery ambiguity and requires human resolution.
+- `SIGINT`/`SIGTERM` records `watch_stopped` when possible and exits. If interrupted mid-send, the next
+  start re-observes Git and follows the normal dispatch path; the stage stale-dispatch guard and the
+  pane readiness check make redelivery safe.
 
 ## 19. Security and write safety
 
@@ -567,14 +573,17 @@ The implementation is not complete until all scenarios below are demonstrated:
 7. Approved review enters `WAITING_HUMAN_MERGE`; coordinator cannot send a merge token.
 8. Direct operator confirmation in Codex produces `review -> done`; watcher returns to idle.
 9. Restart after `sent` does not redeliver while the journal is unchanged.
-10. Restart with ambiguous `pending` halts and requires explicit `retry` or `mark-sent`.
+10. A crash between Herdr acceptance and the ledger write recovers without a bespoke protocol: restart
+    follows the normal dispatch path; a still-busy pane fails readiness and halts; after the operator
+    resumes, a duplicate delivery whose seq was already consumed is refused by the stage stale-dispatch
+    guard with no Git write.
 11. Malformed control/journal, illegal transition, bad counter, remote mismatch, ambiguous pane,
-    unauthorized agent status, fetch/send failure, timeout, stale lock, and corrupt audit each produce
-    one actionable fatal record and no subsequent send.
+    unauthorized agent status, fetch/send failure, timeout, stale lock, and audit-append failure each
+    produce one actionable fatal record and no subsequent send.
 12. A Git ref change before send causes safe re-observation; the stale decision is never delivered.
 13. Human-relay features without coordinated authorization are observed but never dispatched.
-14. Audit and halt artifacts contain correlation data and sanitized errors but no tokens, prompt bodies,
-    pane transcript, or source bodies.
+14. Audit and halt artifacts contain the identifying Git/feature context and sanitized errors but no
+    tokens, prompt bodies, pane transcript, or source bodies.
 15. Real integration uses the real remote, three independent clones, and real Herdr panes; mock-only
     evidence is insufficient.
 
@@ -588,3 +597,15 @@ The implementation is not complete until all scenarios below are demonstrated:
 - The implementation PRs must update existing prose that says a whole-pipeline scheduler is forbidden:
   the prohibition remains the default, while this approved deterministic, feature-authorized mode is
   the explicit exception. Do not leave contradictory instructions for agents.
+
+## 24. Known v1 limitations
+
+1. Stage autonomy between journal commits is assumed. Every legitimate stage question that ends a turn
+   without a journal handoff halts the coordinator as `AGENT_ENDED_WITHOUT_HANDOFF` and costs a human
+   `resume`. `prd` is operator-started and outside coordination, and the impl/review spans have proven
+   autonomous in real runs, but if real coordinated runs show frequent legitimate questions in
+   `arch`/`task`, v2 must design a first-class question path rather than relaxing the fail-closed rule.
+2. Herdr agent lifecycle authority is proven only for the Pi impl pane
+   ([PR #11](https://github.com/jackypanster/pipeline-driver/pull/11)). `doctor` MUST prove lifecycle
+   authority for the CC and Codex panes before the first dispatch; if it cannot, coordinated mode is
+   not viable on that runtime and implementation stops rather than trusting pane heuristics.
