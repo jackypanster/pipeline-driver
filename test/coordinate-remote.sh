@@ -201,6 +201,58 @@ else
   bad "nonexistent top-level resolution" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
 fi
 
+# ===== round-5 F1: the typed key is LOCALE-INVARIANT. Bash \${#v} counted
+#      characters under UTF-8 but bytes under C, so https://example.com/é.git keyed
+#      net:13: vs net:14: across shells and moved the same repo to a different
+#      state namespace. Skip-counted when no UTF-8 locale exists (precedent: gawk). =====
+fresh; seed "$T"
+set_all_origins "$T" "https://example.com/é.git"
+k_c=$(LC_ALL=C run_doctor "$T" | awk '/normalized repo key:/ {print $NF; exit}')
+if locale -a 2>/dev/null | grep -qi '^en_US.UTF-8$'; then
+  k_u=$(LC_ALL=en_US.UTF-8 run_doctor "$T" | awk '/normalized repo key:/ {print $NF; exit}')
+  if [ -n "$k_c" ] && [ "$k_c" = "$k_u" ]; then
+    ok "non-ASCII repo key locale-invariant ($k_c)"
+  else
+    bad "locale-variant repo key" "LC_ALL=C: ${k_c:-<none>} vs en_US.UTF-8: ${k_u:-<none>}"
+  fi
+else
+  ok "non-ASCII repo key locale-invariance (SKIP: no en_US.UTF-8 locale on this machine)"
+fi
+
+# ===== round-5 F3: F7 (proxy isolation) is a HARNESS-ONLY correction — swapping
+#      only production code cannot demonstrate it, so instead of a fake old-head
+#      regression it carries a LIVE PROPERTY TEST: a hostile inherited HTTPS_PROXY
+#      pointing at a local sentinel must NEVER receive a connection through
+#      run_doctor's isolated env (it would, if the env overrides were weakened). =====
+fresh; seed "$T"
+set_all_origins "$T" "https://example.com/sentinel-check/x.git"
+rm -f "$T/port" "$T/marker"
+perl -e '
+  use IO::Socket::INET;
+  my ($portf, $markf) = @ARGV;
+  alarm 25;
+  my $s = IO::Socket::INET->new(Listen=>5, LocalAddr=>"127.0.0.1", LocalPort=>0) or die "listen: $!";
+  open my $F, ">", $portf or die; print $F $s->sockport; close $F;
+  my $c = $s->accept();
+  open my $M, ">", $markf or die; print $M "CONNECTED"; close $M;
+' "$T/port" "$T/marker" &
+SENTINEL_PID=$!
+for _i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/port" ] && break; sleep 0.3; done
+SPORT=$(cat "$T/port" 2>/dev/null || echo "")
+if [ -z "$SPORT" ]; then
+  bad "proxy sentinel" "sentinel listener failed to start"
+else
+  out=$(HTTPS_PROXY="http://127.0.0.1:$SPORT" https_proxy="http://127.0.0.1:$SPORT" \
+        NO_PROXY="" no_proxy="" run_doctor "$T")
+  sleep 0.5
+  if [ ! -e "$T/marker" ]; then
+    ok "hostile inherited HTTPS_PROXY neutralized (sentinel never received a connection)"
+  else
+    bad "proxy isolation property" "the sentinel received a connection — run_doctor leaked the inherited proxy"
+  fi
+fi
+kill "$SENTINEL_PID" 2>/dev/null || true; wait "$SENTINEL_PID" 2>/dev/null || true
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

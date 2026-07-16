@@ -227,6 +227,30 @@ fresh; seed_clones "$T"; printf 'x' > "$T/regfile"
 write_cfg "$T" "$T/regfile/state"
 assert_code "state root under a regular file -> CONFIG_INVALID" CONFIG_INVALID "$T"
 
+# ===== 18. (round-5 F2) a REJECTED PARENT stops the state section even when the
+#      root ITSELF is a real 0700 directory (reached through the symlinked parent)
+#      holding a valid-looking ledger. The old head emitted the parent MISS, then
+#      'state root exists' + 'ledger.json … file 0600' + 'ledger.json valid' from
+#      behind the forbidden parent. =====
+fresh; seed_clones "$T"
+write_cfg "$T" "$T/linkp/state"
+rk=$(state_dir_of "$T")            # key BEFORE the tree exists (root absent = fine)
+mkdir -p "$T/real"; chmod 700 "$T/real"
+ln -s "$T/real" "$T/linkp"
+mkdir -p "$T/linkp/state/$rk/hello-cli"   # real dirs, created THROUGH the symlink
+chmod 700 "$T/real/state" "$T/real/state/$rk" "$T/real/state/$rk/hello-cli"
+printf '{"feature":"hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","pane":"wB:p1","command":"pipeline-impl","delivery":"sent"}' > "$T/real/state/$rk/hello-cli/ledger.json"
+chmod 600 "$T/real/state/$rk/hello-cli/ledger.json"
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]' \
+   && ! printf '%s' "$out" | grep -q 'state root exists' \
+   && ! printf '%s' "$out" | grep -q 'ledger.json valid' \
+   && ! printf '%s' "$out" | grep -Eq 'ledger\.json.*file 0600'; then
+  ok "rejected parent + real root beneath it -> state section STOPS (nothing read)"
+else
+  bad "traversal after rejected parent" "rc=$rc; $(printf '%s' "$out" | grep -iE 'parent|state root|ledger' | head -5)"
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

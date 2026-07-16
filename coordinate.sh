@@ -128,10 +128,13 @@ redact_remote() {
 #               filename bytes; /srv/x and /srv/x.git are different repos) and
 #               resolved against the DECLARING clone: `origin.git` in four clones
 #               names four different repositories.
-# <len> is the value's character length: a typed, length-prefixed encoding that no
-# crafted URL can forge across kinds — the kind tag is chosen by classification,
-# never taken from input. Classification runs on the RAW value BEFORE any
-# stripping (finding: 'x@../shared' is a literal local path, not userinfo).
+# <len> is the value's BYTE length, computed locale-invariantly (finding: Bash
+# ${#v} counts characters under a UTF-8 locale but bytes under LC_ALL=C, so the
+# SAME remote keyed net:13: vs net:14: across shells and moved to a different
+# state namespace). The kind tag is chosen by classification, never taken from
+# input. Classification runs on the RAW value BEFORE any stripping (finding:
+# 'x@../shared' is a literal local path, not userinfo).
+_byte_len() { printf '%s' "$1" | wc -c | awk '{print $1}'; }   # wc -c = bytes, always
 normalize_remote_for() {
   local wd=$1 raw=$2 kind u v
   kind=$(_remote_kind "$raw")
@@ -141,19 +144,19 @@ normalize_remote_for() {
       case "$v" in file://*) v=${v#file://} ;; esac
       case "$v" in /*) ;; *) v="$wd/$v" ;; esac
       v=$(resolve_path "$v")
-      printf 'fs:%d:%s' "${#v}" "$v"
+      printf 'fs:%d:%s' "$(_byte_len "$v")" "$v"
       ;;
     net-scheme)
       u=$(strip_userinfo "$raw"); u=${u#*://}; u=${u%.git}
       v=$(printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }')
-      printf 'net:%d:%s' "${#v}" "$v"
+      printf 'net:%d:%s' "$(_byte_len "$v")" "$v"
       ;;
     net-scp)
       u=$(strip_userinfo "$raw")
       u=$(printf '%s' "$u" | sed -E 's#([^/]*):#\1/#')   # scp host:path -> host/path
       u=${u%.git}
       v=$(printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }')
-      printf 'net:%d:%s' "${#v}" "$v"
+      printf 'net:%d:%s' "$(_byte_len "$v")" "$v"
       ;;
   esac
 }
@@ -783,20 +786,25 @@ coord_doctor_state() {
   # first write would land through the forbidden parent. Walking the chain is safe
   # pre-creation (a non-existent component is never a symlink; -L is simply false).
   # (finding: parent check must precede the absent early-return.)
-  local _p; _p=$(dirname "$root")
+  local _p _parent_bad=0; _p=$(dirname "$root")
   while [ "$_p" != "/" ] && [ -n "$_p" ]; do
     if [ -L "$_p" ]; then
       d_code CONFIG_INVALID "doctor:state" "$root" "parent of state root ($_p) is a symlink — §19 forbids symlinked state parents (blocking even before first write)" "remove the symlink $_p or point STATE_DIR outside a symlinked tree"
-      break
+      _parent_bad=1; break
     fi
     # An EXISTING non-directory ancestor means the root can NEVER be created here —
     # "not created yet" would be a lie. (finding: non-directory ancestors.)
     if [ -e "$_p" ] && [ ! -d "$_p" ]; then
       d_code CONFIG_INVALID "doctor:state" "$root" "ancestor of state root ($_p) exists but is not a directory — the state root can never be created beneath it" "point STATE_DIR at a creatable directory path"
-      break
+      _parent_bad=1; break
     fi
     _p=$(dirname "$_p")
   done
+  # A REJECTED PARENT poisons the entire subtree — the root itself may be a real
+  # 0700 directory reached THROUGH the forbidden parent, and _state_assert_dir
+  # cannot rediscover the violation (the root is its trust boundary). Never read
+  # past it. (finding: stop after a rejected state-root parent.)
+  [ "$_parent_bad" = "1" ] && return 0
   if [ ! -d "$root" ]; then
     # Distinguish "absent" (fine — created on first write) from a dangling
     # symlink or a non-directory entry at the state root (BLOCKING). (finding:
