@@ -272,14 +272,19 @@ validate_config() {
     elif [ ! -x "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC not executable: $ON_HALT_EXEC"
     fi
   fi
-  # 8. STATE_DIR (if set): outside EVERY configured clone.
+  # 8. STATE_DIR (if set): OUTSIDE every configured clone — by PHYSICAL resolution
+  # (realpath), not lexical prefix, so ".." and a symlink resolving INTO a clone
+  # cannot bypass containment (§13/§19; finding: state containment).
   if [ -n "${STATE_DIR:-}" ]; then
+    local rp_state rp_wd_s
     case "$STATE_DIR" in /*) ;; *) cfg_violation CONFIG_INVALID "STATE_DIR" "STATE_DIR not absolute: $STATE_DIR" ;; esac
+    rp_state=$(resolve_path "$STATE_DIR")
     for wdvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
       wd="${!wdvar:-}"
-      [ -z "$wd" ] && continue
-      case "$STATE_DIR" in
-        "$wd"|"$wd"/*) cfg_violation CONFIG_INVALID "STATE_DIR" "STATE_DIR ($STATE_DIR) is inside $wdvar ($wd)" ;;
+      [ -d "$wd" ] || continue
+      rp_wd_s=$(resolve_path "$wd")
+      case "$rp_state" in
+        "$rp_wd_s"|"$rp_wd_s"/*) cfg_violation CONFIG_INVALID "STATE_DIR" "STATE_DIR ($STATE_DIR -> $rp_state) resolves inside $wdvar ($wd -> $rp_wd_s)" ;;
       esac
     done
   fi
@@ -521,6 +526,58 @@ coord_check_role() {
 }
 
 # coord_doctor_state — state root existence/permissions, ledger integrity, lock, halt.
+# ---- state safety checks (design §19; finding: state preflight) ----------------
+# _state_symlink_bad <path> <root> — echoes the offending symlink path (and
+# returns 0) if <path> or any ancestor STRICTLY below <root> is a symlink; returns 1
+# (empty output) otherwise. §19 forbids symlink destinations and symlinked parents.
+_state_symlink_bad() {
+  local p=$1 root=$2 cur
+  [ -L "$p" ] && { printf '%s' "$p"; return 0; }
+  [ "$p" = "$root" ] && return 1          # nothing above the root is ours to check
+  cur=$(dirname "$p")
+  while [ "$cur" != "$root" ] && [ -n "$cur" ] && [ "$cur" != "/" ]; do
+    [ -L "$cur" ] && { printf '%s' "$cur"; return 0; }
+    cur=$(dirname "$cur")
+  done
+  return 1
+}
+# _state_assert_dir/_file <path> <root> <label> — BLOCK unless <path> is a real
+# (non-symlink, non-symlinked-parent) entry with mode 0700 (dir) / 0600 (file).
+_state_assert_dir() {
+  local p=$1 root=$2 label=$3 sym perm
+  if sym=$(_state_symlink_bad "$p" "$root"); then
+    d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is reached via a symlink ($sym) — §19 forbids symlinked state paths" "remove the symlink; restore $label as a real directory"
+    return
+  fi
+  perm=$(stat_perms "$p" 2>/dev/null)
+  if [ "$perm" = "700" ]; then d_ok "$label dir 0700 ($p)"
+  else d_code CONFIG_INVALID "doctor:state" "$p" "$label dir mode is ${perm:-?} (expected 0700) — §19" "chmod 700 $p"; fi
+}
+_state_assert_file() {
+  local p=$1 root=$2 label=$3 sym perm
+  if sym=$(_state_symlink_bad "$p" "$root"); then
+    d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is reached via a symlink ($sym) — §19 forbids symlinked state paths" "remove the symlink; restore $label as a real file"
+    return
+  fi
+  perm=$(stat_perms "$p" 2>/dev/null)
+  if [ "$perm" = "600" ]; then d_ok "$label file 0600 ($p)"
+  else d_code CONFIG_INVALID "doctor:state" "$p" "$label file mode is ${perm:-?} (expected 0600) — §19" "chmod 600 $p"; fi
+}
+# ledger_schema_problem <file> — echoes the first missing/invalid §13 schema field
+# (feature / journal_seq / journal_commit[40-hex] / target_role / pane / delivery ∈
+# pending|sent|waiting), or "" if the ledger carries the full schema.
+ledger_schema_problem() {
+  jq -r '
+    if (.feature | type) != "string" or .feature == "" then "missing .feature"
+    elif (.journal_seq | type) != "number" then "missing/invalid .journal_seq"
+    elif (.journal_commit | type) != "string" or (.journal_commit | test("^[0-9a-f]{40}$") | not) then "missing/invalid .journal_commit (need 40-hex)"
+    elif (.target_role | type) != "string" or .target_role == "" then "missing .target_role"
+    elif (.pane | type) != "string" or .pane == "" then "missing .pane"
+    elif (.delivery | type) != "string" or (.delivery | IN("pending","sent","waiting") | not) then "missing/invalid .delivery (need pending|sent|waiting)"
+    else "" end
+  ' "$1" 2>/dev/null
+}
+
 coord_doctor_state() {
   local root rkey repodir
   root=$(state_root)
@@ -531,34 +588,53 @@ coord_doctor_state() {
     return
   fi
   d_ok "state root exists: $root"
+  _state_assert_dir "$root" "$root" "state root"          # 0700, no symlinks
   if [ -d "$repodir" ]; then
-    local perm; perm=$(stat_perms "$repodir" 2>/dev/null)
-    [ "$perm" = "700" ] && d_ok "repo state dir 0700: $repodir" || d_warn "repo state dir not 0700 ($perm): $repodir" "chmod 700 $repodir"
+    _state_assert_dir "$repodir" "$root" "repo state"
+    # feature subdirs: 0700, real (no symlinks).
+    local featd
+    for featd in "$repodir"/*/; do
+      [ -d "$featd" ] || continue
+      featd=${featd%/}
+      _state_assert_dir "$featd" "$root" "feature state ($(basename "$featd"))"
+    done
     # halt.json (unresolved halt blocks watch; resume is the only bypass).
     local haltf
-    haltf=$(find "$repodir" -name halt.json -type f 2>/dev/null | head -1)
+    haltf=$(find "$repodir" -name halt.json 2>/dev/null | head -1)
     if [ -n "$haltf" ]; then
+      _state_assert_file "$haltf" "$root" "halt.json"
       local code; code=$(jq -r '.code // "HALTED"' "$haltf" 2>/dev/null || echo HALTED)
-      d_warn "unresolved halt.json present ($code): $haltf" "inspect it, then `coordinate.sh resume --config $CONF --reason <text>` (not implemented this phase)"
+      d_warn "unresolved halt.json present ($code): $haltf" "inspect it, then \`coordinate.sh resume --config $CONF --reason <text>\` (not implemented this phase)"
     fi
     # lock dir (held = a watch is running; stale = dead PID, resume clears it).
     local lockd
     lockd=$(find "$repodir" -type d -name lock 2>/dev/null | head -1)
     if [ -n "$lockd" ]; then
+      _state_assert_dir "$lockd" "$root" "watch lock"
       local pidf="" pid="" st="held"
       pidf=$(find "$lockd" -type f 2>/dev/null | head -1)
-      [ -n "$pidf" ] && pid=$(cat "$pidf" 2>/dev/null || echo "")
+      if [ -n "$pidf" ]; then
+        _state_assert_file "$pidf" "$root" "lock pidfile"
+        pid=$(cat "$pidf" 2>/dev/null || echo "")
+      fi
       if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then st="stale"; fi
       d_warn "watch lock present ($st): $lockd" $([ "$st" = stale ] && echo "resume clears a stale lock after preflight" || echo "a watch is running — that is expected")
     fi
-    # ledger.json integrity (if present for any feature).
-    local led ffeat lerr=""
-    for led in $(find "$repodir" -name ledger.json -type f 2>/dev/null); do
+    # ledger.json integrity (§13 schema, not just valid JSON): feature / journal_seq
+    # / full 40-hex commit / target_role / pane / delivery ∈ pending|sent|waiting.
+    local led ffeat jerr prob
+    for led in $(find "$repodir" -name ledger.json 2>/dev/null); do
       ffeat=$(basename "$(dirname "$led")")
-      if lerr=$(jq -e . "$led" 2>&1 >/dev/null); then
-        d_ok "ledger.json valid ($ffeat)"
+      _state_assert_file "$led" "$root" "ledger.json ($ffeat)"
+      if ! jerr=$(jq -e . "$led" 2>&1 >/dev/null); then
+        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) not JSON: ${jerr:-unreadable}" "inspect $led; remove only after confirming no dispatch is in flight"
+        continue
+      fi
+      prob=$(ledger_schema_problem "$led")
+      if [ -n "$prob" ]; then
+        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) schema incomplete: $prob" "inspect $led; restore the full §13 schema (feature/seq/commit/role/pane/delivery)"
       else
-        d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json unreadable ($ffeat): ${lerr:-not JSON}" "inspect $led; remove only after confirming no dispatch is in flight"
+        d_ok "ledger.json valid ($ffeat: full §13 schema)"
       fi
     done
   else
