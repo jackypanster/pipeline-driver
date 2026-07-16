@@ -1,6 +1,13 @@
 # Git-Driven Agent Coordinator Architecture
 
-Status: **Approved for implementation**
+Status: **Partially superseded — see Section 25 (v1.3 outcome)**
+
+The read-only surface (`doctor`/`status`, PR #13) and the cross-repository `pipeline` contract
+(control.json / dispatch envelope / stale guard / atomic review outcome, pipeline PR #44) are merged
+and REMAIN NORMATIVE for any dispatcher. The deterministic bash dispatch half (`watch`/`resume`,
+Sections 8, 12–18) is NOT being implemented — coordinated mode v1 is a CC-as-coordinator playbook
+instead (Section 25 records why). Sections describing watch/resume are retained as design history and
+as requirements input for any future deterministic dispatcher.
 
 Approved: 2026-07-16
 
@@ -625,3 +632,34 @@ The implementation is not complete until all scenarios below are demonstrated:
    ([PR #11](https://github.com/jackypanster/pipeline-driver/pull/11)). `doctor` MUST prove lifecycle
    authority for the CC and Codex panes before the first dispatch; if it cannot, coordinated mode is
    not viable on that runtime and implementation stops rather than trusting pane heuristics.
+
+## 25. v1.3 outcome — the dispatch half pivots to a CC-as-coordinator playbook
+
+Decision (operator, 2026-07-16): `watch`/`resume` are NOT implemented in bash. The dispatch half of
+coordinated mode v1 is a **Claude Code session executing a reviewed playbook skill**
+(`pipeline-coordinate`, in the `pipeline` repository), using the same Herdr transport verbs
+(`pane run` / `agent explain`) this document specifies. Three findings from the implementation
+attempt ([PR #14](https://github.com/jackypanster/pipeline-driver/pull/14), closed unmerged) drove
+the pivot:
+
+1. **Frozen decision 6 is structurally unimplementable as written.** Delegating impl spans to the
+   existing `drive.sh` requires a headless path through its interactive GATE 1 trust gate — the one
+   surface every party agreed never to relax. The alternative (per-card dispatch by the coordinator)
+   was viable, but by then finding 2 dominated.
+2. **Coordination is semi-semantic.** Decision 2 ("the coordinator MUST NOT make a semantic
+   decision") forces every judgment — is the implementer's output acceptable, what should a fix
+   handoff say, is a review round closed — into machine-parseable protocol. The 46 review findings
+   across PRs #13/#14 were overwhelmingly the cost of making bash safe against inputs a reasoning
+   coordinator simply reads. A CC session handles those cases natively and demonstrably better (this
+   architecture's own PRs were coordinated exactly that way, end to end).
+3. **The unattended premise was already void.** The merge gate requires a live human in the reviewer
+   session (Section 17), so end-to-end unattended operation was never achievable; an attended CC
+   coordinator gives up nothing the design could actually deliver.
+
+What remains normative from this document for the playbook coordinator: the role/pane topology (§5),
+`control.json` authorization (§6), the route evidence table (§7 — as reading guidance, not a parser
+spec), the dispatch envelope + stage stale guard (§9, merged in `pipeline` #44), the Herdr transport
+contract (§10), the human merge gate (§17), and the three-roles/three-models separation with the
+operator as final gate. `doctor`/`status` (#13) are the playbook's session preflight. `drive.sh` is
+unchanged and remains the standalone impl-loop tool. A future deterministic dispatcher may revisit
+Sections 8/12–18 with this section as its first requirements input.
