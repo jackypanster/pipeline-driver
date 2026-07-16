@@ -64,7 +64,7 @@ else
 
 # ===== 2. ledger present -> 'observed' carries last-observed seq/commit/delivery =====
 fresh; seed "$T"
-rkey=$(git -C "$T/obs" config --get remote.origin.url | sed -E 's#\.git$##; s#^[a-zA-Z]+://##; s#^[^@/:]+@##; s#([^/]*):#\1/#' | awk -F/ '{OFS="/";$1=tolower($1);print}' | sed 's#[^A-Za-z0-9._-]#_#g')
+rkey=$(bash "$COORD" __repo-key "$T/obs")
 featdir="$T/state/$rkey/hello-cli"
 mkdir -p "$featdir"; chmod 700 "$featdir"
 cat > "$featdir/ledger.json" <<EOF
@@ -81,7 +81,7 @@ else
 
 # ===== 3. unresolved halt.json -> state=halted, code surfaced in the JSON =====
 fresh; seed "$T"
-rkey=$(git -C "$T/obs" config --get remote.origin.url | sed -E 's#\.git$##; s#^[a-zA-Z]+://##; s#^[^@/:]+@##; s#([^/]*):#\1/#' | awk -F/ '{OFS="/";$1=tolower($1);print}' | sed 's#[^A-Za-z0-9._-]#_#g')
+rkey=$(bash "$COORD" __repo-key "$T/obs")
 featdir="$T/state/$rkey/hello-cli"; mkdir -p "$featdir"; chmod 700 "$featdir"
 printf '{"code":"REMOTE_MISMATCH","where":"watch"}' > "$featdir/halt.json"
 out=$(run_status); rc=$?
@@ -93,7 +93,7 @@ else
 
 # ===== 4. corrupt ledger.json -> LEDGER_CORRUPT, non-zero, valid JSON error object =====
 fresh; seed "$T"
-rkey=$(git -C "$T/obs" config --get remote.origin.url | sed -E 's#\.git$##; s#^[a-zA-Z]+://##; s#^[^@/:]+@##; s#([^/]*):#\1/#' | awk -F/ '{OFS="/";$1=tolower($1);print}' | sed 's#[^A-Za-z0-9._-]#_#g')
+rkey=$(bash "$COORD" __repo-key "$T/obs")
 featdir="$T/state/$rkey/hello-cli"; mkdir -p "$featdir"; chmod 700 "$featdir"
 printf 'this is not { json' > "$featdir/ledger.json"
 out=$(run_status); rc=$?

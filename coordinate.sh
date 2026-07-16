@@ -62,25 +62,38 @@ coord_die() {
 }
 note() { printf '%s\n' "$*" >&2; }
 
-# ---- remote-identity normalization (design §11/§13) ----------------------------
-# Map https / ssh / scp-like forms of the SAME remote to ONE canonical key. The
-# key also derives the §13 repo state key. Host is lowercased (case-insensitive);
-# the path case is preserved (some hosts are case-sensitive). Verified forms:
-#   https://github.com/acme/x.git   ssh://git@github.com/acme/x.git
-#   git@github.com:acme/x.git       https://github.com/acme/x
+# ---- remote-identity normalization (design §11/§13/§19) ------------------------
+# redact_remote <url>: strip credential userinfo (user[:password]@) from a remote
+# URL for SAFE display. Keeps the scheme. Used on EVERY diagnostic/output path so a
+# secret embedded as https://alice:ghp_SECRET@host/... can never reach stderr/
+# stdout or a derived key (§14 sanitized-input / §19; finding: credential sanitize).
+redact_remote() {
+  printf '%s' "$1" | sed -E 's#(^[a-zA-Z][a-zA-Z0-9+.-]*://)?[A-Za-z0-9._~%+-]+(:[^@/]*)?@#\1#'
+}
+
+# normalize_remote <url>: map https / ssh / scp-like forms of the SAME remote to
+# ONE canonical key — scheme-stripped, userinfo-stripped FIRST, .git-stripped,
+# scp-colon -> /, host lowercased; path case preserved. Credential stripping runs
+# before everything else so the derived §13 repo key never carries a secret.
+# Verified forms:
+#   https://alice:secret@github.com/acme/x.git   ssh://git@github.com/acme/x.git
+#   git@github.com:acme/x.git                     https://github.com/acme/x
 # all -> github.com/acme/x
 normalize_remote() {
   printf '%s' "$1" \
-    | sed -E 's#\.git$##; s#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/:]+@##; s#([^/]*):#\1/#' \
-    | awk -F/ '{ $1=tolower($1); OFS="/"; print }'
+    | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[A-Za-z0-9._~%+-]+(:[^@/]*)?@##; s#\.git$##; s#([^/]*):#\1/#' \
+    | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }'
 }
 
-# repo_key_from <workdir> — sanitized single-segment key from origin.url, or empty.
+# repo_key_from <workdir> — single-segment, COLLISION-SAFE key from origin.url.
+# The normalized identity is percent-encoded (jq @uri) so structural separators are
+# preserved: github.com/a/b_c and github.com/a_b/c map to DIFFERENT keys (finding:
+# collision-safe key). Empty on failure.
 repo_key_from() {
   local url
   url=$(git -C "$1" config --get remote.origin.url 2>/dev/null) || url=""
   [ -n "$url" ] || return 1
-  normalize_remote "$url" | sed 's#[^A-Za-z0-9._-]#_#g'
+  normalize_remote "$url" | jq -rR '@uri'
 }
 
 state_root() {
@@ -170,7 +183,7 @@ validate_config() {
       if [ -z "$url" ]; then cfg_violation WORKDIR_INVALID "$wdvar has no remote.origin.url"
       elif [ -z "$norm" ]; then norm=$(normalize_remote "$url")
       elif [ "$(normalize_remote "$url")" != "$norm" ]; then
-        cfg_violation REMOTE_MISMATCH "$wdvar remote ($url) != observer ($norm)"
+        cfg_violation REMOTE_MISMATCH "$wdvar remote ($(redact_remote "$url")) != observer ($norm)"
       fi
     fi
   done
@@ -536,6 +549,13 @@ EOF
 }
 
 SUBCMD="${1:-}"; shift || true
+# Internal test hooks (double-underscore, hidden from usage). They bypass --config
+# arg-parsing so coordinate.sh's pure helpers are exercisable by the regression
+# suite without a full config / Herdr topology. NOT a public API.
+case "$SUBCMD" in
+  __repo-key)    repo_key_from "$1"; exit $? ;;   # <workdir> -> collision-safe key
+  __bounded-run) bounded_run_ms "$@"; exit $? ;;  # <ms> <cmd...> -> bounded exec
+esac
 CONF=""; REASON=""
 while [ $# -gt 0 ]; do
   case "$1" in
