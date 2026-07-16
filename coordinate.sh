@@ -43,6 +43,9 @@ unset HERDR_PANE_ID 2>/dev/null || true
 # daemon must not hang preflight). Coarse but adequate: doctor is not latency-
 # sensitive, and an empty sample fails closed as non-authoritative.
 AUTH_TIMEOUT_MS="${COORD_AUTH_TIMEOUT_MS:-5000}"
+# Bounded timeout for `herdr pane list` — wholly unbounded by default, a wedged
+# Herdr daemon would hang the whole pane section. Same watchdog as agent explain.
+PANE_LIST_TIMEOUT_MS="${COORD_PANE_LIST_TIMEOUT_MS:-5000}"
 # Documented upper bounds for the configured timeouts (design §11).
 : ${POLL_SECS_MAX:=3600}
 : ${PANE_READY_TIMEOUT_MS_MAX:=600000}
@@ -114,28 +117,47 @@ is_pos_int() {  # <value>
 }
 
 # ---- bounded exec (perl; base-system on macOS/Linux; no `timeout` on macOS) -----
-# bounded_run_ms <ms> <cmd...> — stdout passes through; exit 124 on timeout. Runs
-# the child in its OWN process group so a wedged herdr daemon (and any children
-# holding the stdout pipe) are killed together at the deadline.
+# bounded_run_ms <ms> <cmd...> — stdout passes through; exit 124 on timeout, else
+# the leader's rc. The child runs in its OWN process group (perl setpgrp+exec); the
+# deadline is enforced at sub-second resolution via Time::HiRes::ualarm (a bare
+# `alarm` rounds 100ms up to 1s). Two failure modes are handled, both by killing
+# the WHOLE process group:
+#  (a) TIMEOUT — at the deadline the group is KILL'd and the leader reaped (exit 124).
+#  (b) EARLY LEADER EXIT — if the leader forks a descendant that still holds the
+#      stdout pipe and then exits, waitpid returns the leader but the caller's $(...)
+#      would block on the descendant (an immortal child hangs forever; the reviewer
+#      measured 2.04s for a 100ms budget). So on normal exit we KILL the group too,
+#      then drain it: the command substitution can NEVER outlive the deadline.
+# (drive.sh run_with_timeout_ms documents the same process-group kill discipline;
+# reimplemented here, never sourced.)
 bounded_run_ms() {
   local ms=$1; shift
   perl -e '
     use POSIX ":sys_wait_h";
+    use Time::HiRes qw(ualarm);
     my $ms = shift; my @cmd = @ARGV;
     my $pid = fork();
     die "fork: $!" unless defined $pid;
     if ($pid == 0) { setpgrp(0,0); exec @cmd or exit 127; }
-    my $secs = int(($ms + 999) / 1000);
-    $SIG{ALRM} = sub {
-      kill("TERM", -$pid);
-      for (1..10) { last if waitpid($pid, WNOHANG) == $pid; select(undef,undef,undef,0.05); }
+    my $armed = 1;
+    # drain_group: KILL every member of the child group, then wait briefly until
+    # the group is empty so any descendant holding stdout has released the pipe.
+    my $drain = sub {
       kill("KILL", -$pid);
-      waitpid($pid, 0);
+      for (1..80) { last unless kill(0, -$pid); select(undef,undef,undef,0.025); }
+    };
+    $SIG{ALRM} = sub {
+      return unless $armed;
+      $drain->();                 # KILL the whole group on the deadline
+      waitpid($pid, 0);           # reap the leader (already KILLed above)
       exit 124;
     };
-    alarm $secs;
+    ualarm(int($ms * 1000));
     waitpid($pid, 0);
-    exit($? >> 8);
+    my $rc = $? >> 8;
+    $armed = 0; ualarm(0);        # disarm: the leader exited of its own accord
+    $drain->();                   # but a descendant may still hold stdout
+    exit $rc;
   ' -- "$ms" "$@"
 }
 
@@ -376,7 +398,7 @@ cmd_doctor() {
 
     printf -- '--- role panes (herdr) --------------------------------------------\n'
     local panes_json=""
-    panes_json=$(herdr pane list 2>/dev/null) || panes_json=""
+    panes_json=$(bounded_run_ms "$PANE_LIST_TIMEOUT_MS" herdr pane list 2>/dev/null) || panes_json=""
     if [ -z "$panes_json" ] || ! printf '%s' "$panes_json" | jq -e . >/dev/null 2>&1; then
       d_code DEPENDENCY_MISSING "'herdr pane list' returned no JSON" "is Herdr running? (herdr status; socket: ~/.config/herdr/herdr.sock)"
     else
