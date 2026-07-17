@@ -179,6 +179,9 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `test/defaults-doctor.sh` | hermetic tests for the defaults layer + `drive.sh doctor` |
 | `test/board-relay.sh` | hermetic tests for `BOARD_OUT` auto-refresh + the one-key review relay |
 | `test/review-drive.sh` | hermetic e2e for the meta-PR loop (stub `gh` + stub `orca` play GitHub/codex/pi) |
+| `coordinate.sh` | the deterministic cross-stage coordinator (read-only phase: `doctor` + `status`; `watch`/`resume` are non-zero stubs) — the cross-stage sibling of `drive.sh`, see §coordinate.sh |
+| `coordinate.config.example` | per-repo config for it (copy to `coordinate.config`): observer + CC/Pi/Codex clones, command prefixes, timeouts |
+| `test/coordinate-*.sh` | hermetic suites for the coordinator: parse-tail, config validation, doctor, status, remote-identity, state safety, bounded-exec watchdog |
 
 ## Setup (one-time)
 
@@ -214,7 +217,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-state.sh && bash test/coordinate-watchdog.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
    (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
    to pin handles from). Every MISS prints the exact remediation command; it installs nothing
@@ -380,6 +383,54 @@ Run: pin the two handles in `review-drive.config` (copy the example; the reviewe
 terminal shares `REVIEW_TERMINAL_HANDLE` with the one-key relay), then
 `./review-drive.sh <pr-number-or-url>` and type the PR number at the start gate.
 Deps: `gh` (authed), `jq`, `orca`, both TUIs live in Orca terminals.
+
+## coordinate.sh — cross-stage coordinator (read-only phase)
+
+`coordinate.sh` is the **cross-stage sibling of `drive.sh`**: an OPTIONAL, opt-in watcher
+that advances one coordinated feature across Claude Code (CC), Pi, and Codex by typing the
+next stage command into the correct long-lived Herdr pane. It holds **zero authoritative
+state** — the target repo's `.pipeline/<feature>/journal.md` on the remote is the single
+source of truth, exactly as for `drive.sh`. This phase ships **only the read-only surface**:
+`doctor` (full preflight) and `status` (local state summary). `watch` and `resume` exist as
+stubs that fail non-zero, so a caller can never confuse them for working dispatch.
+
+**Setup:** `cp coordinate.config.example coordinate.config` and fill it per the file's
+comments — one observer clone plus three role clones (`CC_WORKDIR`/`PI_WORKDIR`/
+`CODEX_WORKDIR`) that all resolve to the SAME normalized remote identity and trunk
+`BRANCH`, the five stage command prefixes, and the three timeouts. Optional pane pins
+(`CC_PANE_ID`/`PI_PANE_ID`/`CODEX_PANE_ID`), `ON_HALT_EXEC`, and `STATE_DIR` override the
+discovery / default behavior. Every value is validated before use; command prefixes are
+data appended to a safely-constructed argv and are never `eval`'d.
+
+**`doctor --config <path>`** — read-only full preflight. It checks dependencies
+(git/jq/herdr/perl), validates the whole config, confirms the four clones share one
+normalized remote identity and are all on `BRANCH`, performs **one** `git fetch` in
+the observer clone (the bounded-exec watchdog wraps only the two `herdr` reads —
+`agent explain` and `pane list`), and — when an active coordinated feature is observed — parses
+`control.json` and the journal tail. It then resolves each role pane via `herdr pane list`
+(self pane **excluded**, distinct panes required) and proves lifecycle/manifest **authority**
+for each (the always-idle fallback is rejected). Finally it audits the local state dir
+(`0700` dirs / `0600` files, no symlinks, ledger integrity). It installs nothing and
+never mutates target-repo or coordinator state — the single fetch DOES update the
+observer clone's remote-tracking refs / `FETCH_HEAD` (a local observer-clone side
+effect, not a target-repo write). Every MISS prints the exact
+§14 tuple (code / where / input / reason / next_action / resume_guard) with its
+remediation. A completed run ends with a summary line
+`doctor: N blocking, M warning(s)` (non-zero exit if any blocking MISS fired); some
+malformed configs (e.g. `BRANCH` unset) or corrupt local state can also abort earlier
+with a fatal error before the summary.
+
+> Run `doctor` from a **non-role** shell. The tool captures its own `HERDR_PANE_ID` as
+> "self" and excludes that pane from role resolution; running it inside a role pane makes
+> that role unresolvable and fails `PANE_NOT_FOUND` by design.
+
+**`status --config <path>`** — **no network**. It validates the config (inspecting all
+four workdirs — git common-dirs, remotes, and the configured `BRANCH` value), reads the
+observer's `HEAD:.pipeline/current.json`, and reads the local state dir (`ledger.json`,
+`halt.json`, the lock directory), then prints one concise human line plus one JSON object
+describing the last observed coordinator state (feature, last journal seq/commit,
+delivery, halt/lock). When there is no state yet it prints `coordinate: idle (...)` and a
+matching idle JSON object.
 
 ## Failure / resume / rollback
 
