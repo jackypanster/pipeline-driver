@@ -217,7 +217,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-state.sh && bash test/coordinate-watchdog.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
    (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
    to pin handles from). Every MISS prints the exact remediation command; it installs nothing
@@ -410,21 +410,27 @@ the observer clone (the bounded-exec watchdog wraps only the two `herdr` reads �
 `control.json` and the journal tail. It then resolves each role pane via `herdr pane list`
 (self pane **excluded**, distinct panes required) and proves lifecycle/manifest **authority**
 for each (the always-idle fallback is rejected). Finally it audits the local state dir
-(`0700` dirs / `0600` files, no symlinks, ledger integrity). It is read-only, installs
-nothing, and touches the network only for the single fetch. Every MISS prints the exact
+(`0700` dirs / `0600` files, no symlinks, ledger integrity). It installs nothing and
+never mutates target-repo or coordinator state — the single fetch DOES update the
+observer clone's remote-tracking refs / `FETCH_HEAD` (a local observer-clone side
+effect, not a target-repo write). Every MISS prints the exact
 §14 tuple (code / where / input / reason / next_action / resume_guard) with its
-remediation, and the run ends with a summary line `doctor: N blocking, M warning(s)`
-(non-zero exit if any blocking MISS fired).
+remediation. Runs that get past config validation end with a summary line
+`doctor: N blocking, M warning(s)` (non-zero exit if any blocking MISS fired); some
+malformed configs (e.g. `BRANCH` unset) abort earlier with a fatal error before the
+summary.
 
 > Run `doctor` from a **non-role** shell. The tool captures its own `HERDR_PANE_ID` as
 > "self" and excludes that pane from role resolution; running it inside a role pane makes
 > that role unresolvable and fails `PANE_NOT_FOUND` by design.
 
-**`status --config <path>`** — read-only, **no network**. It reads the local state-dir
-ledger and the observer's `HEAD` only and prints one concise human line plus one JSON
-object describing the last observed coordinator state (feature, last journal seq/commit,
-delivery, halt/lock). When there is no state yet it prints `coordinate: idle (...)` and a
-matching idle JSON object.
+**`status --config <path>`** — **no network**. It validates the config (inspecting all
+four workdirs — git common-dirs, branches, remotes), reads the observer's
+`HEAD:.pipeline/current.json`, and reads the local state dir (`ledger.json`, `halt.json`,
+the lock directory), then prints one concise human line plus one JSON object describing
+the last observed coordinator state (feature, last journal seq/commit, delivery,
+halt/lock). When there is no state yet it prints `coordinate: idle (...)` and a matching
+idle JSON object.
 
 ## Failure / resume / rollback
 
