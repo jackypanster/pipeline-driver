@@ -415,22 +415,22 @@ never mutates target-repo or coordinator state — the single fetch DOES update 
 observer clone's remote-tracking refs / `FETCH_HEAD` (a local observer-clone side
 effect, not a target-repo write). Every MISS prints the exact
 §14 tuple (code / where / input / reason / next_action / resume_guard) with its
-remediation. Runs that get past config validation end with a summary line
+remediation. A completed run ends with a summary line
 `doctor: N blocking, M warning(s)` (non-zero exit if any blocking MISS fired); some
-malformed configs (e.g. `BRANCH` unset) abort earlier with a fatal error before the
-summary.
+malformed configs (e.g. `BRANCH` unset) or corrupt local state can also abort earlier
+with a fatal error before the summary.
 
 > Run `doctor` from a **non-role** shell. The tool captures its own `HERDR_PANE_ID` as
 > "self" and excludes that pane from role resolution; running it inside a role pane makes
 > that role unresolvable and fails `PANE_NOT_FOUND` by design.
 
 **`status --config <path>`** — **no network**. It validates the config (inspecting all
-four workdirs — git common-dirs, branches, remotes), reads the observer's
-`HEAD:.pipeline/current.json`, and reads the local state dir (`ledger.json`, `halt.json`,
-the lock directory), then prints one concise human line plus one JSON object describing
-the last observed coordinator state (feature, last journal seq/commit, delivery,
-halt/lock). When there is no state yet it prints `coordinate: idle (...)` and a matching
-idle JSON object.
+four workdirs — git common-dirs, remotes, and the configured `BRANCH` value), reads the
+observer's `HEAD:.pipeline/current.json`, and reads the local state dir (`ledger.json`,
+`halt.json`, the lock directory), then prints one concise human line plus one JSON object
+describing the last observed coordinator state (feature, last journal seq/commit,
+delivery, halt/lock). When there is no state yet it prints `coordinate: idle (...)` and a
+matching idle JSON object.
 
 ## Failure / resume / rollback
 
