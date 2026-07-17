@@ -404,8 +404,9 @@ data appended to a safely-constructed argv and are never `eval`'d.
 
 **`doctor --config <path>`** — read-only full preflight. It checks dependencies
 (git/jq/herdr/perl), validates the whole config, confirms the four clones share one
-normalized remote identity and are all on `BRANCH`, performs **one** bounded `git fetch` in
-the observer clone, and — when an active coordinated feature is observed — parses
+normalized remote identity and are all on `BRANCH`, performs **one** `git fetch` in
+the observer clone (the bounded-exec watchdog wraps only the two `herdr` reads —
+`agent explain` and `pane list`), and — when an active coordinated feature is observed — parses
 `control.json` and the journal tail. It then resolves each role pane via `herdr pane list`
 (self pane **excluded**, distinct panes required) and proves lifecycle/manifest **authority**
 for each (the always-idle fallback is rejected). Finally it audits the local state dir
