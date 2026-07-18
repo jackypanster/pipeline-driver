@@ -920,3 +920,37 @@ Design faults to root-cause + fix (codex's diagnosis — arch-level, not an impl
 Hunt output: a root-cause report + a re-arch/re-scope recommendation routed to pipeline-task/arch. Human
   decides whether to continue. On success cc surfaces it; the merge gate stays human.
 <<< END
+
+## seq=19 · 2026-07-18T07:55:39Z · hunt→task · completed · by=claude-opus-4-8 (cc-hunt)
+done:   Root-caused card 01's two blocking findings from the reviewed head a76f838 source (confirmed by
+        reading drive.sh, not from the review summary). Both are DESIGN faults in shared seams, not impl
+        bugs:
+        (1) the ask_* seam contract is self-contradictory — helpers return their value on stdout so
+        callers must use $(...), which forks a subshell, so their setup_abort=1 (drive.sh:204,:217,:233)
+        never reaches setup()'s frame; the guards at :351,:398,:437-439 always read 0, so EOF/Ctrl-D
+        falls through to the default and writes with exit 0. Headless SETUP_YES=1 tests take each
+        helper's early return BEFORE `read`, so the green suite never executes the broken path.
+        (2) no single symlink-refusing write primitive — the guard covers only the final roles.yaml/rc;
+        the .bak backups (cp :378,:413), setup_defaults' primary redirect (:379, unguarded), and
+        _atomic_write's predictable non-exclusive temp (:254-256) all still follow symlinks.
+        Classification: spec/red-test wrong + arch seam flaw => pipeline-task re-spec (architect owns the
+        tests AND the seam contract; a coder cannot fix these under the current frozen surface). Card 01
+        left blocked with the root cause + re-spec direction appended, for pipeline-task to re-freeze +
+        reset. NOT a blind retry.
+output: .pipeline/drive-setup/tasks/01.md, .pipeline/drive-setup/journal.md
+--- handoff ---
+>>> NEXT
+Run pipeline-task — re-spec + re-freeze card 01 ONLY (preserve sibling card 02-04 state).
+repo=https://github.com/jackypanster/pipeline-driver.git branch=main pr=#9
+Model: frontier SOTA required.
+Read: tasks/01.md §Hunt (attempt 3 block) — root cause + re-spec direction; reviews/review-03.md;
+  arch.md §ask_* seam; docs/adr/0003 (idempotent file-gen) + 0004 (narrowed scope).
+Re-arch + re-freeze (two seam fixes, each paired with a test that FAILS on a76f838):
+  1. ask_* abort must travel in the value channel, not a subshell-mutated var: adopt an exit-status
+     convention (v=$(ask_* …) || setup_abort=1) or a sentinel file; freeze a REAL-PTY EOF/Ctrl-D case
+     asserting NO write + non-zero exit.
+  2. Introduce ONE refuse-symlink + O_EXCL-temp + atomic + mode-preserving write primitive; route EVERY
+     sink through it (defaults/roles/pboard, primary + .bak + temp); freeze a `*.bak -> victim` escape
+     and a symlinked `drive.defaults` case.
+Then hand to pipeline-impl. The merge gate stays human — human decides whether to continue or park.
+<<< END
