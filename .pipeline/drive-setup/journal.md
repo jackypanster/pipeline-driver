@@ -954,3 +954,32 @@ Re-arch + re-freeze (two seam fixes, each paired with a test that FAILS on a76f8
      and a symlinked `drive.defaults` case.
 Then hand to pipeline-impl. The merge gate stays human — human decides whether to continue or park.
 <<< END
+
+## seq=20 · 2026-07-18T08:38:00Z · KILL · drive-setup terminated (supersedes seq=19) · by=claude-opus-4-8 (cc)
+done:   Human evaluation verdict: KILL the feature, PIVOT the goal. drive.sh setup was re-implementing,
+        in brittle deterministic bash, an install procedure that ALREADY EXISTS in agent-legible form —
+        `~/workspace/pipeline` README §Install, headed "(agent: execute this; it is written for you, not
+        a human)". The operator's real goal (one-key dumb-proof install per project, mine or external) is
+        met by that section: per-MACHINE install is once (clone + cp skills/pipeline-* into ~/.agents/skills
+        + attach runtimes + verify deps); the per-PROJECT cost the operator kept repaying is a single
+        command — `cp ~/workspace/pipeline/roles.yaml <target>/.pipeline/roles.yaml` (roles.yaml is 18
+        lines). drive-setup optimized the rarely-run per-machine axis + fought bash's sharp edges (the
+        subshell-abort + symlink-TOCTOU faults root-caused in seq=19), i.e. the wrong axis. Installing into
+        an arbitrary project is an AGENT-shaped task, not a program-shaped one — the operator confirmed an
+        agent-read install is acceptable, and it already ships. So the bash wizard is redundant, not merely
+        low-ROI.
+        VOIDS the seq=19 hunt→task handoff — do NOT run pipeline-task; do NOT re-spec/re-impl card 01.
+        Cleanup executed: `.pipeline/current.json` reset to idle (feature=null, stage=idle); the closed
+        PR #9 branch `feat/drive-setup` (which alone carried the drive.sh setup() impl — it never reached
+        main) deleted. This `.pipeline/drive-setup/` tree is RETAINED as an archived case study: it is the
+        run that proved the pipeline's review gate catches real security bugs across 3 rounds + a hunt.
+output: .pipeline/current.json, .pipeline/drive-setup/journal.md
+--- handoff ---
+>>> NEXT
+None for drive-setup — the feature is terminated; no pipeline stage follows.
+Replacement goal (tracked SEPARATELY, not a drive-setup card): propose a `pipeline-install` skill in
+`github.com/jackypanster/pipeline` via `pipeline-improve` — the agent-triggerable twin of the existing
+`pipeline-update` skill, wrapping README §Install (idempotent per-machine check + per-project roles.yaml
+copy + dependency verify). It lives in the pipeline repo, NOT here; it runs no shim loop and owns no
+`.pipeline/` state.
+<<< END
