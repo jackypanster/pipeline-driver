@@ -326,6 +326,61 @@ if grep -q '^GH_TOKEN_INHERITED=unset$' <<<"$probe" \
 else bad "boundary" "probe=$probe"; fi
 rm -rf "$R" "$FAKEHOME"
 
+# --- 15. leading-zero NOTIFY_TIMEOUT_MS is octal-unsafe: rejected before halt ---
+# Finding 1 (round 4): validation accepted digit-only strings, but bash $(( )) reads a
+# leading-zero value (08/09) as OCTAL -> 'value too great for base' INSIDE halt(),
+# skipping the banner+exit and reaching GATE 1. 012/007 were silently octal (10/7).
+# Preflight now rejects any leading-zero form; run_notify also forces base 10.
+for val in 08 09 012 007 00; do
+  R=$(mktemp -d); seed "$R" 1; mk_notifier "$R"
+  printf 'NOTIFY_EXEC=%s/notify.sh\nNOTIFY_TIMEOUT_MS=%s\nIMPL_TRANSPORT=invalid\n' "$R" "$val" >> "$R/cfg"
+  out=$(run "$R"); rc=$?
+  if [ "$rc" -eq 2 ] && grep -q '=== DRIVER HALT ===' <<<"$out" \
+     && grep -q 'NOTIFY_TIMEOUT_MS has a leading zero' <<<"$out" \
+     && ! grep -q 'GATE 1 — type the spec-rev' <<<"$out" \
+     && ! grep -qE 'value too great for base|invalid arithmetic' <<<"$out" \
+     && [ ! -f "$R/notify.log" ]; then
+    ok "timeout NOTIFY_TIMEOUT_MS='$val' rejected as leading-zero (no octal error, halt intact)"
+  else bad "timeout leading-zero '$val' (rc=$rc)" "$out"; fi
+  rm -rf "$R"
+done
+
+# --- 16. NOTIFY_ENV_ALLOW does not glob: a cwd filename cannot name a variable ---
+# Finding 2 (round 4): the unquoted `for nm in $NOTIFY_ENV_ALLOW` pathname-expanded
+# each token before the identifier check, so with a cwd file literally named
+# GH_TOKEN and NOTIFY_ENV_ALLOW=*, the wildcard expanded to GH_TOKEN (a valid
+# identifier) and forwarded the ambient secret. The split now uses `read -ra` (IFS
+# only, no globbing) and validates the ORIGINAL token, so '*' is rejected.
+R=$(mktemp -d); seed "$R" 2; mkdir -p "$R/bin"; mk_notifier "$R" 0
+cat > "$R/bin/claude" <<'S'
+#!/usr/bin/env bash
+repo=""; for a in "$@"; do case "$a" in *repo=*) repo="${a#*repo=}"; repo="${repo%% *}";; esac; done
+cd "$repo" || exit 1; git pull -q --rebase origin master 2>/dev/null
+card=$(grep -l '^status: todo' .pipeline/f/tasks/*.md 2>/dev/null | sort | head -1) || exit 1
+sed -i.bak 's/^status: todo/status: review/' "$card"; rm -f "$card.bak"
+last=$(grep -Eo '^## seq=[0-9]+' .pipeline/f/journal.md | tail -1 | grep -Eo '[0-9]+'); s=$((last+1))
+printf '\n## seq=%s · t · impl→review · completed · by=stub\ndone: x\n--- handoff ---\n>>> NEXT\nRun pipeline-review.\n<<< END\n' "$s" >> .pipeline/f/journal.md
+git add -A && git commit -qm "s=$s" && git push -q origin master
+S
+chmod +x "$R/bin/claude"
+cat > "$R/notify.sh" <<EOF
+#!/usr/bin/env bash
+printf 'GH_TOKEN_INHERITED=%s\n' "\${GH_TOKEN:-unset}" >> "$R/globprobe"
+exit 0
+EOF
+chmod +x "$R/notify.sh"
+printf 'NOTIFY_EXEC=%s/notify.sh\nNOTIFY_ENV_ALLOW=*\n' "$R" >> "$R/cfg"
+SCRATCH=$(mktemp -d); : > "$SCRATCH/GH_TOKEN"        # cwd filename that the old glob would match
+orig=$(pwd); cd "$SCRATCH"
+printf 'AAA\n' | DRIVE_DEFAULTS=/nonexistent GH_TOKEN=ambient-secret PATH="$R/bin:$PATH" bash "$DRIVER/drive.sh" "$R/cfg" >/dev/null 2>&1
+cd "$orig"; rm -rf "$SCRATCH"
+probe=$(cat "$R/globprobe" 2>/dev/null | sort -u)
+if grep -q '^GH_TOKEN_INHERITED=unset$' <<<"$probe" \
+   && ! grep -q 'ambient-secret' <<<"$probe"; then
+  ok "allowlist: NOTIFY_ENV_ALLOW='*' + cwd file GH_TOKEN -> GH_TOKEN NOT forwarded (no glob)"
+else bad "allowlist glob (rc)" "probe=$probe"; fi
+rm -rf "$R"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

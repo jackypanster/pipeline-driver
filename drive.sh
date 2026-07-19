@@ -208,16 +208,26 @@ run_notify() {   # <exec-path> <event> [halt-reason] [halt-next-step]
     "DRIVE_NEXT=${NEXT:-}" "DRIVE_HALT_REASON=$reason" "DRIVE_HALT_NEXT=$hnext" )
   # Operator opt-in allowlist: forward only shell-safe NAMES the notifier needs
   # (e.g. HERMES_TOKEN). The ambient environment is NOT forwarded — deny by default.
-  for nm in $NOTIFY_ENV_ALLOW; do
+  # `read -ra` splits the configured string on IFS ONLY (no pathname expansion): an
+  # unquoted `for nm in $NOTIFY_ENV_ALLOW` would glob against the cwd, so a wildcard
+  # token (or a token matching a cwd filename) could admit a name the operator never
+  # listed (field-found: NOTIFY_ENV_ALLOW=* + a cwd file GH_TOKEN -> GH_TOKEN
+  # forwarded, defeating deny-by-default). The identifier check then runs on the
+  # ORIGINAL token, so '*' is rejected, not expanded.
+  local _allow=()
+  read -ra _allow <<< "$NOTIFY_ENV_ALLOW"
+  for nm in ${_allow[@]+"${_allow[@]}"}; do
     case "$nm" in [A-Za-z_]*) ;; *) continue ;; esac
     case "$nm" in *[!A-Za-z0-9_]*) continue ;; esac
     eval "val=\${$nm:-}"
     if [ -n "${val:-}" ]; then envv+=( "$nm=$val" ); fi
   done
   envv+=( "$exec" "$event" )
-  # NOTIFY_TIMEOUT_MS is a validated bounded positive integer (preflight), so this
-  # arithmetic is safe and can never break the halt() path that invoked us.
-  local ms=$NOTIFY_TIMEOUT_MS term_ms grace_ms term_s grace_s
+  # NOTIFY_TIMEOUT_MS is a validated canonical base-10 positive integer (preflight
+  # rejects leading zeros). Force base 10 here too as defense-in-depth, so this
+  # arithmetic — on the halt() path — can never hit an octal/arith error regardless
+  # of the validated input.
+  local ms=$((10#$NOTIFY_TIMEOUT_MS)) term_ms grace_ms term_s grace_s
   term_ms=$(( ms > 200 ? ms - 200 : 0 )); grace_ms=$(( ms - term_ms ))
   term_s=$(awk -v m="$term_ms"   'BEGIN{printf "%.3f", m/1000}')
   grace_s=$(awk -v m="$grace_ms" 'BEGIN{printf "%.3f", m/1000}')
@@ -693,10 +703,14 @@ if [ -n "$NOTIFY_EXEC" ]; then
   [ -n "$bad_notify" ] || { [ -x "$NOTIFY_EXEC" ]   || bad_notify="NOTIFY_EXEC not executable: $NOTIFY_EXEC"; }
   # NOTIFY_TIMEOUT_MS flows into arithmetic on the halt() path -> reject any non-digit
   # or out-of-range value HERE. Pattern-match first (no arithmetic on the untrusted
-  # string), then a length cap (avoids passing a huge number to `[`), then the range.
+  # string): digits-only, then REJECT leading zeros (0[0-9]*) because bash $(( ))
+  # reads them as OCTAL (field-found: 08 -> "value too great for base" inside halt(),
+  # bypassing the banner+exit). A length cap avoids passing a huge number to `[`;
+  # then the range.
   if [ -z "$bad_notify" ]; then
     case "$NOTIFY_TIMEOUT_MS" in
-      ''|*[!0-9]*) bad_notify="NOTIFY_TIMEOUT_MS not a positive integer: ${NOTIFY_TIMEOUT_MS:-<empty>}" ;;
+      ''|*[!0-9]*)    bad_notify="NOTIFY_TIMEOUT_MS not a positive integer: ${NOTIFY_TIMEOUT_MS:-<empty>}" ;;
+      0[0-9]*)        bad_notify="NOTIFY_TIMEOUT_MS has a leading zero (bash arithmetic would read it as octal): $NOTIFY_TIMEOUT_MS" ;;
     esac
   fi
   if [ -z "$bad_notify" ]; then
