@@ -66,3 +66,7 @@ STAGE_TIMEOUT_SECS=2700
 # MUST be outside every configured clone. Created 0700; files 0600. Writes reject
 # symlink destinations and use exclusive random same-directory temp files.
 # STATE_DIR=/absolute/path/to/pipeline-driver-state
+
+# Optional per-watcher overrides of the machine bindings in drive.defaults
+# (see drive.defaults.example): CC_AGENT / CC_MODEL_EXPECT / IMPL_AGENT /
+# IMPL_MODEL_EXPECT / REVIEW_AGENT / REVIEW_MODEL_EXPECT. config wins.

@@ -234,6 +234,72 @@ valid_feature_slug() {
   printf '%s' "$s" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
 }
 
+# ---- machine bindings (optional CC/IMPL/REVIEW _AGENT + _MODEL_EXPECT fields) ---
+# Six OPTIONAL fields, set in the global defaults file, overridable per-watcher in
+# coordinate.config (config wins — same precedence direction as drive.sh). All of
+# this is ADDITIVE: an install with none of the fields behaves exactly as before
+# (every field <unset>, zero new MISS).
+
+# defaults_path — the global defaults file location, verbatim from drive.sh
+# ($DRIVE_DEFAULTS overrides; the test harness pins it).
+defaults_path() { printf '%s' "${DRIVE_DEFAULTS:-${XDG_CONFIG_HOME:-$HOME/.config}/pipeline-driver/drive.defaults}"; }
+
+# valid_agent <value> — [A-Za-z0-9][A-Za-z0-9._-]*, length ≤ 32 (no URLs/paths can
+# ever reach a diagnostic through these fields).
+valid_agent() {
+  local v=$1
+  [ "${#v}" -le 32 ] || return 1
+  printf '%s' "$v" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+}
+
+# valid_model_expect <value> — printable ASCII/UTF-8, no control chars, no
+# leading/trailing whitespace, length ≤ 64. (Empty means UNSET and is handled by
+# the caller.) Matched as a LITERAL case-insensitive substring — never regex/glob.
+valid_model_expect() {
+  local v=$1
+  [ "${#v}" -le 64 ] || return 1
+  case "$v" in [[:space:]]*|*[[:space:]]) return 1 ;; esac
+  ! printf '%s' "$v" | LC_ALL=C grep -q '[[:cntrl:]]'
+}
+
+# binding_status <var> <agent|expect> — echoes: unset | ok | invalid.
+binding_status() {
+  local var=$1 kind=$2
+  # NB: the indirect expansion MUST be its own statement — in bash 3.2 a single
+  # `local var=$1 v="${!var:-}"` line evaluates the RHS before var is assigned.
+  local v="${!var:-}"
+  if [ -z "$v" ]; then printf 'unset'; return 0; fi
+  case "$kind" in
+    agent)  valid_agent "$v" ;;
+    expect) valid_model_expect "$v" ;;
+  esac && printf 'ok' || printf 'invalid'
+}
+
+# binding_token <var> <agent|expect> — the display token: the value, <unset>, or
+# <invalid>. An INVALID value is never echoed (untrusted bytes stay out of output).
+binding_token() {
+  local var=$1 kind=$2
+  case "$(binding_status "$var" "$kind")" in
+    ok)      printf '%s' "${!var}" ;;
+    unset)   printf '<unset>' ;;
+    invalid) printf '<invalid>' ;;
+  esac
+}
+
+# print_machine_bindings — the human-readable merged view (defaults file, then
+# coordinate.config overrides), shared by cmd_doctor and cmd_status. impl
+# transport / yolo come from the SAME merged view, display-only.
+print_machine_bindings() {
+  local df; df=$(defaults_path)
+  printf -- '--- machine bindings (drive.defaults; coordinate.config overrides) --\n'
+  if [ -f "$df" ]; then printf 'defaults file: %s\n' "$df"
+  else printf 'defaults file: <absent> (cp drive.defaults.example — see README §Setup)\n'; fi
+  printf '%-14s%-14s%-15s%s\n' "prd/arch/task" "(CC pane):"    "agent=$(binding_token CC_AGENT agent)"       "expect=$(binding_token CC_MODEL_EXPECT expect)"
+  printf '%-14s%-14s%-15s%s\n' "impl"         "(PI pane):"    "agent=$(binding_token IMPL_AGENT agent)"     "expect=$(binding_token IMPL_MODEL_EXPECT expect)"
+  printf '%-14s%-14s%-15s%s\n' "review"       "(CODEX pane):" "agent=$(binding_token REVIEW_AGENT agent)"   "expect=$(binding_token REVIEW_MODEL_EXPECT expect)"
+  printf 'impl transport: %-9syolo: %s\n' "${IMPL_TRANSPORT:-<unset>}" "${YOLO:-<unset>}"
+}
+
 # ---- bounded exec (perl; base-system on macOS/Linux; no `timeout` on macOS) -----
 # bounded_run_ms <ms> <cmd...> — stdout passes through; exit 124 on timeout, else
 # the leader's rc. The child runs in its OWN process group (perl setpgrp+exec); the
@@ -542,6 +608,21 @@ cmd_doctor() {
     fi
   done
 
+  # Machine bindings block (additive; merged defaults→config view). An INVALID
+  # binding field is blocking HERE (doctor is the preflight); status prints the
+  # same block with <invalid> and keeps going. Unset fields are never a MISS.
+  print_machine_bindings
+  local _bvar _bkind
+  for _bvar in CC_AGENT CC_MODEL_EXPECT IMPL_AGENT IMPL_MODEL_EXPECT REVIEW_AGENT REVIEW_MODEL_EXPECT; do
+    case "$_bvar" in *_AGENT) _bkind=agent ;; *) _bkind=expect ;; esac
+    if [ "$(binding_status "$_bvar" "$_bkind")" = "invalid" ]; then
+      case "$_bkind" in
+        agent)  d_code CONFIG_INVALID "doctor:config" "$_bvar" "$_bvar must match [A-Za-z0-9][A-Za-z0-9._-]* and be at most 32 chars" "fix or unset $_bvar in $(defaults_path) or $CONF" ;;
+        expect) d_code CONFIG_INVALID "doctor:config" "$_bvar" "$_bvar must be printable (no control chars), have no leading/trailing whitespace, and be at most 64 chars" "fix or unset $_bvar in $(defaults_path) or $CONF" ;;
+      esac
+    fi
+  done
+
   # Downstream sections read the clones; skip them if any workdir is unusable.
   # (NB: do NOT use `_` as the loop var — bash overwrites it with each command's
   # last arg, so the indirect `${!_}` would resolve to garbage after one iter.)
@@ -703,6 +784,36 @@ coord_check_role() {
     d_ok "$role pane lifecycle authority: confirmed (hook/matched-rule, no idle fallback)"
   else
     d_code AGENT_STATUS_INVALID "doctor:panes:$role" "$pane" "$role pane $pane: agent status source NOT authoritative (no lifecycle hook / no MATCHED manifest rule — always-idle fallback)" "attach that agent's Herdr integration, or pin to a pane with hook authority (design §24.2)"
+  fi
+  # Model verification (machine bindings): with the role's *_MODEL_EXPECT set and
+  # valid, the live pane footer MUST contain it as a LITERAL case-insensitive
+  # substring — the coordinator playbook's "read the pane footer" preflight as a
+  # machine check (three roles on three models). FAIL CLOSED: EXPECT set means
+  # verification is REQUIRED, so an unreadable footer is a MISS, never a skip.
+  # The footer is pane-controlled output: only the EXPECTED value is ever printed
+  # in a diagnostic, never the raw footer bytes (sanitized-diagnostics discipline).
+  # The footer read reuses the existing single-pane-read budget (AUTH_TIMEOUT_MS)
+  # — no new config field.
+  local mvar mexp footer
+  case "$role" in
+    CC)    mvar=CC_MODEL_EXPECT ;;
+    PI)    mvar=IMPL_MODEL_EXPECT ;;
+    CODEX) mvar=REVIEW_MODEL_EXPECT ;;
+  esac
+  mexp="${!mvar:-}"
+  if [ -z "$mexp" ]; then
+    d_info "$role pane model: no *_MODEL_EXPECT set — skipping footer check"
+  elif ! valid_model_expect "$mexp"; then
+    d_info "$role pane model: $mvar invalid — skipping footer check (see the CONFIG_INVALID above)"
+  else
+    footer=$(bounded_run_ms "$AUTH_TIMEOUT_MS" herdr pane read "$pane" --source visible --lines 3 2>/dev/null) || footer=""
+    if [ -z "$footer" ]; then
+      d_code MODEL_MISMATCH "doctor:panes:$role" "$pane" "$role pane $pane model: footer unreadable — cannot verify expected model" "open the intended TUI/model in this pane, or update *_MODEL_EXPECT / coordinate.config"
+    elif printf '%s' "$footer" | LC_ALL=C grep -qiFe "$mexp"; then
+      d_ok "$role pane model: footer matches expect '$mexp'"
+    else
+      d_code MODEL_MISMATCH "doctor:panes:$role" "$pane" "$role pane $pane model: footer does not contain expected '$mexp' (literal case-insensitive match)" "open the intended TUI/model in this pane, or update *_MODEL_EXPECT / coordinate.config"
+    fi
   fi
 }
 
@@ -907,6 +1018,11 @@ cmd_status() {
     coord_die "${fcode:-CONFIG_INVALID}" "status:validate_config" "${finput:-$CONF}" \
       "${freason:-config validation failed}" "edit $CONF (coordinate.config.example documents each rule)"
   }
+  # The machine-bindings block is human-readable observability: it goes to STDERR
+  # so stdout keeps its contract of exactly ONE human line + ONE JSON object
+  # (emit_status_json is untouched). Invalid optional fields print <invalid> and
+  # never abort this read-only summary.
+  print_machine_bindings >&2
   local root rkey repodir feat="" cur
   root=$(state_root)
   rkey=$(repo_key_from "$OBSERVER_WORKDIR" 2>/dev/null) || rkey=""
@@ -1012,6 +1128,12 @@ case "$SUBCMD" in
   doctor)
     [ -n "$CONF" ] || { echo "coordinate.sh: doctor requires --config <path>" >&2; usage; exit 2; }
     [ -f "$CONF" ] || coord_die CONFIG_INVALID "doctor:arg-parse" "$CONF" "config file not found" "create it from coordinate.config.example"
+    # Global defaults first (optional), per-watcher config second — config wins.
+    # Same path expression + precedence direction as drive.sh; any unrelated
+    # variable the defaults file sets flows into validate_config unchanged.
+    DEFAULTS="$(defaults_path)"
+    # shellcheck disable=SC1090
+    [ -f "$DEFAULTS" ] && . "$DEFAULTS"
     # shellcheck disable=SC1090
     . "$CONF" || coord_die CONFIG_INVALID "doctor:load_config" "$CONF" "config file failed to source (bash syntax error)" "fix the bash syntax in $CONF"
     cmd_doctor
@@ -1019,6 +1141,10 @@ case "$SUBCMD" in
   status)
     [ -n "$CONF" ] || { echo "coordinate.sh: status requires --config <path>" >&2; usage; exit 2; }
     [ -f "$CONF" ] || coord_die CONFIG_INVALID "status:arg-parse" "$CONF" "config file not found" "create it from coordinate.config.example"
+    # Global defaults first (optional), per-watcher config second — config wins.
+    DEFAULTS="$(defaults_path)"
+    # shellcheck disable=SC1090
+    [ -f "$DEFAULTS" ] && . "$DEFAULTS"
     # shellcheck disable=SC1090
     . "$CONF" || coord_die CONFIG_INVALID "status:load_config" "$CONF" "config file failed to source (bash syntax error)" "fix the bash syntax in $CONF"
     cmd_status

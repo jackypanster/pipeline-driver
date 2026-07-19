@@ -217,7 +217,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-state.sh && bash test/coordinate-watchdog.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-state.sh && bash test/coordinate-watchdog.sh && bash test/coordinate-bindings.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
    (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
    to pin handles from). Every MISS prints the exact remediation command; it installs nothing
@@ -431,6 +431,13 @@ observer's `HEAD:.pipeline/current.json`, and reads the local state dir (`ledger
 describing the last observed coordinator state (feature, last journal seq/commit,
 delivery, halt/lock). When there is no state yet it prints `coordinate: idle (...)` and a
 matching idle JSON object.
+
+Both commands also print a **machine-bindings** block: the merged `drive.defaults` →
+`coordinate.config` view of the optional `CC/IMPL/REVIEW _AGENT` + `_MODEL_EXPECT`
+fields (which TUI drives each role pane, and the model expected in its footer). With a
+`*_MODEL_EXPECT` set, `doctor` **fail-closed-verifies** it as a literal case-insensitive
+substring of that pane's live footer (`MODEL_MISMATCH` otherwise) — three-roles-on-three-models
+becomes a machine check instead of an eyeball of the pane footer.
 
 ## Failure / resume / rollback
 
