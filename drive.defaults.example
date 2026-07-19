@@ -75,16 +75,21 @@ YOLO=0
 # DRIVE_HALT_REASON + DRIVE_HALT_NEXT on halts). Validated at preflight — a broken
 # notifier halts BEFORE GATE 1 (you are about to walk away trusting these pings);
 # runtime send failures warn once and never halt the loop. One-way driver->human.
-# Isolation (so a notifier can never weaken the loop or see your secrets):
-#   * NOTIFY_TIMEOUT_MS (default 5000) — a hard per-invocation deadline. A wedged or
-#     TERM-immune send is killed (its whole process group: TERM then KILL) and
-#     degrades to a single warn; it can never suppress GATE 1 / card / halt.
+# Defense-in-depth, NOT a sandbox. NOTIFY_EXEC is a TRUSTED executable that runs as
+# YOUR user (normal filesystem/process/network access — it is NOT OS-isolated).
+# Three measures limit accidental damage / accidental credential leakage:
+#   * NOTIFY_TIMEOUT_MS (default 5000) — a validated positive integer (hard
+#     per-invocation deadline; out of range is rejected at preflight). A wedged or
+#     TERM-immune send is killed — its WHOLE process group, via perl setpgrp (TERM
+#     then KILL; perl is REQUIRED when NOTIFY_EXEC is set) — and degrades to one warn.
 #   * the notifier's stdin is /dev/null (immediate EOF) — it cannot consume the
 #     review-relay prompt or later operator input.
-#   * the notifier launches under `env -i` with an explicit allowlist — only
-#     PATH/HOME + the DRIVE_* context + the NAMES in NOTIFY_ENV_ALLOW are forwarded.
-#     Ambient secrets (GH_TOKEN / ANTHROPIC_* / the var named by IMPL_AUTH_TOKEN_ENV)
-#     NEVER reach it. Add a credential the notifier needs here (deny by default):
+#   * the notifier launches under `env -i` with an explicit allowlist — it receives
+#     ONLY PATH/HOME + the DRIVE_* context + the NAMES in NOTIFY_ENV_ALLOW. Ambient
+#     EXPORTED variables (GH_TOKEN / ANTHROPIC_* / the var named by IMPL_AUTH_TOKEN_ENV)
+#     are NOT inherited unless allowed. Environment allowlist ONLY — the hook can still
+#     read files under HOME or write DRIVE_WORKDIR, so this guards accidental env
+#     leakage, not a credential/OS boundary. Deny by default; opt a variable in here:
 # NOTIFY_ENV_ALLOW="HERMES_TOKEN TG_CHAT_ID"
 # Canonical adapter (Hermes -> Telegram):
 # NOTIFY_EXEC=$HOME/workspace/pipeline-dispatch/notify.sh

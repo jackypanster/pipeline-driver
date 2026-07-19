@@ -270,16 +270,26 @@ into the driver, and no gate moves — GATE 1/2 semantics are byte-identical wit
 hook on or off. (A human→driver remote-command lane is a separate future design,
 deliberately NOT this hook.)
 
-The notifier is also **sandboxed** so a misbehaving hook can never weaken the loop or
-see your credentials: it runs under a hard per-invocation deadline
-(`NOTIFY_TIMEOUT_MS`, default 5000 ms) that kills its whole process group (TERM then
-KILL) — a wedged or TERM-immune send degrades to a single warn and cannot suppress
-GATE 1, card progress, or the halt banner; its stdin is `/dev/null` (immediate EOF),
-so it cannot consume the review-relay prompt or later operator input; and it launches
-under `env -i` with an explicit allowlist (PATH/HOME + the `DRIVE_*` context + the
-names in `NOTIFY_ENV_ALLOW`), so ambient secrets — `GH_TOKEN`, `ANTHROPIC_*`, and the
-secret named by `IMPL_AUTH_TOKEN_ENV` — never reach it (deny by default; opt a
-credential in via `NOTIFY_ENV_ALLOW`).
+The notifier is **defense-in-depth, not a sandbox.** `NOTIFY_EXEC` is a TRUSTED
+executable that runs as YOUR user with normal filesystem, process, and network
+access — it is NOT OS-isolated, so only point it at a hook you trust. Three
+measures limit accidental damage and accidental credential leakage:
+- a hard per-invocation deadline (`NOTIFY_TIMEOUT_MS`, a validated positive integer,
+  default 5000 ms; out of range is rejected at preflight) that kills the notifier's
+  whole process group (TERM then KILL, via perl `setpgrp` — required, so a wedged or
+  TERM-immune send degrades to a single warn and cannot suppress GATE 1, card
+  progress, or the halt banner);
+- stdin redirected from `/dev/null` (immediate EOF), so the hook cannot consume the
+  review-relay prompt or later operator input;
+- and a **reduced environment** launched via `env -i`: the hook receives ONLY
+  `PATH`/`HOME` + the `DRIVE_*` context, plus any names you list in
+  `NOTIFY_ENV_ALLOW`. This means ambient *exported variables* — `GH_TOKEN`,
+  `ANTHROPIC_*`, and the secret named by `IMPL_AUTH_TOKEN_ENV` — are NOT inherited
+  unless you allow them. Note this is an environment allowlist only: because `HOME`
+  and `DRIVE_WORKDIR` are forwarded and the hook runs as you, it can still read files
+  under `HOME` (e.g. `~/.config/gh/hosts.yml`) or write the workdir — so it is a
+  credential-leak guard, not a credential boundary. (deny by default; opt a variable
+  in via `NOTIFY_ENV_ALLOW`.)
 
 **Board auto-refresh.** Non-empty `BOARD_OUT` makes the driver re-render the read-only
 dashboard (needs `node` + a built `DASHBOARD_REPO`) after GATE 1, after every advanced

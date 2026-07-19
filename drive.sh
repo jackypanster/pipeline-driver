@@ -123,15 +123,19 @@ BOARD_OUT="${BOARD_OUT:-}"
 # once and never halt the loop. One-way: nothing flows from the notifier back in.
 NOTIFY_EXEC="${NOTIFY_EXEC:-}"
 # Hard deadline (ms) per notifier invocation. A wedged or TERM-immune send is killed
-# (its whole process group) and degrades to a single warn — it can never suppress
-# GATE 1, card progress, or the halt banner. The notifier ALSO runs stdin-from-
-# /dev/null under a CLEARED environment (only PATH/HOME + the DRIVE_* context + the
-# NAMES in NOTIFY_ENV_ALLOW are forwarded), so ambient secrets — GH_TOKEN,
-# ANTHROPIC_*, and the secret named by IMPL_AUTH_TOKEN_ENV — NEVER reach it.
+# — its WHOLE process group, via perl setpgrp (TERM then KILL) — and degrades to a
+# single warn, so it can never suppress GATE 1, card progress, or the halt banner.
+# NOTIFY_TIMEOUT_MS is a BOUNDED POSITIVE INTEGER, validated at preflight: it flows
+# into arithmetic on the halt() path, so a non-integer (e.g. 1.5) must fail loud
+# BEFORE GATE 1 instead of raising an error inside halt() that skips the banner+exit.
 NOTIFY_TIMEOUT_MS="${NOTIFY_TIMEOUT_MS:-5000}"
+# The notifier is a TRUSTED executable that runs as YOUR user. `env -i` only drops
+# INHERITED environment variables — it is NOT an OS sandbox: the hook keeps normal
+# filesystem/process/network access. By default it receives ONLY PATH + HOME + the
+# DRIVE_* context; ambient exports (GH_TOKEN, ANTHROPIC_*, the var named by
+# IMPL_AUTH_TOKEN_ENV) are NOT inherited. NOTIFY_ENV_ALLOW opts further names in.
 NOTIFY_ENV_ALLOW="${NOTIFY_ENV_ALLOW:-}"   # opt-in: space-separated NAMES forwarded to the notifier
-NOTIFY_RUNNER_MODE=""                      # probed at preflight: 'perl' (process-group kill) or 'bash' fallback
-NOTIFY_READY=""                             # armed only after preflight validates the path
+NOTIFY_READY=""                             # armed only after preflight validates path + timeout + perl
 # One-key review relay (README §Board & review relay): when the loop halts at
 # NEXT=review and a review terminal is configured, OFFER to type the review stage
 # command into it — the human reads the halt and presses y. Never automatic; the
@@ -179,15 +183,19 @@ notify_hook() {   # <event> [halt-reason] [halt-next-step]
 }
 
 # Run the notifier under a hard deadline (NOTIFY_TIMEOUT_MS), stdin from /dev/null,
-# and a CLEARED environment with an explicit allowlist — best-effort, never fails
-# the caller; warns at most once per run. The deadline kills the notifier's whole
-# process group (portable: perl setpgrp when present — the established herdr-
-# transport pattern — else a bash background+kill fallback), so a wedged or
-# TERM-immune send cannot suppress GATE 1, card progress, or the halt banner.
-# `env -i` drops the ambient environment: GH_TOKEN/ANTHROPIC_* and the secret named
-# by IMPL_AUTH_TOKEN_ENV NEVER reach the notifier — only PATH/HOME + the DRIVE_*
-# context + the NAMES listed in NOTIFY_ENV_ALLOW are forwarded. rc>=128 means the
+# and a reduced environment — best-effort, never fails the caller; warns at most once
+# per run. The deadline kills the notifier's WHOLE process group (perl setpgrp —
+# REQUIRED and preflight-checked, since macOS has no setsid/timeout and a
+# direct-child-only kill would leave descendants running), so a wedged or TERM-immune
+# send cannot suppress GATE 1, card progress, or the halt banner. rc>=128 means the
 # deadline killed the notifier (TERM then KILL).
+#
+# NOT A SANDBOX: `env -i` drops INHERITED environment variables only. The notifier is
+# a TRUSTED executable that still runs as YOUR user with normal filesystem/process/
+# network access (it can read files under HOME, write DRIVE_WORKDIR, or run tools on
+# PATH). The reduced env + NOTIFY_ENV_ALLOW allowlist are defense-in-depth for the
+# common "don't leak GH_TOKEN/ANTHROPIC_* by accident" case, NOT a credential or OS
+# isolation boundary. NOTIFY_EXEC must be trusted.
 run_notify() {   # <exec-path> <event> [halt-reason] [halt-next-step]
   local exec="$1"; shift
   local event="$1" reason="${2:-}" hnext="${3:-}" rc=0 nm val
@@ -207,31 +215,20 @@ run_notify() {   # <exec-path> <event> [halt-reason] [halt-next-step]
     if [ -n "${val:-}" ]; then envv+=( "$nm=$val" ); fi
   done
   envv+=( "$exec" "$event" )
-  if [ "$NOTIFY_RUNNER_MODE" = "perl" ]; then
-    local ms=$NOTIFY_TIMEOUT_MS term_ms grace_ms term_s grace_s
-    term_ms=$(( ms > 200 ? ms - 200 : 0 )); grace_ms=$(( ms - term_ms ))
-    term_s=$(awk -v m="$term_ms"   'BEGIN{printf "%.3f", m/1000}')
-    grace_s=$(awk -v m="$grace_ms" 'BEGIN{printf "%.3f", m/1000}')
-    ( perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- "${envv[@]}" </dev/null >/dev/null 2>&1 & c=$!
-      perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- bash -c \
-        '[ "$1" = "0.000" ] || { sleep "$1"; kill -TERM -- "-$3" 2>/dev/null; }; sleep "$2"; kill -KILL -- "-$3" 2>/dev/null' \
-        watchdog "$term_s" "$grace_s" "$c" >/dev/null 2>&1 & w=$!
-      ec=0; wait "$c" || ec=$?
-      kill -KILL -- -"$w" 2>/dev/null || true
-      wait "$w" 2>/dev/null || true
-      exit "$ec" ) || rc=$?
-  else
-    # Fallback (no perl): background the notifier; a watchdog kills the direct
-    # child at the deadline. perl gives the full process-group kill (covers
-    # grandchildren like the canonical Hermes `exec`); this still bounds a wedged
-    # notifier without it.
-    ( "${envv[@]}" </dev/null >/dev/null 2>&1 & c=$!
-      ( sleep "$(awk -v m="$NOTIFY_TIMEOUT_MS" 'BEGIN{printf "%.3f", m/1000}')"
-        kill -TERM "$c" 2>/dev/null || true; sleep 0.2; kill -KILL "$c" 2>/dev/null || true ) & w=$!
-      ec=0; wait "$c" || ec=$?
-      kill "$w" 2>/dev/null || true; wait "$w" 2>/dev/null || true
-      exit "$ec" ) || rc=$?
-  fi
+  # NOTIFY_TIMEOUT_MS is a validated bounded positive integer (preflight), so this
+  # arithmetic is safe and can never break the halt() path that invoked us.
+  local ms=$NOTIFY_TIMEOUT_MS term_ms grace_ms term_s grace_s
+  term_ms=$(( ms > 200 ? ms - 200 : 0 )); grace_ms=$(( ms - term_ms ))
+  term_s=$(awk -v m="$term_ms"   'BEGIN{printf "%.3f", m/1000}')
+  grace_s=$(awk -v m="$grace_ms" 'BEGIN{printf "%.3f", m/1000}')
+  ( perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- "${envv[@]}" </dev/null >/dev/null 2>&1 & c=$!
+    perl -e 'setpgrp(0,0); exec @ARGV or exit 127' -- bash -c \
+      '[ "$1" = "0.000" ] || { sleep "$1"; kill -TERM -- "-$3" 2>/dev/null; }; sleep "$2"; kill -KILL -- "-$3" 2>/dev/null' \
+      watchdog "$term_s" "$grace_s" "$c" >/dev/null 2>&1 & w=$!
+    ec=0; wait "$c" || ec=$?
+    kill -KILL -- -"$w" 2>/dev/null || true
+    wait "$w" 2>/dev/null || true
+    exit "$ec" ) || rc=$?
   if [ "$rc" -eq 0 ]; then :
   elif [ "$rc" -ge 128 ]; then
     [ -n "${NOTIFY_WARNED:-}" ] || note "notify: $exec exceeded the ${NOTIFY_TIMEOUT_MS}ms deadline and was killed (non-fatal) — event pings degraded this run"
@@ -675,31 +672,47 @@ offer_review_relay() {
 }
 
 # ---- preflight ----------------------------------------------------------------
-# NOTIFY_EXEC (if set): validated and ARMED before ANY other preflight halt. This
-# ordering is load-bearing: the transport/git checks below (and validation itself)
-# call halt(), and halt() calls notify_hook() — so the path MUST already be gated+
-# validated before the first such halt, or an unvalidated relative NOTIFY_EXEC could
-# be PATH-resolved and executed mid-preflight (field-found: NOTIFY_EXEC=touch
-# created ./halt from the transport halt). NOTIFY_READY stays "" until this block
-# succeeds, so notify_hook is inert for every halt in this block — including this
-# block's own fail-loud halt (NOTIFY_EXEC is cleared first). Rules match
-# coordinate.sh ON_HALT_EXEC: absolute / regular file / not a symlink / executable.
+# NOTIFY_EXEC (if set): every operator knob the hook consumes is validated and ARMED
+# here, before ANY other preflight halt. This ordering is load-bearing: the
+# transport/git checks below (and validation itself) call halt(), and halt() calls
+# notify_hook() -> run_notify() — so a bad value must halt HERE, not break halt()
+# mid-flight. Two field-found regressions this blocks: (a) an unvalidated relative
+# NOTIFY_EXEC was PATH-selected by the transport halt and created ./halt; (b) a
+# non-integer NOTIFY_TIMEOUT_MS (e.g. 1.5) raised an arithmetic error INSIDE halt()
+# that skipped the banner+exit and let execution reach GATE 1. NOTIFY_READY stays ""
+# until the whole block passes, so notify_hook is inert for every halt in this block
+# (NOTIFY_EXEC is cleared before each fail-loud halt). Path rules match
+# coordinate.sh ON_HALT_EXEC; the timeout is a bounded positive integer; perl
+# (setpgrp) is REQUIRED for the whole-process-group kill (no portable fallback:
+# a direct-child-only kill would leave descendants running, field-found).
 if [ -n "$NOTIFY_EXEC" ]; then
   bad_notify=""
   case "$NOTIFY_EXEC" in /*) ;; *) bad_notify="NOTIFY_EXEC not absolute: $NOTIFY_EXEC" ;; esac
   [ -n "$bad_notify" ] || { [ ! -L "$NOTIFY_EXEC" ] || bad_notify="NOTIFY_EXEC is a symlink: $NOTIFY_EXEC"; }
   [ -n "$bad_notify" ] || { [ -f "$NOTIFY_EXEC" ]   || bad_notify="NOTIFY_EXEC not a regular file: $NOTIFY_EXEC"; }
   [ -n "$bad_notify" ] || { [ -x "$NOTIFY_EXEC" ]   || bad_notify="NOTIFY_EXEC not executable: $NOTIFY_EXEC"; }
+  # NOTIFY_TIMEOUT_MS flows into arithmetic on the halt() path -> reject any non-digit
+  # or out-of-range value HERE. Pattern-match first (no arithmetic on the untrusted
+  # string), then a length cap (avoids passing a huge number to `[`), then the range.
+  if [ -z "$bad_notify" ]; then
+    case "$NOTIFY_TIMEOUT_MS" in
+      ''|*[!0-9]*) bad_notify="NOTIFY_TIMEOUT_MS not a positive integer: ${NOTIFY_TIMEOUT_MS:-<empty>}" ;;
+    esac
+  fi
+  if [ -z "$bad_notify" ]; then
+    if [ "${#NOTIFY_TIMEOUT_MS}" -gt 6 ] || [ "$NOTIFY_TIMEOUT_MS" -lt 1 ] || [ "$NOTIFY_TIMEOUT_MS" -gt 300000 ]; then
+      bad_notify="NOTIFY_TIMEOUT_MS out of range [1,300000]ms: $NOTIFY_TIMEOUT_MS"
+    fi
+  fi
   if [ -n "$bad_notify" ]; then
     NOTIFY_EXEC=""
-    halt "$bad_notify" "fix NOTIFY_EXEC (absolute path to an executable regular file) in drive.defaults/drive.config, or unset it" 2
+    halt "$bad_notify" "fix NOTIFY_EXEC / NOTIFY_TIMEOUT_MS in drive.defaults/drive.config, or unset NOTIFY_EXEC" 2
   fi
-  # Arm the hook AND probe a portable process-group runner for the hard deadline.
-  # perl (setpgrp) is the established herdr-transport pattern and ships with macOS/
-  # Linux; without it run_notify falls back to a bash background+kill watchdog that
-  # still enforces the deadline on the direct child.
-  if perl -e 'setpgrp(0,0)' >/dev/null 2>&1; then NOTIFY_RUNNER_MODE=perl
-  else NOTIFY_RUNNER_MODE=bash; fi
+  # The hard-deadline process-group kill needs perl setpgrp; macOS ships neither
+  # setsid nor timeout, so there is no portable fallback that reaps descendants.
+  # Require it (fail loud here), not a silent direct-child-only kill at runtime.
+  perl -e 'setpgrp(0,0)' >/dev/null 2>&1 \
+    || { NOTIFY_EXEC=""; halt "NOTIFY_EXEC needs perl (with setpgrp) on PATH for the hard-deadline process-group kill" "install perl, or unset NOTIFY_EXEC" 2; }
 fi
 NOTIFY_READY=1
 

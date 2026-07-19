@@ -220,6 +220,112 @@ if [ ! -d ".pipeline/f" ] && [ ! -f ".pipeline/f/tasks/01.md" ]; then
 else bad "cd guard (caller cwd polluted)" "$(pwd); ls -R .pipeline 2>/dev/null)"; fi
 cd "$orig"; rm -rf "$R" "$SCRATCH"
 
+# --- 12. NOTIFY_TIMEOUT_MS validation: malformed/zero/negative cannot neutralize halt ---
+# Finding 1 (round 3): NOTIFY_TIMEOUT_MS flows into arithmetic on the halt() path, so
+# a non-integer (1.5) used to raise an error inside halt() that skipped the banner+exit
+# and let execution reach GATE 1. Preflight now validates it as a bounded positive
+# integer WHILE NOTIFY_READY is still unarmed, so every bad value halts loud first.
+for val in 1.5 bogus -5 0 300001; do
+  R=$(mktemp -d); seed "$R" 1; mk_notifier "$R"
+  printf 'NOTIFY_EXEC=%s/notify.sh\nNOTIFY_TIMEOUT_MS=%s\nIMPL_TRANSPORT=invalid\n' "$R" "$val" >> "$R/cfg"
+  out=$(run "$R"); rc=$?
+  case "$val" in
+    1.5|bogus|-5) exp="NOTIFY_TIMEOUT_MS not a positive integer" ;;
+    *) exp="NOTIFY_TIMEOUT_MS out of range" ;;
+  esac
+  if [ "$rc" -eq 2 ] && grep -q '=== DRIVER HALT ===' <<<"$out" && grep -q "$exp" <<<"$out" \
+     && ! grep -q 'GATE 1 — type the spec-rev' <<<"$out" && [ ! -f "$R/notify.log" ]; then
+    ok "timeout NOTIFY_TIMEOUT_MS='$val' -> halt loud (banner+exit intact, GATE 1 never reached)"
+  else bad "timeout '$val' (rc=$rc)" "$out"; fi
+  rm -rf "$R"
+done
+# and a 20-digit value must not overflow `[` (caught by the length cap)
+R=$(mktemp -d); seed "$R" 1; mk_notifier "$R"
+printf 'NOTIFY_EXEC=%s/notify.sh\nNOTIFY_TIMEOUT_MS=99999999999999999999\nIMPL_TRANSPORT=invalid\n' "$R" >> "$R/cfg"
+out=$(run "$R"); rc=$?
+if [ "$rc" -eq 2 ] && grep -q 'NOTIFY_TIMEOUT_MS out of range' <<<"$out"; then
+  ok "timeout 20-digit value rejected without overflowing the range check"
+else bad "timeout huge (rc=$rc)" "$out"; fi
+rm -rf "$R"
+
+# --- 13. process-group kill: a notifier descendant is reaped; no-perl halts loud ---
+# Finding 2 (round 3): the no-Perl fallback killed only the direct child, so a notifier
+# descendant stayed alive after the driver reported 'killed'. There is now ONE path
+# (perl setpgrp + whole-group KILL); forcing no-perl halts loud instead of degrading.
+R=$(mktemp -d); seed "$R" 2; mkdir -p "$R/bin"; mk_notifier "$R" 0
+cat > "$R/bin/claude" <<'S'
+#!/usr/bin/env bash
+repo=""; for a in "$@"; do case "$a" in *repo=*) repo="${a#*repo=}"; repo="${repo%% *}";; esac; done
+cd "$repo" || exit 1; git pull -q --rebase origin master 2>/dev/null
+card=$(grep -l '^status: todo' .pipeline/f/tasks/*.md 2>/dev/null | sort | head -1) || exit 1
+sed -i.bak 's/^status: todo/status: review/' "$card"; rm -f "$card.bak"
+last=$(grep -Eo '^## seq=[0-9]+' .pipeline/f/journal.md | tail -1 | grep -Eo '[0-9]+'); s=$((last+1))
+printf '\n## seq=%s · t · impl→review · completed · by=stub\ndone: x\n--- handoff ---\n>>> NEXT\nRun pipeline-review.\n<<< END\n' "$s" >> .pipeline/f/journal.md
+git add -A && git commit -qm "s=$s" && git push -q origin master
+S
+chmod +x "$R/bin/claude"
+cat > "$R/notify.sh" <<EOF
+#!/usr/bin/env bash
+trap '' TERM
+sleep 60 & echo \$! > "\${DRIVE_WORKDIR}/descendant.pid"
+wait
+EOF
+chmod +x "$R/notify.sh"
+printf 'NOTIFY_EXEC=%s/notify.sh\nNOTIFY_TIMEOUT_MS=400\n' "$R" >> "$R/cfg"
+out=$(run "$R"); rc=$?; sleep 0.4
+desc=$(cat "$R/work/descendant.pid" 2>/dev/null)
+if [ "$rc" -eq 0 ] && grep -q 'all cards in review' <<<"$out" \
+   && [ -n "$desc" ] && ! kill -0 "$desc" 2>/dev/null; then
+  ok "deadline: notifier's sleep-60 DESCENDANT reaped (whole process group killed)"
+else bad "descendant survival (rc=$rc desc=$desc alive=$(kill -0 "$desc" 2>/dev/null && echo yes || echo no))" "$out"; fi
+[ -n "${desc:-}" ] && kill -KILL "$desc" 2>/dev/null || true
+rm -rf "$R"
+# no-perl now halts LOUD (the broken direct-child-only fallback is gone)
+R=$(mktemp -d); seed "$R" 1; mk_notifier "$R" 0; mkdir -p "$R/bin"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$R/bin/perl"; chmod +x "$R/bin/perl"
+printf 'NOTIFY_EXEC=%s/notify.sh\n' "$R" >> "$R/cfg"
+out=$(run "$R"); rc=$?
+if [ "$rc" -eq 2 ] && grep -q '=== DRIVER HALT ===' <<<"$out" && grep -q 'NOTIFY_EXEC needs perl (with setpgrp)' <<<"$out" \
+   && ! grep -q 'GATE 1 — type the spec-rev' <<<"$out"; then
+  ok "no-perl: fail-loud 'needs perl' (no silent direct-child-only fallback)"
+else bad "no-perl (rc=$rc)" "$out"; fi
+rm -rf "$R"
+
+# --- 14. honest boundary: env allowlist is NOT a filesystem/credential sandbox ---
+# Finding 3 (round 3): README/defaults overclaimed 'sandboxed' / 'never see your
+# credentials'. env -i only drops inherited VARIABLES — the hook still runs as your
+# user. Pin BOTH halves of the precise guarantee: ambient exports are NOT inherited
+# unless allowed (the real guarantee), AND the hook CAN still read a file under the
+# forwarded HOME (env-allowlist is NOT an OS/credential boundary -> trusted notifier).
+R=$(mktemp -d); seed "$R" 2; mkdir -p "$R/bin"; mk_notifier "$R" 0
+FAKEHOME=$(mktemp -d); mkdir -p "$FAKEHOME/.config"
+printf 'sentinel-leaked-via-forwarded-home\n' > "$FAKEHOME/.config/cred-sentinel"
+cat > "$R/bin/claude" <<'S'
+#!/usr/bin/env bash
+repo=""; for a in "$@"; do case "$a" in *repo=*) repo="${a#*repo=}"; repo="${repo%% *}";; esac; done
+cd "$repo" || exit 1; git pull -q --rebase origin master 2>/dev/null
+card=$(grep -l '^status: todo' .pipeline/f/tasks/*.md 2>/dev/null | sort | head -1) || exit 1
+sed -i.bak 's/^status: todo/status: review/' "$card"; rm -f "$card.bak"
+last=$(grep -Eo '^## seq=[0-9]+' .pipeline/f/journal.md | tail -1 | grep -Eo '[0-9]+'); s=$((last+1))
+printf '\n## seq=%s · t · impl→review · completed · by=stub\ndone: x\n--- handoff ---\n>>> NEXT\nRun pipeline-review.\n<<< END\n' "$s" >> .pipeline/f/journal.md
+git add -A && git commit -qm "s=$s" && git push -q origin master
+S
+chmod +x "$R/bin/claude"
+cat > "$R/notify.sh" <<EOF
+#!/usr/bin/env bash
+{ echo "GH_TOKEN_INHERITED=\${GH_TOKEN:-unset}"; echo "HOME_READ=\$(cat "\$HOME/.config/cred-sentinel" 2>/dev/null)"; } >> "$R/boundaryprobe"
+exit 0
+EOF
+chmod +x "$R/notify.sh"
+printf 'NOTIFY_EXEC=%s/notify.sh\n' "$R" >> "$R/cfg"
+printf 'AAA\n' | DRIVE_DEFAULTS=/nonexistent HOME="$FAKEHOME" GH_TOKEN=ghp_AMBIENT_LEAK PATH="$R/bin:$PATH" bash "$DRIVER/drive.sh" "$R/cfg" >/dev/null 2>&1
+probe=$(cat "$R/boundaryprobe" 2>/dev/null | sort -u)
+if grep -q '^GH_TOKEN_INHERITED=unset$' <<<"$probe" \
+   && grep -q '^HOME_READ=sentinel-leaked-via-forwarded-home$' <<<"$probe"; then
+  ok "boundary: ambient GH_TOKEN NOT inherited (env guarantee) AND hook CAN read \$HOME (NOT a sandbox)"
+else bad "boundary" "probe=$probe"; fi
+rm -rf "$R" "$FAKEHOME"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
