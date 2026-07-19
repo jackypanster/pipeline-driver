@@ -173,6 +173,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `test/run.sh` | parser unit tests against a format-faithful sample journal |
 | `test/hook.sh` | merge-gate tests incl. the wrapper/refspec bypass cases |
 | `test/e2e.sh` | hermetic end-to-end loop tests (stub `claude`) + every safety halt |
+| `test/notify-hook.sh` | hermetic tests for the `NOTIFY_EXEC` walk-away hook (events, env, preflight validation, degradation) |
 | `test/e2e-orca.sh` | hermetic e2e for the orca transport (stub `orca` plays the TUI coder) |
 | `test/e2e-herdr.sh` | hermetic e2e for the herdr transport (stub `herdr`; guards, self-pane, fail-closed) |
 | `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
@@ -217,7 +218,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/review-drive.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-state.sh && bash test/coordinate-watchdog.sh && bash test/coordinate-bindings.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/notify-hook.sh && bash test/review-drive.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-state.sh && bash test/coordinate-watchdog.sh && bash test/coordinate-bindings.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
    (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
    to pin handles from). Every MISS prints the exact remediation command; it installs nothing
@@ -252,6 +253,43 @@ starting `./drive.sh` stays an explicit per-feature act (drive is never the defa
 merge confirm stays human (frozen invariant), and DANGEROUS features never use the driver.
 
 ## Board & review relay
+
+**Walk-away notify hook.** Non-empty `NOTIFY_EXEC` (an absolute path to an executable
+regular file; validated and ARMED at the very top of preflight, before any other
+check that can halt — so a broken notifier halts BEFORE GATE 1 instead of silently
+never pinging an operator who already left) is invoked best-effort at the same three
+moments as `BOARD_OUT`: after GATE 1, after every advanced card, and on every halt.
+The event name arrives in `$1` (`gate1`|`card`|`halt`), context in `DRIVE_*` env
+(`DRIVE_EVENT`/`DRIVE_FEATURE`/`DRIVE_BRANCH`/`DRIVE_WORKDIR`/`DRIVE_TRANSPORT`/
+`DRIVE_SEQ`/`DRIVE_STATUS`/`DRIVE_NEXT`, plus `DRIVE_HALT_REASON` +
+`DRIVE_HALT_NEXT` on halts). Runtime failures warn once and never halt the loop.
+The canonical adapter is `pipeline-dispatch/notify.sh`, which forwards the events to
+Telegram via the local Hermes — the operator walks away and is called back only by
+the 🛑 halt ping. Strictly ONE-WAY by design: nothing flows from the notifier back
+into the driver, and no gate moves — GATE 1/2 semantics are byte-identical with the
+hook on or off. (A human→driver remote-command lane is a separate future design,
+deliberately NOT this hook.)
+
+The notifier is **defense-in-depth, not a sandbox.** `NOTIFY_EXEC` is a TRUSTED
+executable that runs as YOUR user with normal filesystem, process, and network
+access — it is NOT OS-isolated, so only point it at a hook you trust. Three
+measures limit accidental damage and accidental credential leakage:
+- a hard per-invocation deadline (`NOTIFY_TIMEOUT_MS`, a validated positive integer,
+  default 5000 ms; out of range is rejected at preflight) that kills the notifier's
+  whole process group (TERM then KILL, via perl `setpgrp` — required, so a wedged or
+  TERM-immune send degrades to a single warn and cannot suppress GATE 1, card
+  progress, or the halt banner);
+- stdin redirected from `/dev/null` (immediate EOF), so the hook cannot consume the
+  review-relay prompt or later operator input;
+- and a **reduced environment** launched via `env -i`: the hook receives ONLY
+  `PATH`/`HOME` + the `DRIVE_*` context, plus any names you list in
+  `NOTIFY_ENV_ALLOW`. This means ambient *exported variables* — `GH_TOKEN`,
+  `ANTHROPIC_*`, and the secret named by `IMPL_AUTH_TOKEN_ENV` — are NOT inherited
+  unless you allow them. Note this is an environment allowlist only: because `HOME`
+  and `DRIVE_WORKDIR` are forwarded and the hook runs as you, it can still read files
+  under `HOME` (e.g. `~/.config/gh/hosts.yml`) or write the workdir — so it is a
+  credential-leak guard, not a credential boundary. (deny by default; opt a variable
+  in via `NOTIFY_ENV_ALLOW`.)
 
 **Board auto-refresh.** Non-empty `BOARD_OUT` makes the driver re-render the read-only
 dashboard (needs `node` + a built `DASHBOARD_REPO`) after GATE 1, after every advanced
