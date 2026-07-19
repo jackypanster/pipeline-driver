@@ -381,6 +381,40 @@ if grep -q '^GH_TOKEN_INHERITED=unset$' <<<"$probe" \
 else bad "allowlist glob (rc)" "probe=$probe"; fi
 rm -rf "$R"
 
+# --- 17. hostile ambient/config IFS cannot resplit the allowlist (bash 3.2) ---
+# Finding 1 (round 5): `read -ra _allow` inherited the global IFS, so an operator
+# config `IFS=_` split one listed name (BOGUS_SECRET) into pieces and forwarded a
+# DIFFERENT ambient secret (SECRET). The split now binds IFS locally to whitespace.
+# Must hold on macOS bash 3.2.57.
+R=$(mktemp -d); seed "$R" 2; mkdir -p "$R/bin"; mk_notifier "$R" 0
+cat > "$R/bin/claude" <<'S'
+#!/usr/bin/env bash
+repo=""; for a in "$@"; do case "$a" in *repo=*) repo="${a#*repo=}"; repo="${repo%% *}";; esac; done
+cd "$repo" || exit 1; git pull -q --rebase origin master 2>/dev/null
+card=$(grep -l '^status: todo' .pipeline/f/tasks/*.md 2>/dev/null | sort | head -1) || exit 1
+sed -i.bak 's/^status: todo/status: review/' "$card"; rm -f "$card.bak"
+last=$(grep -Eo '^## seq=[0-9]+' .pipeline/f/journal.md | tail -1 | grep -Eo '[0-9]+'); s=$((last+1))
+printf '\n## seq=%s · t · impl→review · completed · by=stub\ndone: x\n--- handoff ---\n>>> NEXT\nRun pipeline-review.\n<<< END\n' "$s" >> .pipeline/f/journal.md
+git add -A && git commit -qm "s=$s" && git push -q origin master
+S
+chmod +x "$R/bin/claude"
+cat > "$R/notify.sh" <<EOF
+#!/usr/bin/env bash
+printf 'BOGUS_SECRET=%s\nSECRET=%s\n' "\${BOGUS_SECRET:-unset}" "\${SECRET:-unset}" >> "$R/ifsprobe"
+exit 0
+EOF
+chmod +x "$R/notify.sh"
+# one explicitly-listed name, followed by a hostile config IFS that would split it
+printf 'WORKDIR=%s/work\nBRANCH=master\nFEATURE=f\nNOTIFY_EXEC=%s/notify.sh\nNOTIFY_ENV_ALLOW=BOGUS_SECRET\nIFS=_\n' "$R" "$R" > "$R/cfg"
+printf 'AAA\n' | DRIVE_DEFAULTS=/nonexistent BOGUS_SECRET=explicit-value SECRET=ambient-secret \
+      PATH="$R/bin:$PATH" bash "$DRIVER/drive.sh" "$R/cfg" >/dev/null 2>&1
+probe=$(cat "$R/ifsprobe" 2>/dev/null | sort -u)
+if grep -q '^BOGUS_SECRET=explicit-value$' <<<"$probe" \
+   && grep -q '^SECRET=unset$' <<<"$probe"; then
+  ok "allowlist: hostile IFS=_ cannot resplit BOGUS_SECRET (only the listed name forwards) [bash $BASH_VERSION]"
+else bad "allowlist hostile-IFS" "probe=$probe"; fi
+rm -rf "$R"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

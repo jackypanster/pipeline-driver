@@ -208,12 +208,15 @@ run_notify() {   # <exec-path> <event> [halt-reason] [halt-next-step]
     "DRIVE_NEXT=${NEXT:-}" "DRIVE_HALT_REASON=$reason" "DRIVE_HALT_NEXT=$hnext" )
   # Operator opt-in allowlist: forward only shell-safe NAMES the notifier needs
   # (e.g. HERMES_TOKEN). The ambient environment is NOT forwarded — deny by default.
-  # `read -ra` splits the configured string on IFS ONLY (no pathname expansion): an
-  # unquoted `for nm in $NOTIFY_ENV_ALLOW` would glob against the cwd, so a wildcard
-  # token (or a token matching a cwd filename) could admit a name the operator never
-  # listed (field-found: NOTIFY_ENV_ALLOW=* + a cwd file GH_TOKEN -> GH_TOKEN
-  # forwarded, defeating deny-by-default). The identifier check then runs on the
+  # Split via `read -ra` (no pathname expansion) on a LOCALLY fixed delimiter: a plain
+  # `read -ra` would inherit the ambient/config IFS, so a hostile global IFS could
+  # split one listed name into pieces and forward a DIFFERENT ambient secret
+  # (field-found: NOTIFY_ENV_ALLOW=BOGUS_SECRET + IFS=_ -> notifier got
+  # SECRET=ambient-secret, not BOGUS_SECRET). `local IFS` binds the split to the
+  # documented whitespace delimiter, independent of ambient/config state, and is
+  # bash-3.2-safe (restored on return). The identifier check then runs on each
   # ORIGINAL token, so '*' is rejected, not expanded.
+  local IFS=$' \t\n'
   local _allow=()
   read -ra _allow <<< "$NOTIFY_ENV_ALLOW"
   for nm in ${_allow[@]+"${_allow[@]}"}; do
