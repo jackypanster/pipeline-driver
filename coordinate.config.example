@@ -70,3 +70,5 @@ STAGE_TIMEOUT_SECS=2700
 # Optional per-watcher overrides of the machine bindings in drive.defaults
 # (see drive.defaults.example): CC_AGENT / CC_MODEL_EXPECT / IMPL_AGENT /
 # IMPL_MODEL_EXPECT / REVIEW_AGENT / REVIEW_MODEL_EXPECT. config wins.
+# *_MODEL_EXPECT is a literal case-insensitive ASCII substring (printable ASCII
+# only — control bytes and bytes ≥0x80 are rejected); *_AGENT is [A-Za-z0-9][A-Za-z0-9._-]*.

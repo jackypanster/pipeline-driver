@@ -275,6 +275,115 @@ else
   bad "footer unreadable" "rc=$rc; output: $(printf '%s' "$out" | grep -E 'MODEL_MISMATCH|pane model' | head -5)"
 fi
 
+# ===== R1a. internal LF in IMPL_AGENT -> CONFIG_INVALID; the raw value is NEVER
+#      echoed (was: line-oriented grep passed line 1 'codex', and binding_token
+#      then echoed both lines into the block). =====
+fresh; seed "$T"
+{ printf "IMPL_AGENT='codex"; printf '\n'; printf "!!!'\n"; } > "$T/defaults"
+out=$(run_doctor); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]' \
+   && printf '%s' "$out" | grep -q 'input: IMPL_AGENT' \
+   && ! printf '%s' "$out" | grep -qF '!!!' \
+   && printf '%s' "$out" | grep '^impl ' | grep -q 'agent=<invalid>'; then
+  ok "internal LF in IMPL_AGENT -> CONFIG_INVALID, one-line diagnostic, value never echoed"
+else
+  bad "LF in IMPL_AGENT" "rc=$rc; output: $(printf '%s' "$out" | grep -E 'CONFIG_INVALID|impl |!!!' | head -6)"
+fi
+
+# ===== R1b. internal LF in IMPL_MODEL_EXPECT -> CONFIG_INVALID, and with the
+#      fake-herdr footer containing 'pi' there is NO match-ok line — the
+#      reviewer's false-match repro ($'definitely-absent\npi' became two grep
+#      patterns and matched 'pi'). =====
+fresh; seed "$T"
+{ printf "IMPL_MODEL_EXPECT='definitely-absent"; printf '\n'; printf "pi'\n"; } > "$T/defaults"
+HERDR_STUB_FOOTER='pi footer'
+out=$(run_doctor); rc=$?
+unset HERDR_STUB_FOOTER
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]' \
+   && printf '%s' "$out" | grep -q 'input: IMPL_MODEL_EXPECT' \
+   && ! printf '%s' "$out" | grep -q 'footer matches expect'; then
+  ok "internal LF in IMPL_MODEL_EXPECT -> CONFIG_INVALID; NO false footer match (reviewer repro)"
+else
+  bad "LF in IMPL_MODEL_EXPECT" "rc=$rc; output: $(printf '%s' "$out" | grep -E 'CONFIG_INVALID|pane model|footer matches' | head -6)"
+fi
+
+# ===== R2. a raw 0xff byte in the value -> CONFIG_INVALID (was: 0xff is not a
+#      C-locale control char, so it passed). =====
+fresh; seed "$T"
+printf 'IMPL_MODEL_EXPECT=glm\xff5.2\n' > "$T/defaults"
+out=$(run_doctor); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]' \
+   && printf '%s' "$out" | grep -q 'input: IMPL_MODEL_EXPECT'; then
+  ok "raw 0xff byte in IMPL_MODEL_EXPECT -> CONFIG_INVALID"
+else
+  bad "0xff byte" "rc=$rc; output: $(printf '%s' "$out" | grep -E 'CONFIG_INVALID|pane model' | head -5)"
+fi
+
+# ===== R3. non-ASCII (É, UTF-8 multibyte) -> CONFIG_INVALID: the charset is
+#      printable ASCII now (no Unicode case-folding in bash). =====
+fresh; seed "$T"
+printf 'IMPL_MODEL_EXPECT=\xc3\x89model\n' > "$T/defaults"
+out=$(run_doctor); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]' \
+   && printf '%s' "$out" | grep -q 'input: IMPL_MODEL_EXPECT'; then
+  ok "non-ASCII É in IMPL_MODEL_EXPECT -> CONFIG_INVALID (printable ASCII only)"
+else
+  bad "non-ASCII É" "rc=$rc; output: $(printf '%s' "$out" | grep -E 'CONFIG_INVALID|pane model' | head -5)"
+fi
+
+# ===== R4. ASCII case-insensitivity still works: expect GLM-5.2 matches footer
+#      glm-5.2 (LC_ALL=C tr fold + fixed-string grep). =====
+fresh; seed "$T"
+printf 'IMPL_MODEL_EXPECT=GLM-5.2\n' > "$T/defaults"
+HERDR_STUB_FOOTER='glm-5.2 · pi · idle'
+out=$(run_doctor); rc=$?
+unset HERDR_STUB_FOOTER
+if [ "$rc" -eq 0 ] \
+   && printf '%s' "$out" | grep -q "PI pane model: footer matches expect 'GLM-5.2'"; then
+  ok "ASCII case-insensitivity: expect GLM-5.2 matches footer glm-5.2"
+else
+  bad "ASCII fold" "rc=$rc; output: $(printf '%s' "$out" | grep -E 'pane model|MODEL_MISMATCH|doctor:' | head -5)"
+fi
+
+# ===== R5. leading-dash value '-v' is printable ASCII and LEGAL — and treated as
+#      a LITERAL string (grep -F --, no option injection): a footer with -v
+#      matches; a footer without it MISSes. =====
+fresh; seed "$T"
+printf 'IMPL_MODEL_EXPECT=-v\n' > "$T/defaults"
+HERDR_STUB_FOOTER='has -v inside'
+out=$(run_doctor); rc=$?
+if [ "$rc" -eq 0 ] \
+   && printf '%s' "$out" | grep -q "PI pane model: footer matches expect '-v'"; then
+  ok "leading-dash expect '-v' is a literal string (footer with -v matches)"
+else
+  bad "leading-dash match" "rc=$rc; output: $(printf '%s' "$out" | grep -E 'pane model|MODEL_MISMATCH|doctor:' | head -5)"
+fi
+HERDR_STUB_FOOTER='no such flag here'
+out=$(run_doctor); rc=$?
+unset HERDR_STUB_FOOTER
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[MODEL_MISMATCH\]' \
+   && ! printf '%s' "$out" | grep -q 'footer matches expect'; then
+  ok "leading-dash expect '-v' MISSes a footer without it (no grep option injection)"
+else
+  bad "leading-dash miss" "rc=$rc; output: $(printf '%s' "$out" | grep -E 'pane model|MODEL_MISMATCH|doctor:' | head -5)"
+fi
+
+# ===== R6. poisoned-environment hermeticity (the reviewer's exact repro):
+#      DRIVE_DEFAULTS carrying IMPL_MODEL_EXPECT=glm-5.2 is exported while the
+#      doctor suite runs — it pins its own absent defaults and stays fully green. =====
+printf 'IMPL_MODEL_EXPECT=glm-5.2\n' > "$TMP/poison-defaults"
+out=$(DRIVE_DEFAULTS="$TMP/poison-defaults" bash "$HERE/coordinate-doctor.sh" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'failed=0'; then
+  ok "poisoned DRIVE_DEFAULTS env -> coordinate-doctor.sh stays fully green (suite pins its own)"
+else
+  bad "poisoned-env hermeticity" "rc=$rc; tail: $(printf '%s' "$out" | tail -4)"
+fi
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

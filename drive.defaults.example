@@ -10,7 +10,8 @@
 # footer (fail-closed when set). coordinate.config may override any of them
 # (config wins). prd/arch/task run in the CC pane; impl in the PI_WORKDIR pane;
 # review in the CODEX_WORKDIR pane. *_MODEL_EXPECT is a literal case-insensitive
-# substring of the pane footer/title; unset = skip that check.
+# ASCII substring of the pane footer/title (charset is printable ASCII — control
+# bytes and bytes ≥0x80 are rejected); unset = skip that check.
 CC_AGENT=claude
 # CC_MODEL_EXPECT=
 IMPL_AGENT=pi                 # pi | kimi | ... — the TUI driven in the impl pane

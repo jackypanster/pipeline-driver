@@ -244,22 +244,42 @@ valid_feature_slug() {
 # ($DRIVE_DEFAULTS overrides; the test harness pins it).
 defaults_path() { printf '%s' "${DRIVE_DEFAULTS:-${XDG_CONFIG_HOME:-$HOME/.config}/pipeline-driver/drive.defaults}"; }
 
-# valid_agent <value> — [A-Za-z0-9][A-Za-z0-9._-]*, length ≤ 32 (no URLs/paths can
-# ever reach a diagnostic through these fields).
+# valid_agent <value> — [A-Za-z0-9][A-Za-z0-9._-]*, ≤32 BYTES. Byte-exact and
+# line-agnostic: the allowed byte class is deleted with LC_ALL=C tr and ZERO bytes
+# may remain (an internal LF/CR/NUL/any control byte or any byte ≥0x80 ⇒ INVALID —
+# never "each line validated separately"); the first byte must be alphanumeric.
+# (No URLs/paths/control bytes can ever reach a diagnostic through these fields.)
 valid_agent() {
-  local v=$1
-  [ "${#v}" -le 32 ] || return 1
-  printf '%s' "$v" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+  local v=$1 leftover
+  [ -n "$v" ] || return 1
+  [ "$(_byte_len "$v")" -le 32 ] || return 1
+  # Bytes outside the class (incl. any LF/CR/control/≥0x80): NONE may remain.
+  # Count BYTES, not string emptiness — $(...) strips trailing LFs, so an
+  # emptiness test on the substituted text could never see a leftover that
+  # consists only of newlines (the internal-LF bypass).
+  leftover=$(printf '%s' "$v" | LC_ALL=C tr -d 'A-Za-z0-9._-' | wc -c | awk '{print $1}')
+  [ "$leftover" = "0" ] || return 1
+  case "$v" in [A-Za-z0-9]*) return 0 ;; *) return 1 ;; esac
 }
 
-# valid_model_expect <value> — printable ASCII/UTF-8, no control chars, no
-# leading/trailing whitespace, length ≤ 64. (Empty means UNSET and is handled by
-# the caller.) Matched as a LITERAL case-insensitive substring — never regex/glob.
+# valid_model_expect <value> — printable ASCII ONLY (bytes 0x20–0x7E; internal
+# spaces allowed): the class is deleted with LC_ALL=C tr and ZERO bytes may
+# remain, so any control byte (LF, CR, TAB, 0x7F) or any byte ≥0x80 (0xff, any
+# UTF-8 multibyte) ⇒ INVALID. No leading/trailing space (the only whitespace the
+# class admits), non-empty, ≤64 BYTES. With LF impossible, a diagnostic echoing
+# the value is single-line BY CONSTRUCTION and the footer matcher sees exactly ONE
+# fixed string. (Empty means UNSET and is handled by the caller.) Matched as a
+# LITERAL case-insensitive ASCII substring — never regex/glob.
 valid_model_expect() {
-  local v=$1
-  [ "${#v}" -le 64 ] || return 1
-  case "$v" in [[:space:]]*|*[[:space:]]) return 1 ;; esac
-  ! printf '%s' "$v" | LC_ALL=C grep -q '[[:cntrl:]]'
+  local v=$1 leftover
+  [ -n "$v" ] || return 1
+  [ "$(_byte_len "$v")" -le 64 ] || return 1
+  # Same byte-count discipline as valid_agent (an LF-only leftover is invisible
+  # to a $(...) emptiness test — count the bytes instead).
+  leftover=$(printf '%s' "$v" | LC_ALL=C tr -d ' -~' | wc -c | awk '{print $1}')
+  [ "$leftover" = "0" ] || return 1
+  case "$v" in ' '*|*' ') return 1 ;; esac
+  return 0
 }
 
 # binding_status <var> <agent|expect> — echoes: unset | ok | invalid.
@@ -617,8 +637,8 @@ cmd_doctor() {
     case "$_bvar" in *_AGENT) _bkind=agent ;; *) _bkind=expect ;; esac
     if [ "$(binding_status "$_bvar" "$_bkind")" = "invalid" ]; then
       case "$_bkind" in
-        agent)  d_code CONFIG_INVALID "doctor:config" "$_bvar" "$_bvar must match [A-Za-z0-9][A-Za-z0-9._-]* and be at most 32 chars" "fix or unset $_bvar in $(defaults_path) or $CONF" ;;
-        expect) d_code CONFIG_INVALID "doctor:config" "$_bvar" "$_bvar must be printable (no control chars), have no leading/trailing whitespace, and be at most 64 chars" "fix or unset $_bvar in $(defaults_path) or $CONF" ;;
+        agent)  d_code CONFIG_INVALID "doctor:config" "$_bvar" "$_bvar must match [A-Za-z0-9][A-Za-z0-9._-]* and be at most 32 bytes (no control bytes, nothing ≥0x80)" "fix or unset $_bvar in $(defaults_path) or $CONF" ;;
+        expect) d_code CONFIG_INVALID "doctor:config" "$_bvar" "$_bvar must be printable ASCII (bytes 0x20–0x7E, no control bytes, nothing ≥0x80), have no leading/trailing whitespace, and be at most 64 bytes" "fix or unset $_bvar in $(defaults_path) or $CONF" ;;
       esac
     fi
   done
@@ -787,13 +807,13 @@ coord_check_role() {
   fi
   # Model verification (machine bindings): with the role's *_MODEL_EXPECT set and
   # valid, the live pane footer MUST contain it as a LITERAL case-insensitive
-  # substring — the coordinator playbook's "read the pane footer" preflight as a
-  # machine check (three roles on three models). FAIL CLOSED: EXPECT set means
-  # verification is REQUIRED, so an unreadable footer is a MISS, never a skip.
-  # The footer is pane-controlled output: only the EXPECTED value is ever printed
-  # in a diagnostic, never the raw footer bytes (sanitized-diagnostics discipline).
-  # The footer read reuses the existing single-pane-read budget (AUTH_TIMEOUT_MS)
-  # — no new config field.
+  # ASCII substring — the coordinator playbook's "read the pane footer" preflight
+  # as a machine check (three roles on three models). FAIL CLOSED: EXPECT set
+  # means verification is REQUIRED, so an unreadable footer is a MISS, never a
+  # skip. The footer is pane-controlled output: only the EXPECTED value is ever
+  # printed in a diagnostic, never the raw footer bytes (sanitized-diagnostics
+  # discipline). The footer read reuses the existing single-pane-read budget
+  # (AUTH_TIMEOUT_MS) — no new config field.
   local mvar mexp footer
   case "$role" in
     CC)    mvar=CC_MODEL_EXPECT ;;
@@ -809,10 +829,19 @@ coord_check_role() {
     footer=$(bounded_run_ms "$AUTH_TIMEOUT_MS" herdr pane read "$pane" --source visible --lines 3 2>/dev/null) || footer=""
     if [ -z "$footer" ]; then
       d_code MODEL_MISMATCH "doctor:panes:$role" "$pane" "$role pane $pane model: footer unreadable — cannot verify expected model" "open the intended TUI/model in this pane, or update *_MODEL_EXPECT / coordinate.config"
-    elif printf '%s' "$footer" | LC_ALL=C grep -qiFe "$mexp"; then
-      d_ok "$role pane model: footer matches expect '$mexp'"
     else
-      d_code MODEL_MISMATCH "doctor:panes:$role" "$pane" "$role pane $pane model: footer does not contain expected '$mexp' (literal case-insensitive match)" "open the intended TUI/model in this pane, or update *_MODEL_EXPECT / coordinate.config"
+      # ASCII case-fold BOTH sides with LC_ALL=C tr (the expect is validated
+      # printable ASCII), then ONE fixed-string match: grep -F -- so a leading
+      # '-' is never an option, and a valid expect cannot contain LF, so the
+      # newline-as-alternation hole is closed by construction.
+      local footer_lc expect_lc
+      footer_lc=$(printf '%s' "$footer" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+      expect_lc=$(printf '%s' "$mexp" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+      if printf '%s' "$footer_lc" | grep -Fq -- "$expect_lc"; then
+        d_ok "$role pane model: footer matches expect '$mexp'"
+      else
+        d_code MODEL_MISMATCH "doctor:panes:$role" "$pane" "$role pane $pane model: footer does not contain expected '$mexp' (literal case-insensitive ASCII match)" "open the intended TUI/model in this pane, or update *_MODEL_EXPECT / coordinate.config"
+      fi
     fi
   fi
 }
