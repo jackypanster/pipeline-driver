@@ -255,11 +255,12 @@ merge confirm stays human (frozen invariant), and DANGEROUS features never use t
 ## Board & review relay
 
 **Walk-away notify hook.** Non-empty `NOTIFY_EXEC` (an absolute path to an executable
-regular file; validated at preflight so a broken notifier halts BEFORE GATE 1 instead
-of silently never pinging an operator who already left) is invoked best-effort at the
-same three moments as `BOARD_OUT`: after GATE 1, after every advanced card, and on
-every halt. The event name arrives in `$1` (`gate1`|`card`|`halt`), context in
-`DRIVE_*` env (`DRIVE_FEATURE`/`DRIVE_BRANCH`/`DRIVE_WORKDIR`/`DRIVE_TRANSPORT`/
+regular file; validated and ARMED at the very top of preflight, before any other
+check that can halt — so a broken notifier halts BEFORE GATE 1 instead of silently
+never pinging an operator who already left) is invoked best-effort at the same three
+moments as `BOARD_OUT`: after GATE 1, after every advanced card, and on every halt.
+The event name arrives in `$1` (`gate1`|`card`|`halt`), context in `DRIVE_*` env
+(`DRIVE_EVENT`/`DRIVE_FEATURE`/`DRIVE_BRANCH`/`DRIVE_WORKDIR`/`DRIVE_TRANSPORT`/
 `DRIVE_SEQ`/`DRIVE_STATUS`/`DRIVE_NEXT`, plus `DRIVE_HALT_REASON` +
 `DRIVE_HALT_NEXT` on halts). Runtime failures warn once and never halt the loop.
 The canonical adapter is `pipeline-dispatch/notify.sh`, which forwards the events to
@@ -268,6 +269,17 @@ the 🛑 halt ping. Strictly ONE-WAY by design: nothing flows from the notifier 
 into the driver, and no gate moves — GATE 1/2 semantics are byte-identical with the
 hook on or off. (A human→driver remote-command lane is a separate future design,
 deliberately NOT this hook.)
+
+The notifier is also **sandboxed** so a misbehaving hook can never weaken the loop or
+see your credentials: it runs under a hard per-invocation deadline
+(`NOTIFY_TIMEOUT_MS`, default 5000 ms) that kills its whole process group (TERM then
+KILL) — a wedged or TERM-immune send degrades to a single warn and cannot suppress
+GATE 1, card progress, or the halt banner; its stdin is `/dev/null` (immediate EOF),
+so it cannot consume the review-relay prompt or later operator input; and it launches
+under `env -i` with an explicit allowlist (PATH/HOME + the `DRIVE_*` context + the
+names in `NOTIFY_ENV_ALLOW`), so ambient secrets — `GH_TOKEN`, `ANTHROPIC_*`, and the
+secret named by `IMPL_AUTH_TOKEN_ENV` — never reach it (deny by default; opt a
+credential in via `NOTIFY_ENV_ALLOW`).
 
 **Board auto-refresh.** Non-empty `BOARD_OUT` makes the driver re-render the read-only
 dashboard (needs `node` + a built `DASHBOARD_REPO`) after GATE 1, after every advanced
