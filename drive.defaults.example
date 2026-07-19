@@ -5,11 +5,19 @@
 # default and drive.config always wins. Keep per-feature facts (WORKDIR, BRANCH,
 # FEATURE, the per-run ORCA_TERMINAL_HANDLE) OUT of this file.
 #
-# Slot bindings on this machine (documentation, not mechanism — CONTRACT.md keeps
-# runtime binding out of roles.yaml on purpose; the operator assigns the bots):
-#   prd / arch / task : Claude (frontier reasoning tier, e.g. opus/fable)
-#   impl              : pi TUI via the orca transport (cheap coding model)
-#   review            : codex (independent reviewer; merge confirm stays HUMAN)
+# Slot bindings on this machine — machine-readable: `coordinate.sh doctor|status`
+# print these, and doctor verifies each *_MODEL_EXPECT against the live pane
+# footer (fail-closed when set). coordinate.config may override any of them
+# (config wins). prd/arch/task run in the CC pane; impl in the PI_WORKDIR pane;
+# review in the CODEX_WORKDIR pane. *_MODEL_EXPECT is a literal case-insensitive
+# ASCII substring of the pane footer/title (charset is printable ASCII — control
+# bytes and bytes ≥0x80 are rejected); unset = skip that check.
+CC_AGENT=claude
+# CC_MODEL_EXPECT=
+IMPL_AGENT=pi                 # pi | kimi | ... — the TUI driven in the impl pane
+IMPL_MODEL_EXPECT=glm-5.2     # e.g. kimi-k3 when IMPL_AGENT=kimi
+REVIEW_AGENT=codex
+REVIEW_MODEL_EXPECT=gpt-5.6
 
 # --- impl transport + model (stable across features) ---------------------------
 # claude: spawn a headless `claude` child per card. orca: type IMPL_SLASH_CMD into a
