@@ -113,6 +113,15 @@ TUI_SKILLS_DIR="${TUI_SKILLS_DIR:-$HOME/.pi/agent/skills}"
 # after GATE 1, after every advanced card, and on halt. Best-effort side effect —
 # a render failure never halts the loop.
 BOARD_OUT="${BOARD_OUT:-}"
+# Walk-away notify hook: non-empty NOTIFY_EXEC names an ABSOLUTE-path executable
+# invoked best-effort at the same three moments as BOARD_OUT — after GATE 1, after
+# every advanced card, and on every halt — event name in $1 (gate1|card|halt),
+# context in DRIVE_* env (README §Board & review relay). Canonical adapter:
+# pipeline-dispatch/notify.sh (Hermes -> Telegram). Config is validated fail-loud
+# at preflight (the operator walks away trusting these pings, so a broken notifier
+# must stop the run BEFORE GATE 1, not silently never fire); runtime failures warn
+# once and never halt the loop. One-way: nothing flows from the notifier back in.
+NOTIFY_EXEC="${NOTIFY_EXEC:-}"
 # One-key review relay (README §Board & review relay): when the loop halts at
 # NEXT=review and a review terminal is configured, OFFER to type the review stage
 # command into it — the human reads the halt and presses y. Never automatic; the
@@ -126,6 +135,7 @@ TASKS=".pipeline/${FEATURE:-}/tasks"
 halt_banner() { printf '\n=== DRIVER HALT ===\n%s\nNEXT (human): %s\n' "$1" "$2" >&2; }
 halt() { # <reason> <what-the-human-should-run-next> [exit-code]
   render_board   # the last board reflects the halt state (best-effort no-op when off)
+  notify_hook halt "$1" "$2"   # ping fires before the banner: the walked-away operator is the audience
   halt_banner "$1" "$2"
   exit "${3:-0}"
 }
@@ -143,6 +153,25 @@ render_board() {
   else
     [ -n "${BOARD_WARNED:-}" ] || note "board: render failed (non-fatal) — check: node $DASHBOARD_REPO/dist/cli.js $WORKDIR --out $BOARD_OUT"
     BOARD_WARNED=1
+  fi
+  return 0
+}
+
+# Invoke the external notifier (NOTIFY_EXEC non-empty = on): event name in $1,
+# context in DRIVE_* env — the env assignments prefix an external command, so they
+# are scoped to the child and never leak into the driver. Best-effort side effect,
+# same posture as render_board: never fails the caller; complains at most once per
+# run. (Config validity is enforced fail-loud at preflight instead.)
+notify_hook() {   # <event> [halt-reason] [halt-next-step]
+  [ -n "${NOTIFY_EXEC:-}" ] || return 0
+  if DRIVE_EVENT="$1" DRIVE_FEATURE="${FEATURE:-}" DRIVE_BRANCH="${BRANCH:-}" \
+     DRIVE_WORKDIR="${WORKDIR:-}" DRIVE_TRANSPORT="${IMPL_TRANSPORT:-}" \
+     DRIVE_SEQ="${SEQ:-}" DRIVE_STATUS="${STATUS:-}" DRIVE_NEXT="${NEXT:-}" \
+     DRIVE_HALT_REASON="${2:-}" DRIVE_HALT_NEXT="${3:-}" \
+     "$NOTIFY_EXEC" "$1" >/dev/null 2>&1; then :
+  else
+    [ -n "${NOTIFY_WARNED:-}" ] || note "notify: $NOTIFY_EXEC failed (non-fatal) — event pings degraded this run"
+    NOTIFY_WARNED=1
   fi
   return 0
 }
@@ -592,6 +621,24 @@ case "$IMPL_TRANSPORT" in
   *) halt "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT'" "set IMPL_TRANSPORT=claude, orca, or herdr in drive.config" 2 ;;
 esac
 git_q rev-parse --git-dir >/dev/null 2>&1 || halt "WORKDIR is not a git repo: $WORKDIR" "clone the target repo there" 2
+
+# NOTIFY_EXEC (if set): absolute, executable, regular file, NOT a symlink — the same
+# rules coordinate.sh enforces for ON_HALT_EXEC. Fail-loud BEFORE GATE 1: the operator
+# is about to walk away trusting these pings, so a broken notifier must stop the run
+# now, not silently never fire. (Cleared before halting so the halt itself does not
+# try to invoke the invalid path.)
+if [ -n "$NOTIFY_EXEC" ]; then
+  bad_notify=""
+  case "$NOTIFY_EXEC" in /*) ;; *) bad_notify="NOTIFY_EXEC not absolute: $NOTIFY_EXEC" ;; esac
+  [ -n "$bad_notify" ] || { [ ! -L "$NOTIFY_EXEC" ] || bad_notify="NOTIFY_EXEC is a symlink: $NOTIFY_EXEC"; }
+  [ -n "$bad_notify" ] || { [ -f "$NOTIFY_EXEC" ]   || bad_notify="NOTIFY_EXEC not a regular file: $NOTIFY_EXEC"; }
+  [ -n "$bad_notify" ] || { [ -x "$NOTIFY_EXEC" ]   || bad_notify="NOTIFY_EXEC not executable: $NOTIFY_EXEC"; }
+  if [ -n "$bad_notify" ]; then
+    NOTIFY_EXEC=""
+    halt "$bad_notify" "fix NOTIFY_EXEC (absolute path to an executable regular file) in drive.defaults/drive.config, or unset it" 2
+  fi
+fi
+
 git_q fetch origin --quiet || halt "git fetch origin failed (network / auth)" "fix connectivity, re-run" 1
 
 # Render the settings with the absolute hook path (the hook travels in --settings so
@@ -795,6 +842,7 @@ printf 'GATE 1 — type the spec-rev above to confirm you read the frozen red te
 read -r ACK || halt "GATE 1 needs an interactive terminal (stdin closed)" "run drive.sh attached to a TTY" 2
 [ "$ACK" = "$CONFIRMED_SPEC_REV" ] || halt "spec-rev not confirmed (got '${ACK}')" "read the frozen test, then re-run drive.sh" 2
 render_board   # fresh board at drive start (no-op when BOARD_OUT is empty)
+notify_hook gate1   # "loop running — you can walk away" (no-op when NOTIFY_EXEC is empty)
 
 # ---- the loop -----------------------------------------------------------------
 consec_fail=0
@@ -823,8 +871,11 @@ while : ; do
   # --- HALT PREDICATE ---
   if [ "$NEXT" != "impl" ] || [ "${STATUS}" = "blocked" ]; then
     case "$NEXT" in
-      review) # banner FIRST — the operator must read the halt before answering the relay prompt
+      review) # banner FIRST — the operator must read the halt before answering the relay
+              # prompt; the notify ping fires even earlier, because the relay prompt can
+              # block forever on a walked-away operator and the ping is what calls them back
               render_board
+              notify_hook halt "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" "pipeline-review (frontier, semantic review + merge confirm)"
               halt_banner "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" "pipeline-review (frontier, semantic review + merge confirm)"
               offer_review_relay
               exit 0 ;;
@@ -878,4 +929,5 @@ while : ; do
        "inspect: the impl run made no pushed journal entry" 1
   note "<<< advanced to seq=$SEQ (status=$STATUS, next=$NEXT)"
   render_board
+  notify_hook card
 done

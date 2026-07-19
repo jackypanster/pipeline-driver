@@ -67,6 +67,17 @@ YOLO=0
 # browser and refresh whenever you glance over.
 # BOARD_OUT=/tmp/pipeline-board.html
 
+# --- walk-away notify hook (README §Board & review relay) ----------------------------
+# Non-empty = invoke this ABSOLUTE-path executable (best-effort) at the same three
+# moments as BOARD_OUT — after GATE 1, after every advanced card, and on every halt.
+# Event in $1 (gate1|card|halt); context in DRIVE_* env (DRIVE_FEATURE / DRIVE_BRANCH /
+# DRIVE_WORKDIR / DRIVE_TRANSPORT / DRIVE_SEQ / DRIVE_STATUS / DRIVE_NEXT, plus
+# DRIVE_HALT_REASON + DRIVE_HALT_NEXT on halts). Validated at preflight — a broken
+# notifier halts BEFORE GATE 1 (you are about to walk away trusting these pings);
+# runtime send failures warn once and never halt the loop. One-way driver->human.
+# Canonical adapter (Hermes -> Telegram):
+# NOTIFY_EXEC=$HOME/workspace/pipeline-dispatch/notify.sh
+
 # --- review-drive.sh: the meta-PR review<->fix loop (README §review-drive) ----------
 # Drives ONE toolchain-repo PR between the reviewer TUI (REVIEW_TERMINAL_* below)
 # and a fixer TUI until 'verdict: approved', a cap, or a no-progress halt. The
