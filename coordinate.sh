@@ -498,10 +498,6 @@ show_remote() {  # <path> — read from the observer's fetched origin/BRANCH (ne
   git -C "$OBSERVER_WORKDIR" show "origin/$BRANCH:$1" 2>/dev/null
 }
 
-stat_perms() {  # <path> — portable mode digits (macOS -f %Lp / Linux -c %a)
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
-}
-
 # ---- doctor (read-only full preflight; design §12/§24.2) -----------------------
 cmd_doctor() {
   local bad=0 warn=0
