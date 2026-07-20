@@ -13,9 +13,6 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 # Hermetic: this test may itself run inside a Herdr pane (HERDR_* injected) — drop
 # them so coordinate.sh's COORD_SELF_PANE does not pick up the test runner's pane.
 unset HERDR_PANE_ID HERDR_PANE_CWD_MATCH HERDR_ENV HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID 2>/dev/null || true
-# Physical temp base (macOS $TMPDIR sits behind the /var -> /private/var symlink;
-# the state-root parent-chain check correctly flags a symlinked parent, so the
-# suite must not construct its OWN state dirs behind one).
 TMP=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$(mktemp -d)"); trap 'rm -rf "$TMP"' EXIT
 pass=0 fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
@@ -71,9 +68,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
   cat > "$root/list.json" <<EOF
 {"result":{"panes":[
@@ -101,7 +95,7 @@ EOF
 # always pinned. run_status keeps stdout clean (the 2-line contract); run_status_err
 # merges stderr (where the human-readable bindings block goes).
 run_doctor() {
-  env STATE_DIR="$T/state" HERDR_STUB_LIST_JSON="$T/list.json" \
+  env HERDR_STUB_LIST_JSON="$T/list.json" \
       DRIVE_DEFAULTS="$DD" \
       HERDR_STUB_FOOTER="${HERDR_STUB_FOOTER:-}" \
       HERDR_STUB_READ_FAILS="${HERDR_STUB_READ_FAILS:-}" \
@@ -110,32 +104,32 @@ run_doctor() {
       bash "$COORD" doctor --config "$T/cfg" 2>&1
 }
 run_status() {
-  env STATE_DIR="$T/state" DRIVE_DEFAULTS="$DD" \
+  env DRIVE_DEFAULTS="$DD" \
       PATH=/usr/bin:/bin bash "$COORD" status --config "$T/cfg"
 }
 run_status_err() {
-  env STATE_DIR="$T/state" DRIVE_DEFAULTS="$DD" \
+  env DRIVE_DEFAULTS="$DD" \
       PATH=/usr/bin:/bin bash "$COORD" status --config "$T/cfg" 2>&1 >/dev/null
 }
 
 # ===== 1. status prints the bindings block sourced from the pinned defaults file
-#      (all six fields) — on STDERR, so stdout keeps the 2-line contract. =====
+#      (all six fields) — on STDERR, so stdout keeps the 2-record contract (pinned
+#      by wc -l on the file + exact line strings, not a substring/jq check). =====
 fresh; seed "$T"; write_defaults "$T"
-out=$(run_status); rc=$?
-err=$(run_status_err)
+run_status >"$T/out" 2>"$T/err"; rc=$?
 if [ "$rc" -eq 0 ] \
-   && printf '%s' "$out" | sed -n '1p' | grep -q 'idle' \
-   && printf '%s' "$out" | sed -n '2p' | jq -e . >/dev/null 2>&1 \
-   && [ "$(printf '%s' "$out" | sed -n '3p')" = "" ] \
-   && printf '%s' "$err" | grep -q -- '--- machine bindings' \
-   && printf '%s' "$err" | grep -q "defaults file: $T/defaults" \
-   && printf '%s' "$err" | grep -q '^prd/arch/task (CC pane): *agent=claude *expect=fable-5' \
-   && printf '%s' "$err" | grep -q '^impl .*(PI pane): *agent=pi *expect=glm-5.2' \
-   && printf '%s' "$err" | grep -q '^review .*(CODEX pane): *agent=codex *expect=gpt-5.6' \
-   && printf '%s' "$err" | grep -q 'impl transport: <unset> *yolo: <unset>'; then
-  ok "status: bindings block from pinned defaults (all six fields) on stderr, stdout contract intact"
+   && [ "$(wc -l < "$T/out")" -eq 2 ] \
+   && [ "$(sed -n 1p "$T/out")" = 'coordinate: feature=hello-cli (from HEAD current.json)' ] \
+   && [ "$(sed -n 2p "$T/out")" = '{"feature":"hello-cli"}' ] \
+   && grep -q -- '--- machine bindings' "$T/err" \
+   && grep -q "defaults file: $T/defaults" "$T/err" \
+   && grep -q '^prd/arch/task (CC pane): *agent=claude *expect=fable-5' "$T/err" \
+   && grep -q '^impl .*(PI pane): *agent=pi *expect=glm-5.2' "$T/err" \
+   && grep -q '^review .*(CODEX pane): *agent=codex *expect=gpt-5.6' "$T/err" \
+   && grep -q 'impl transport: <unset> *yolo: <unset>' "$T/err"; then
+  ok "status: bindings block from pinned defaults (all six fields) on stderr, stdout contract pinned"
 else
-  bad "status bindings block" "rc=$rc; stdout=$(printf '%s' "$out" | head -3); stderr: $(printf '%s' "$err" | head -8)"
+  bad "status bindings block" "rc=$rc; lines=$(wc -l < "$T/out"); L1=[$(sed -n 1p "$T/out")]; L2=[$(sed -n 2p "$T/out")]; err: $(grep -E 'machine bindings|defaults file|impl|review|prd' "$T/err" | head -6)"
 fi
 
 # ===== 2. coordinate.config override wins over the defaults value for the same field =====
@@ -214,7 +208,7 @@ if [ "$rc" -ne 0 ] \
    && printf '%s' "$out" | grep -q 'input: wB:p1' \
    && printf '%s' "$out" | grep -q "footer does not contain expected 'glm-5.2'" \
    && printf '%s' "$out" | grep -q 'next_action: open the intended TUI/model in this pane, or update \*_MODEL_EXPECT / coordinate.config' \
-   && printf '%s' "$out" | grep -q 'resume_guard:' \
+   && ! printf '%s' "$out" | grep -q 'resume[_]guard' \
    && printf '%s' "$out" | grep -q 'CC pane model: no \*_MODEL_EXPECT set — skipping footer check' \
    && ! printf '%s' "$out" | grep -q 'llama-9'; then
   ok "footer without expect -> five-field MODEL_MISMATCH (role/pane/expect/fix; raw footer never echoed)"

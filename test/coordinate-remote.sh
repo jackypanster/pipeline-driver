@@ -5,8 +5,7 @@
 #     URI sub-delims (! $ & ' ( ) * + , ; =) — the old whitelist-class sanitizer
 #     leaked it. Assert NO fragment of the secret reaches any doctor output/key.
 #   - finding 6: ssh://host:PORT/path and https://host/PORT/path derive DIFFERENT
-#     keys (the old scp-colon rule conflated the port with a path segment); and a
-#     remote that normalizes to a '.'/'..' segment is refused.
+#     identities (the old scp-colon rule conflated the port with a path segment).
 # Run: bash test/coordinate-remote.sh
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -38,9 +37,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
 }
 # set_all_origins <root> <url>: point all four clones at <url>.
@@ -65,19 +61,25 @@ run_doctor() {
       bash "$COORD" doctor --config "$1/cfg" 2>&1
 }
 
-# ===== finding 5: a password containing the '!' sub-delim must NOT leak. The old
-#      whitelist sanitizer ([A-Za-z0-9._~%+-]) stopped at '!' and kept the secret. =====
+# ===== finding 5: a password containing the '!' sub-delim must NOT leak, AND the
+#      host/path must SURVIVE normalization (an over-stripping sanitizer that
+#      destroyed github.com/acme/x would pass a pure negative check). The observer
+#      carries the credential URL; codex points elsewhere -> REMOTE_MISMATCH surfaces
+#      the observer's normalized identity, which MUST retain github.com/acme/x while
+#      the userinfo (alice!:ghp_SECRET) never appears. The old whitelist sanitizer
+#      ([A-Za-z0-9._~%+-]) stopped at '!' and kept the secret. =====
 fresh; seed "$T"
 set_all_origins "$T" "https://alice!:ghp_SECRET@github.com/acme/x.git"
-out=$(run_doctor "$T")
-# the host MUST be preserved in the key line; the secret and username MUST NOT
-# appear ANYWHERE (case-insensitive — the key lowercases the path).
-if printf '%s' "$out" | grep -q 'github.com' \
+git -C "$T/codex" remote set-url origin "https://example.com/different.git"
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
+   && printf '%s' "$out" | grep -q 'observer (net:[0-9]*:github.com/acme/x)' \
    && ! printf '%s' "$out" | grep -iq 'ghp_secret' \
    && ! printf '%s' "$out" | grep -q 'alice!'; then
-  ok "credential with '!' sub-delim stripped (no ghp_SECRET, no alice! in output)"
+  ok "credential '!' sub-delim: host/path retained in surfaced identity, userinfo stripped (no ghp_SECRET, no alice!)"
 else
-  bad "credential sanitize (!)" "secret leaked: $(printf '%s' "$out" | grep -iE 'ghp_secret|alice!' | head -3)"
+  bad "credential sanitize (!)" "rc=$rc; observer-id=[$(printf '%s' "$out" | grep -o 'observer ([^)]*)' | head -1)]; leaked: $(printf '%s' "$out" | grep -iE 'ghp_secret|alice!' | head -3)"
 fi
 
 # ===== finding 6: ssh://host:2222/path vs https://host/2222/path are DISTINCT —
@@ -98,20 +100,6 @@ else
   bad "port/path collision" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -4)"
 fi
 
-# ===== finding 6 (surface moved by the round-3 filesystem canonicalization): a
-#      NETWORK remote whose path carries a '..' segment is still REFUSED (the key
-#      would escape the state root). Relative FILESYSTEM forms like '..' are now
-#      legitimately canonicalized per-clone (see the relative-remote case below) —
-#      resolution eliminates dot-segments, so no escape key can exist on that path. =====
-fresh; seed "$T"
-set_all_origins "$T" "https://example.com/../escape.git"
-out=$(run_doctor "$T"); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]'; then
-  ok "network remote with '..' segment -> CONFIG_INVALID (no escape key)"
-else
-  bad "remote dot-segment" "expected CONFIG_INVALID; rc=$rc; $(printf '%s' "$out" | grep -iE 'repo key|config_invalid|normalized' | head -4)"
-fi
-
 # ===== round-3 F4: RELATIVE filesystem remotes resolve PER CLONE. Four clones each
 #      declaring remote.origin.url=origin.git name four DIFFERENT local repos —
 #      identities must mismatch. The old head normalized all four to the bare
@@ -122,7 +110,7 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "relative origin.git per clone -> REMOTE_MISMATCH (resolved per-clone, no shared key)"
 else
-  bad "relative filesystem remote" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -4)"
+  bad "relative filesystem remote" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -4)"
 fi
 
 # ===== round-3 F4 (positive): the SAME absolute filesystem remote in all four
@@ -130,24 +118,29 @@ fi
 fresh; seed "$T"
 set_all_origins "$T" "$T/origin.git"
 out=$(run_doctor "$T")
-if ! printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
-   && printf '%s' "$out" | grep -q 'normalized repo key: fs%3A'; then
-  ok "same absolute filesystem remote x4 -> agreement + typed resolved-path key (fs:…)"
+if ! printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
+  ok "same absolute filesystem remote x4 -> remote-identity agreement (no mismatch)"
 else
-  bad "absolute filesystem remote agreement" "$(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -4)"
+  bad "absolute filesystem remote agreement" "$(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -4)"
 fi
 
-# ===== round-3 F5: query/fragment credentials never reach a key or diagnostic.
-#      The old head kept ?token=… in the percent-encoded key (repo_key=…%3Ftoken%3D…). =====
+# ===== round-3 F5: query/fragment credentials never reach a diagnostic, AND the
+#      host/path must SURVIVE normalization. The observer carries the ?token= URL;
+#      codex points elsewhere -> REMOTE_MISMATCH surfaces the observer's normalized
+#      identity, which MUST retain github.com/acme/x while the ?token=… secret never
+#      appears. =====
 fresh; seed "$T"
 set_all_origins "$T" "https://github.com/acme/x.git?token=ghp_QUERYSECRET"
-out=$(run_doctor "$T")
-if printf '%s' "$out" | grep -q 'github.com' \
+git -C "$T/codex" remote set-url origin "https://example.com/different.git"
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
+   && printf '%s' "$out" | grep -q 'observer (net:[0-9]*:github.com/acme/x)' \
    && ! printf '%s' "$out" | grep -iq 'ghp_querysecret' \
    && ! printf '%s' "$out" | grep -iq 'token='; then
-  ok "query-string token stripped (no ghp_QUERYSECRET, no token= in any output)"
+  ok "query-string token: host/path retained in surfaced identity, ?token=… stripped (no ghp_QUERYSECRET, no token=)"
 else
-  bad "query/fragment credential" "leaked: $(printf '%s' "$out" | grep -iE 'ghp_querysecret|token=' | head -3)"
+  bad "query/fragment credential" "rc=$rc; observer-id=[$(printf '%s' "$out" | grep -o 'observer ([^)]*)' | head -1)]; leaked: $(printf '%s' "$out" | grep -iE 'ghp_querysecret|token=' | head -3)"
 fi
 
 # ===== round-4 F1: 'x@../shared' is a LITERAL LOCAL PATH — no colon, and a host
@@ -160,7 +153,7 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "x@../shared classified as per-clone local path -> REMOTE_MISMATCH"
 else
-  bad "userinfo-lookalike local path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+  bad "userinfo-lookalike local path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
 fi
 
 # ===== round-4 F2: filesystem vs network identities are DISJOINT namespaces. On
@@ -173,7 +166,7 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "local path vs https://file…/… -> REMOTE_MISMATCH (typed namespaces disjoint)"
 else
-  bad "cross-kind namespace collision" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+  bad "cross-kind namespace collision" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
 fi
 
 # ===== round-4 F3: '#' (and '?') are legal FILENAME bytes in local paths — the old
@@ -186,7 +179,7 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "local one#secret vs one -> REMOTE_MISMATCH (no ?#-strip on filesystem paths)"
 else
-  bad "filesystem #-byte path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+  bad "filesystem #-byte path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
 fi
 
 # ===== round-4 F4: two DISTINCT nonexistent top-level paths must not collapse into
@@ -199,25 +192,29 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "distinct nonexistent top-level paths -> REMOTE_MISMATCH (suffix preserved past /)"
 else
-  bad "nonexistent top-level resolution" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+  bad "nonexistent top-level resolution" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
 fi
 
-# ===== round-5 F1: the typed key is LOCALE-INVARIANT. Bash \${#v} counted
+# ===== round-5 F1: the typed identity is LOCALE-INVARIANT. Bash \${#v} counted
 #      characters under UTF-8 but bytes under C, so https://example.com/é.git keyed
-#      net:13: vs net:14: across shells and moved the same repo to a different
-#      state namespace. Skip-counted when no UTF-8 locale exists (precedent: gawk). =====
+#      net:13: vs net:14: across shells. The typed identity is internal to remote
+#      agreement, so the property is observed through the REMOTE_MISMATCH
+#      diagnostic: observer on the é remote, the other three on a different remote,
+#      surfaces observer(net:N:…) — and N MUST be byte-identical across locales.
+#      Skip-counted when no UTF-8 locale exists. =====
 fresh; seed "$T"
-set_all_origins "$T" "https://example.com/é.git"
-k_c=$(LC_ALL=C run_doctor "$T" | awk '/normalized repo key:/ {print $NF; exit}')
+git -C "$T/obs" remote set-url origin "https://example.com/é.git"
+for c in cc pi codex; do git -C "$T/$c" remote set-url origin "https://example.com/other.git"; done
 if locale -a 2>/dev/null | grep -qi '^en_US.UTF-8$'; then
-  k_u=$(LC_ALL=en_US.UTF-8 run_doctor "$T" | awk '/normalized repo key:/ {print $NF; exit}')
-  if [ -n "$k_c" ] && [ "$k_c" = "$k_u" ]; then
-    ok "non-ASCII repo key locale-invariant ($k_c)"
+  line_c=$(LC_ALL=C        run_doctor "$T" | grep '!= observer (net:' | head -1)
+  line_u=$(LC_ALL=en_US.UTF-8 run_doctor "$T" | grep '!= observer (net:' | head -1)
+  if [ -n "$line_c" ] && [ "$line_c" = "$line_u" ]; then
+    ok "non-ASCII identity locale-invariant ($line_c)"
   else
-    bad "locale-variant repo key" "LC_ALL=C: ${k_c:-<none>} vs en_US.UTF-8: ${k_u:-<none>}"
+    bad "locale-variant identity" "LC_ALL=C: ${line_c:-<none>} vs en_US.UTF-8: ${line_u:-<none>}"
   fi
 else
-  ok "non-ASCII repo key locale-invariance (SKIP: no en_US.UTF-8 locale on this machine)"
+  ok "non-ASCII identity locale-invariance (SKIP: no en_US.UTF-8 locale on this machine)"
 fi
 
 # ===== round-5 F3: F7 (proxy isolation) is a HARNESS-ONLY correction — swapping

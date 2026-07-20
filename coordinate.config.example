@@ -1,13 +1,13 @@
-# coordinate.config — config for coordinate.sh, the deterministic cross-stage
-# coordinator. Copy to coordinate.config and edit. Sourced by bash, so:
-# VAR=value, no spaces around '='.
+# coordinate.config — config for coordinate.sh's read-only preflight (`doctor`)
+# and summary (`status`). Copy to coordinate.config and edit. Sourced by bash,
+# so: VAR=value, no spaces around '='.
 #
 # coordinate.sh validates EVERY value before doing anything else (design §11)
 # and never `eval`s a configured command — command prefixes are data, appended
 # to a safely-constructed argv. Run `coordinate.sh doctor --config <path>` to
 # diagnose this file in place (read-only; touches network only for one fetch).
 #
-# SCOPE: one coordinator watches one target repository. The watcher and the
+# SCOPE: one config binds one target repository. The observer clone and the
 # three role clones (CC / Pi / Codex) MUST all resolve to the SAME normalized
 # remote identity and trunk branch — coordinate.sh normalizes https/ssh/scp-like
 # forms of the same remote to one canonical key (design §5, §11).
@@ -47,27 +47,7 @@ CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='$pipeline-review'
 
-# Polling / readiness / stage budgets. Positive base-10 integers.
-# POLL_SECS: no-change Git polling interval (no change is not an error).
-# PANE_READY_TIMEOUT_MS: bound for waiting to deliver before the stage begins (<= 600000).
-# STAGE_TIMEOUT_SECS: bound on a delivered stage producing neither a newer journal
-#                     entry nor a valid human-merge wait (<= 86400).
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
-
-# Optional halt hook: invoked as an argv vector (no shell expansion) with the
-# SOLE argument being the absolute halt.json path, under a bounded timeout. Must
-# be an absolute, executable, REGULAR file (never a symlink) when set. It
-# receives no prompts/tokens and cannot authorize resume.
-# ON_HALT_EXEC=/absolute/path/to/notifier
-
-# Optional state root (default: ${XDG_STATE_HOME:-$HOME/.local/state}/pipeline-driver).
-# MUST be outside every configured clone. Created 0700; files 0600. Writes reject
-# symlink destinations and use exclusive random same-directory temp files.
-# STATE_DIR=/absolute/path/to/pipeline-driver-state
-
-# Optional per-watcher overrides of the machine bindings in drive.defaults
+# Optional per-config overrides of the machine bindings in drive.defaults
 # (see drive.defaults.example): CC_AGENT / CC_MODEL_EXPECT / IMPL_AGENT /
 # IMPL_MODEL_EXPECT / REVIEW_AGENT / REVIEW_MODEL_EXPECT. config wins.
 # *_MODEL_EXPECT is a literal case-insensitive ASCII substring (printable ASCII

@@ -11,9 +11,6 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 # Hermetic: this test may itself run inside a Herdr pane (HERDR_* injected) — drop
 # them so coordinate.sh's COORD_SELF_PANE does not pick up the test runner's pane.
 unset HERDR_PANE_ID HERDR_PANE_CWD_MATCH HERDR_ENV HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID 2>/dev/null || true
-# Physical temp base (macOS $TMPDIR sits behind the /var -> /private/var symlink;
-# the state-root parent-chain check correctly flags a symlinked parent, so the
-# suite must not construct its OWN state dirs behind one).
 TMP=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$(mktemp -d)"); trap 'rm -rf "$TMP"' EXIT
 export DRIVE_DEFAULTS="$TMP/.absent-drive-defaults"   # hermetic: never read the operator's real file
 pass=0 fail=0
@@ -68,9 +65,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
   cat > "$root/list.json" <<EOF
 {"result":{"panes":[
@@ -84,7 +78,7 @@ EOF
 
 # run_doctor: reads $T (set by fresh/seed); extra env passed via DOCTOR_ENV.
 run_doctor() {
-  env STATE_DIR="$T/state" HERDR_STUB_LIST_JSON="$T/list.json" \
+  env HERDR_STUB_LIST_JSON="$T/list.json" \
       HERDR_PANE_ID="${HERDR_PANE_ID:-}" \
       PATH="$T/bin:/usr/bin:/bin" \
       bash "$COORD" doctor --config "$T/cfg" 2>&1
@@ -160,9 +154,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
 cat > "$T/list.json" <<EOF
 {"result":{"panes":[
@@ -183,14 +174,14 @@ cat > "$T/list.json" <<EOF
 EOF
 assert_code "missing CODEX pane -> PANE_NOT_FOUND" PANE_NOT_FOUND
 # (finding 10) that pane miss MUST carry the COMPLETE §14 tuple —
-# where/input/next_action/resume_guard. resume_guard is the new unconditional field
-# (absent on the old head).
+# where/input/next_action — and NEVER the dead dispatch guard field (this head
+# dropped it; the old head printed only [CODE] + fix).
 tup=$(run_doctor)
 if printf '%s' "$tup" | grep -q 'where: doctor:panes:CODEX' \
    && printf '%s' "$tup" | grep -q 'input:' \
    && printf '%s' "$tup" | grep -q 'next_action:' \
-   && printf '%s' "$tup" | grep -q 'resume_guard:'; then
-  ok "§14 tuple complete on doctor pane miss (where/input/next_action/resume_guard)"
+   && ! printf '%s' "$tup" | grep -q 'resume[_]guard'; then
+  ok "§14 tuple complete on doctor pane miss (where/input/next_action, no dead guard field)"
 else
   bad "§14 tuple (doctor pane)" "got: $(printf '%s' "$tup" | grep -A1 PANE_NOT_FOUND | head -4)"
 fi

@@ -1,30 +1,29 @@
 #!/usr/bin/env bash
-# coordinate.sh — the deterministic cross-stage coordinator for the `pipeline`
-# toolchain (coordinator-design.md v1.1).
+# coordinate.sh — the read-only preflight + summary companion to drive.sh for the
+# `pipeline` toolchain (design v1.3).
 #
-# WHAT IT IS: an OPTIONAL, opt-in watcher that advances one coordinated feature
-# across Claude Code (CC), Pi, and Codex by typing the next stage command into
-# the correct long-lived Herdr pane. It holds ZERO authoritative state — the
-# target repo's .pipeline/<feature>/journal.md on the remote is the single
-# source of truth. It is the cross-stage sibling of drive.sh (which owns the
-# impl card loop): coordinate.sh routes between stages and delegates an impl
-# span to drive.sh rather than duplicating its card loop.
+# WHAT IT IS: `doctor` (read-only full preflight) and `status` (read-only
+# summary) are the COMPLETE surface — not a phase of something larger. The tool
+# is stateless: it only reads the target repo's .pipeline/<feature>/
+# artifacts (and, for doctor, the role panes). drive.sh owns the impl card loop.
 #
-# THIS PHASE ships ONLY the read-only surface: `doctor` (full preflight) and
-# `status` (local state summary). `watch` and `resume` exist as stubs that fail
-# non-zero so a caller can never confuse them for working dispatch.
+# The dispatch half (`watch`/`resume`) was deliberately rejected: bash dispatch
+# cannot satisfy the design without breaking drive.sh's interactive trust gate.
+# PR #14 was closed unmerged: https://github.com/jackypanster/pipeline-driver/pull/14
+# The pivot to coordinated-mode dispatch (the CC-as-coordinator playbook) is
+# recorded in the design doc v1.3 §25, pinned at:
+# https://github.com/jackypanster/pipeline-driver/blob/19e8c954/coordinator-design.md
+# (PR #15 documented the pivot: https://github.com/jackypanster/pipeline-driver/pull/15).
 #
 # INVARIANTS (design §11 / §19): every config value is validated before use; a
 # configured command prefix is DATA appended to a safely-constructed argv, never
 # `eval`'d; target Git is read-only (fetch + `git show`, never a checked-out
-# worktree); local state writes reject symlinks and use restrictive modes; the
-# coordinator excludes its OWN pane and proves lifecycle authority per pane.
+# worktree); the coordinator excludes its OWN pane and proves lifecycle authority
+# per pane.
 #
 # Usage:
 #   coordinate.sh doctor --config <path>
 #   coordinate.sh status --config <path>
-#   coordinate.sh watch  --config <path>     # not implemented this phase
-#   coordinate.sh resume --config <path> --reason <text>   # not implemented this phase
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -44,12 +43,8 @@ unset HERDR_PANE_ID 2>/dev/null || true
 # sensitive, and an empty sample fails closed as non-authoritative.
 AUTH_TIMEOUT_MS="${COORD_AUTH_TIMEOUT_MS:-5000}"
 # Bounded timeout for `herdr pane list` — wholly unbounded by default, a wedged
-# Herdr daemon would hang the whole pane section. Same watchdog as agent explain.
+# Herdr daemon would hang the whole pane section. Same bounded guard as agent explain.
 PANE_LIST_TIMEOUT_MS="${COORD_PANE_LIST_TIMEOUT_MS:-5000}"
-# Documented upper bounds for the configured timeouts (design §11).
-: ${POLL_SECS_MAX:=3600}
-: ${PANE_READY_TIMEOUT_MS_MAX:=600000}
-: ${STAGE_TIMEOUT_SECS_MAX:=86400}
 
 # ---- error model (design §14; drive.sh's where/input/reason/next_action) --------
 # coord_die <code> <where> <input> <reason> <next_action>  — hard abort, exit 1.
@@ -60,7 +55,6 @@ coord_die() {
   printf 'input:       %s\n' "$3"                >&2
   printf 'reason:      %s\n' "$4"                >&2
   printf 'next_action: %s\n' "$5"                >&2
-  printf 'resume_guard: fix the above, then `coordinate.sh doctor --config <cfg>`; resume never bypasses it.\n' >&2
   exit 1
 }
 note() { printf '%s\n' "$*" >&2; }
@@ -161,36 +155,11 @@ normalize_remote_for() {
   esac
 }
 
-# identity_has_dotseg <identity>: 0 (true) if it is empty or contains a '.'/'..'
-# segment — such identities are REJECTED because the repo key would escape the
-# state root (e.g. remote ".." -> repodir $root/..).
-identity_has_dotseg() {
-  printf '%s' "$1" | awk -F/ '{for(i=1;i<=NF;i++) if($i=="."||$i==".."){f=1}} END{exit f?0:1}'
-}
-
-# repo_key_from <workdir> — single-segment, COLLISION-SAFE key from origin.url.
-# The normalized identity is percent-encoded (jq @uri) so structural separators
-# survive injectively (host:port vs host/path, a/b_c vs a_b/c). Identities with '.'
-# or '..' segments are rejected (empty output, return 1).
-repo_key_from() {
-  local url norm
-  url=$(git -C "$1" config --get remote.origin.url 2>/dev/null) || url=""
-  [ -n "$url" ] || return 1
-  norm=$(normalize_remote_for "$1" "$url")
-  identity_has_dotseg "$norm" && return 1
-  printf '%s' "$norm" | jq -rR '@uri'
-}
-
-state_root() {
-  if [ -n "${STATE_DIR:-}" ]; then printf '%s' "$STATE_DIR"
-  else printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/pipeline-driver"; fi
-}
-
 # resolve_path <path> — absolute, symlink-resolved (PHYSICAL). Resolves the longest
 # EXISTING ancestor via perl Cwd::abs_path and re-appends the not-yet-created tail,
-# so a STATE_DIR that does not exist yet still resolves to its intended physical
-# location. Used for containment (§13/§19) and distinct-workdir checks so lexical
-# tricks ("..", symlinks INTO a clone) cannot bypass physical isolation.
+# so a path that does not exist yet still resolves to its intended physical
+# location. Used for distinct-workdir checks so lexical tricks ("..", symlinks
+# INTO a clone) cannot bypass physical isolation.
 resolve_path() {
   local p=$1 base dir
   case "$p" in "") printf '%s' ""; return 0 ;; /*) ;; *) p="$PWD/$p" ;; esac
@@ -221,12 +190,12 @@ is_pos_int() {  # <value>
   [ "$1" -gt 0 ]
 }
 
-# valid_feature_slug <slug> — 0 iff <slug> is safe to use as a SINGLE path
-# component under the repo state dir. Rejects empty, '.', '..', any '/', leading
+# valid_feature_slug <slug> — 0 iff <slug> is safe to interpolate into a `git show`
+# path and diagnostic output. Rejects empty, '.', '..', any '/', leading
 # '-', newline/tab/CR (grep is line-based, so an embedded newline would otherwise
 # let a forged second line pass the allowlist), and anything outside
-# [A-Za-z0-9._-] — so a malicious feature read from HEAD's current.json (or a
-# tampered state subdir) can never traverse or inject forged output. (finding: slug.)
+# [A-Za-z0-9._-] — so a malicious feature read from HEAD's current.json can never
+# traverse the git-show path or inject forged output lines. (finding: slug.)
 valid_feature_slug() {
   local s=$1
   [ -n "$s" ] || return 1
@@ -235,7 +204,7 @@ valid_feature_slug() {
 }
 
 # ---- machine bindings (optional CC/IMPL/REVIEW _AGENT + _MODEL_EXPECT fields) ---
-# Six OPTIONAL fields, set in the global defaults file, overridable per-watcher in
+# Six OPTIONAL fields, set in the global defaults file, overridable per-config in
 # coordinate.config (config wins — same precedence direction as drive.sh). All of
 # this is ADDITIVE: an install with none of the fields behaves exactly as before
 # (every field <unset>, zero new MISS).
@@ -466,12 +435,6 @@ validate_config() {
       if [ -z "$url" ]; then cfg_violation WORKDIR_INVALID "$wdvar" "$wdvar has no remote.origin.url"
       elif [ -z "$norm" ]; then
         norm=$(normalize_remote_for "$wd" "$url")
-        # reject identities with '.'/'..' segments — the repo key would escape the
-        # state root (e.g. remote ".." -> repodir $root/..). (finding: dot-segment key)
-        if identity_has_dotseg "$norm"; then
-          cfg_violation CONFIG_INVALID "$wdvar" "$wdvar normalizes to an identity with a '.'/'..' segment ($norm) — refused as a repo-state key"
-          norm=""
-        fi
       elif [ "$(normalize_remote_for "$wd" "$url")" != "$norm" ]; then
         cfg_violation REMOTE_MISMATCH "$wdvar" "$wdvar remote ($(redact_remote "$url")) != observer ($norm)"
       fi
@@ -492,38 +455,6 @@ validate_config() {
     [ -z "$wd" ] && continue
     case "$wd" in *$'\n'*) cfg_violation CONFIG_INVALID "$cmdvar" "$cmdvar spans multiple lines" ;; esac
   done
-  # 6. timeouts: positive base-10 ints within documented upper bounds.
-  if ! is_pos_int "${POLL_SECS:-0}"; then cfg_violation CONFIG_INVALID "POLL_SECS" "POLL_SECS not a positive integer"
-  elif [ "${POLL_SECS:-0}" -gt "$POLL_SECS_MAX" ]; then cfg_violation CONFIG_INVALID "POLL_SECS" "POLL_SECS exceeds $POLL_SECS_MAX"; fi
-  if ! is_pos_int "${PANE_READY_TIMEOUT_MS:-0}"; then cfg_violation CONFIG_INVALID "PANE_READY_TIMEOUT_MS" "PANE_READY_TIMEOUT_MS not a positive integer"
-  elif [ "${PANE_READY_TIMEOUT_MS:-0}" -gt "$PANE_READY_TIMEOUT_MS_MAX" ]; then cfg_violation CONFIG_INVALID "PANE_READY_TIMEOUT_MS" "PANE_READY_TIMEOUT_MS exceeds $PANE_READY_TIMEOUT_MS_MAX"; fi
-  if ! is_pos_int "${STAGE_TIMEOUT_SECS:-0}"; then cfg_violation CONFIG_INVALID "STAGE_TIMEOUT_SECS" "STAGE_TIMEOUT_SECS not a positive integer"
-  elif [ "${STAGE_TIMEOUT_SECS:-0}" -gt "$STAGE_TIMEOUT_SECS_MAX" ]; then cfg_violation CONFIG_INVALID "STAGE_TIMEOUT_SECS" "STAGE_TIMEOUT_SECS exceeds $STAGE_TIMEOUT_SECS_MAX"; fi
-  # 7. ON_HALT_EXEC (if set): absolute, executable, regular file, NOT a symlink.
-  if [ -n "${ON_HALT_EXEC:-}" ]; then
-    case "$ON_HALT_EXEC" in /*) ;; *) cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC not absolute: $ON_HALT_EXEC" ;;
-    esac
-    if [ -L "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC is a symlink: $ON_HALT_EXEC"
-    elif [ ! -f "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC not a regular file: $ON_HALT_EXEC"
-    elif [ ! -x "$ON_HALT_EXEC" ]; then cfg_violation CONFIG_INVALID "ON_HALT_EXEC" "ON_HALT_EXEC not executable: $ON_HALT_EXEC"
-    fi
-  fi
-  # 8. STATE_DIR (if set): OUTSIDE every configured clone — by PHYSICAL resolution
-  # (realpath), not lexical prefix, so ".." and a symlink resolving INTO a clone
-  # cannot bypass containment (§13/§19; finding: state containment).
-  if [ -n "${STATE_DIR:-}" ]; then
-    local rp_state rp_wd_s
-    case "$STATE_DIR" in /*) ;; *) cfg_violation CONFIG_INVALID "STATE_DIR" "STATE_DIR not absolute: $STATE_DIR" ;; esac
-    rp_state=$(resolve_path "$STATE_DIR")
-    for wdvar in OBSERVER_WORKDIR CC_WORKDIR PI_WORKDIR CODEX_WORKDIR; do
-      wd="${!wdvar:-}"
-      [ -d "$wd" ] || continue
-      rp_wd_s=$(resolve_path "$wd")
-      case "$rp_state" in
-        "$rp_wd_s"|"$rp_wd_s"/*) cfg_violation CONFIG_INVALID "STATE_DIR" "STATE_DIR ($STATE_DIR -> $rp_state) resolves inside $wdvar ($wd -> $rp_wd_s)" ;;
-      esac
-    done
-  fi
   return $CFG_BAD
 }
 
@@ -567,10 +498,6 @@ show_remote() {  # <path> — read from the observer's fetched origin/BRANCH (ne
   git -C "$OBSERVER_WORKDIR" show "origin/$BRANCH:$1" 2>/dev/null
 }
 
-stat_perms() {  # <path> — portable mode digits (macOS -f %Lp / Linux -c %a)
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
-}
-
 # ---- doctor (read-only full preflight; design §12/§24.2) -----------------------
 cmd_doctor() {
   local bad=0 warn=0
@@ -578,17 +505,15 @@ cmd_doctor() {
   d_info() { printf 'info  %s\n' "$1"; }
   d_warn() { printf 'warn  %s\n      %s\n' "$1" "$2"; warn=$((warn+1)); }
   d_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; bad=$((bad+1)); }
-  # d_code <CODE> <where> <input> <reason> <next_action> [resume_guard] — drive.sh
-  # d_miss shape with the FULL §14 tuple, ALWAYS including resume_guard (the 6th
-  # arg defaults to the standard "fix, then re-doctor; resume never bypasses it" so
-  # every MISS carries all five named fields the fail-fast contract requires).
-  # (finding: §14 tuple — complete + unconditional resume_guard.)
+  # d_code <CODE> <where> <input> <reason> <next_action> — drive.sh d_miss shape
+  # with the FULL §14 tuple (code/where/input/reason/next_action) so every MISS
+  # stays locatable. (finding: §14 tuple.)
   d_code() {
     printf 'MISS  [%s] reason: %s
 ' "$1" "$4"
-    printf '      where: %s | input: %s | next_action: %s | resume_guard: %s
+    printf '      where: %s | input: %s | next_action: %s
 ' \
-      "$2" "$3" "$5" "${6:-fix the above, then re-run \`coordinate.sh doctor --config <cfg>\`; resume never bypasses it}"
+      "$2" "$3" "$5"
     bad=$((bad+1))
   }
 
@@ -611,10 +536,10 @@ cmd_doctor() {
       d_code "$c" "doctor:config" "$ci" "$cr" "edit $CONF (coordinate.config.example documents each rule)"
     done
   else
-    d_ok "config valid ($CONF): workdirs/remote/branch/commands/timeouts all pass §11"
+    d_ok "config valid ($CONF): workdirs/remote/branch/commands all pass §11"
   fi
-  # Runtime watchdog knobs (env): MUST be positive integers. ualarm(0) on a zero/
-  # non-positive budget DISABLES the watchdog (finding: bounded knobs), so a wedged
+  # Runtime guard knobs (env): MUST be positive integers. ualarm(0) on a zero/
+  # non-positive budget DISABLES the guard (finding: bounded knobs), so a wedged
   # Herdr daemon would hang preflight. Reject them up front AND skip every Herdr
   # read for the rest of this run — reporting the violation and then calling Herdr
   # with the same invalid budget would hang on a blocking leader (finding: invalid
@@ -623,7 +548,7 @@ cmd_doctor() {
   for _k in AUTH_TIMEOUT_MS PANE_LIST_TIMEOUT_MS; do
     _v="${!_k:-}"
     if ! is_pos_int "$_v"; then
-      d_code CONFIG_INVALID "doctor:config" "$_k=$_v" "$_k is not a positive integer (a zero/non-positive budget would disable the bounded-exec watchdog)" "unset $_k for the default, or set COORD_${_k} to a positive millisecond budget"
+      d_code CONFIG_INVALID "doctor:config" "$_k=$_v" "$_k is not a positive integer (a zero/non-positive budget would disable the bounded-exec guard)" "unset $_k for the default, or set COORD_${_k} to a positive millisecond budget"
       herdr_reads_ok=0
     fi
   done
@@ -653,9 +578,6 @@ cmd_doctor() {
 
   if [ "$have_workdirs" = "1" ]; then
     printf -- '--- remote / branch agreement -------------------------------------\n'
-    local rkey
-    rkey=$(repo_key_from "$OBSERVER_WORKDIR") || rkey=""
-    [ -n "$rkey" ] && d_ok "normalized repo key: $rkey" || d_code REMOTE_MISMATCH "doctor:remote" "$OBSERVER_WORKDIR" "observer has no remote.origin.url" "git -C $OBSERVER_WORKDIR remote add origin <url>"
     # Each clone MUST be checked out on BRANCH — a role clone on another branch
     # would type the next stage into the wrong branch (design §5/§11; finding:
     # branch agreement).
@@ -754,7 +676,7 @@ cmd_doctor() {
     printf -- '--- role panes (herdr) --------------------------------------------\n'
     local panes_json=""
     if [ "$herdr_reads_ok" != "1" ]; then
-      d_info "skipping ALL Herdr reads: invalid watchdog budget (see the CONFIG_INVALID above) — no unbounded call is ever made"
+      d_info "skipping ALL Herdr reads: invalid guard budget (see the CONFIG_INVALID above) — no unbounded call is ever made"
     else
     panes_json=$(bounded_run_ms "$PANE_LIST_TIMEOUT_MS" herdr pane list 2>/dev/null) || panes_json=""
     if [ -z "$panes_json" ] || ! printf '%s' "$panes_json" | jq -e . >/dev/null 2>&1; then
@@ -778,11 +700,8 @@ cmd_doctor() {
     fi
     fi   # herdr_reads_ok gate
   else
-    d_info "skipping remote/pane/state sections: one or more workdirs unusable (fix the config section above)"
+    d_info "skipping remote/pane sections: one or more workdirs unusable (fix the config section above)"
   fi
-
-  printf -- '--- local state ---------------------------------------------------\n'
-  coord_doctor_state
 
   printf -- '---------------------------------------------------------------------\n'
   printf 'doctor: %d blocking, %d warning(s)\n' "$bad" "$warn"
@@ -846,197 +765,13 @@ coord_check_role() {
   fi
 }
 
-# coord_doctor_state — state root existence/permissions, ledger integrity, lock, halt.
-# ---- state safety checks (design §19; finding: state preflight) ----------------
-# _state_symlink_bad <path> <root> — echoes the offending symlink path (and
-# returns 0) if <path> or any ancestor STRICTLY below <root> is a symlink; returns 1
-# (empty output) otherwise. §19 forbids symlink destinations and symlinked parents.
-_state_symlink_bad() {
-  local p=$1 root=$2 cur
-  [ -L "$p" ] && { printf '%s' "$p"; return 0; }
-  [ "$p" = "$root" ] && return 1          # nothing above the root is ours to check
-  cur=$(dirname "$p")
-  while [ "$cur" != "$root" ] && [ -n "$cur" ] && [ "$cur" != "/" ]; do
-    [ -L "$cur" ] && { printf '%s' "$cur"; return 0; }
-    cur=$(dirname "$cur")
-  done
-  return 1
-}
-# _state_assert_dir/_file <path> <root> <label> — BLOCK unless <path> is a real
-# (non-symlink, non-symlinked-parent) entry of the right TYPE with mode 0700 (dir)
-# / 0600 (regular file). RETURNS nonzero on any violation so the caller can (and
-# MUST) skip every downstream read — a mode-0600 FIFO named ledger.json would hang
-# the jq/cat that follows. (finding: require regular files + stop reading after a
-# failed assertion.)
-_state_assert_dir() {
-  local p=$1 root=$2 label=$3 sym perm
-  if sym=$(_state_symlink_bad "$p" "$root"); then
-    d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is reached via a symlink ($sym) — §19 forbids symlinked state paths" "remove the symlink; restore $label as a real directory"
-    return 1
-  fi
-  if [ ! -d "$p" ]; then
-    d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is not a directory" "restore $label as a real 0700 directory"
-    return 1
-  fi
-  perm=$(stat_perms "$p" 2>/dev/null)
-  if [ "$perm" = "700" ]; then d_ok "$label dir 0700 ($p)"; return 0
-  else d_code CONFIG_INVALID "doctor:state" "$p" "$label dir mode is ${perm:-?} (expected 0700) — §19" "chmod 700 $p"; return 1; fi
-}
-_state_assert_file() {
-  local p=$1 root=$2 label=$3 sym perm
-  if sym=$(_state_symlink_bad "$p" "$root"); then
-    d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is reached via a symlink ($sym) — §19 forbids symlinked state paths" "remove the symlink; restore $label as a real file"
-    return 1
-  fi
-  if [ ! -f "$p" ]; then
-    # -f = REGULAR file only: a FIFO/socket/device here would HANG any reader with
-    # no writer, so it is refused BEFORE anything opens it.
-    d_code CONFIG_INVALID "doctor:state" "$p" "$label ($p) is not a regular file — refusing to read it (a FIFO/socket/device would hang doctor)" "replace $p with a regular 0600 file"
-    return 1
-  fi
-  perm=$(stat_perms "$p" 2>/dev/null)
-  if [ "$perm" = "600" ]; then d_ok "$label file 0600 ($p)"; return 0
-  else d_code CONFIG_INVALID "doctor:state" "$p" "$label file mode is ${perm:-?} (expected 0600) — §19" "chmod 600 $p"; return 1; fi
-}
-# ledger_schema_problem <file> — echoes the first missing/invalid §13 record
-# field, or "" if the ledger is complete: feature / journal_seq (INTEGER) /
-# journal_commit (40-hex) / target_role ∈ CC|PI|CODEX / pane / command NAME /
-# delivery ∈ pending|sent|waiting. Fractional seqs, unknown roles, and a missing
-# command name are all corrupt. (finding: full §13 ledger schema.)
-ledger_schema_problem() {
-  jq -r '
-    if (.feature | type) != "string" or .feature == "" then "missing .feature"
-    elif (.journal_seq | type) != "number" or (.journal_seq | floor) != .journal_seq then "missing/invalid .journal_seq (need integer)"
-    elif (.journal_commit | type) != "string" or (.journal_commit | test("^[0-9a-f]{40}$") | not) then "missing/invalid .journal_commit (need 40-hex)"
-    elif (.target_role | type) != "string" or (.target_role | IN("CC","PI","CODEX") | not) then "missing/invalid .target_role (need CC|PI|CODEX)"
-    elif (.pane | type) != "string" or .pane == "" then "missing .pane"
-    elif (.command | type) != "string" or .command == "" then "missing .command (command name)"
-    elif (.delivery | type) != "string" or (.delivery | IN("pending","sent","waiting") | not) then "missing/invalid .delivery (need pending|sent|waiting)"
-    else "" end
-  ' "$1" 2>/dev/null
-}
-
-coord_doctor_state() {
-  local root rkey repodir
-  root=$(state_root)
-  rkey=$(repo_key_from "$OBSERVER_WORKDIR" 2>/dev/null) || rkey=""
-  repodir="$root/${rkey:-<unknown>}"
-  # Parent chain FIRST — before the absent-root early return. A symlinked parent
-  # redirects the whole state tree whether or not the root exists yet: the normal
-  # first write would land through the forbidden parent. Walking the chain is safe
-  # pre-creation (a non-existent component is never a symlink; -L is simply false).
-  # (finding: parent check must precede the absent early-return.)
-  local _p _parent_bad=0; _p=$(dirname "$root")
-  while [ "$_p" != "/" ] && [ -n "$_p" ]; do
-    if [ -L "$_p" ]; then
-      d_code CONFIG_INVALID "doctor:state" "$root" "parent of state root ($_p) is a symlink — §19 forbids symlinked state parents (blocking even before first write)" "remove the symlink $_p or point STATE_DIR outside a symlinked tree"
-      _parent_bad=1; break
-    fi
-    # An EXISTING non-directory ancestor means the root can NEVER be created here —
-    # "not created yet" would be a lie. (finding: non-directory ancestors.)
-    if [ -e "$_p" ] && [ ! -d "$_p" ]; then
-      d_code CONFIG_INVALID "doctor:state" "$root" "ancestor of state root ($_p) exists but is not a directory — the state root can never be created beneath it" "point STATE_DIR at a creatable directory path"
-      _parent_bad=1; break
-    fi
-    _p=$(dirname "$_p")
-  done
-  # A REJECTED PARENT poisons the entire subtree — the root itself may be a real
-  # 0700 directory reached THROUGH the forbidden parent, and _state_assert_dir
-  # cannot rediscover the violation (the root is its trust boundary). Never read
-  # past it. (finding: stop after a rejected state-root parent.)
-  [ "$_parent_bad" = "1" ] && return 0
-  if [ ! -d "$root" ]; then
-    # Distinguish "absent" (fine — created on first write) from a dangling
-    # symlink or a non-directory entry at the state root (BLOCKING). (finding:
-    # dangling/state-root type.)
-    if [ -L "$root" ] || [ -e "$root" ]; then
-      d_code CONFIG_INVALID "doctor:state" "$root" "state root is a symlink (dangling or not) or a non-directory entry — cannot treat as uninitialized" "remove $root (or point STATE_DIR at a real directory)"
-    else
-      d_info "state root not created yet: $root (created 0700 on first write; design §13)"
-    fi
-    return
-  fi
-  d_ok "state root exists: $root"
-  # A REJECTED root poisons everything beneath it: stop — never read past a failed
-  # directory assertion (finding: stop traversal after a directory trust failure).
-  _state_assert_dir "$root" "$root" "state root" || return 0
-  if [ -d "$repodir" ]; then
-    _state_assert_dir "$repodir" "$root" "repo state" || return 0
-    # Per-feature (§13 layout: halt.json / lock / ledger.json live in the feature
-    # dir). A rejected feature dir's CONTENTS are never inspected.
-    local featd
-    for featd in "$repodir"/*/; do
-      [ -d "$featd" ] || continue
-      featd=${featd%/}
-      _state_assert_dir "$featd" "$root" "feature state ($(basename "$featd"))" || continue
-      _doctor_feature_state "$featd" "$root"
-    done
-  else
-    d_info "no state for repo key ${rkey:-<unknown>} (idle)"
-  fi
-}
-
-# _doctor_feature_state <featdir> <root> — halt/lock/ledger checks for ONE feature
-# whose directory assertion already PASSED. Every file read is gated on its own
-# assertion; a rejected entry is reported and never opened.
-_doctor_feature_state() {
-  local featd=$1 root=$2 ffeat; ffeat=$(basename "$featd")
-  # halt.json (unresolved halt blocks watch; resume is the only bypass).
-  local haltf="$featd/halt.json"
-  if [ -e "$haltf" ] || [ -L "$haltf" ]; then
-    if _state_assert_file "$haltf" "$root" "halt.json ($ffeat)"; then
-      local code; code=$(jq -r '.code // "HALTED"' "$haltf" 2>/dev/null || echo HALTED)
-      d_warn "unresolved halt.json present ($code): $haltf" "inspect it, then \`coordinate.sh resume --config $CONF --reason <text>\` (not implemented this phase)"
-    else
-      d_warn "unresolved halt.json present (REJECTED above — not read): $haltf" "fix the file-level MISS above, then re-run doctor"
-    fi
-  fi
-  # lock dir (held = a watch is running; stale = dead PID, resume clears it).
-  local lockd="$featd/lock"
-  if [ -e "$lockd" ] || [ -L "$lockd" ]; then
-    if _state_assert_dir "$lockd" "$root" "watch lock ($ffeat)"; then
-      local pidf="" pid="" st="held"
-      pidf=$(find "$lockd" -type f 2>/dev/null | head -1)
-      if [ -n "$pidf" ]; then
-        # cat runs ONLY when the assertion passed (a FIFO pidfile would hang it).
-        if _state_assert_file "$pidf" "$root" "lock pidfile"; then
-          pid=$(cat "$pidf" 2>/dev/null || echo "")
-        fi
-      fi
-      if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then st="stale"; fi
-      d_warn "watch lock present ($st): $lockd" "$([ "$st" = stale ] && echo "resume clears a stale lock after preflight" || echo "a watch is running — that is expected")"
-    fi
-  fi
-  # ledger.json integrity (§13 schema, not just valid JSON): feature / journal_seq
-  # / full 40-hex commit / target_role ∈ CC|PI|CODEX / pane / command name /
-  # delivery ∈ pending|sent|waiting, AND the ledger .feature must match its
-  # directory name. (finding: full §13 ledger schema.) A rejected ledger (symlink /
-  # non-regular / bad mode) is NEVER read — jq on a FIFO would hang forever.
-  local led="$featd/ledger.json" jerr prob lfeat
-  if [ -e "$led" ] || [ -L "$led" ]; then
-    _state_assert_file "$led" "$root" "ledger.json ($ffeat)" || return 0
-    if ! jerr=$(jq -e . "$led" 2>&1 >/dev/null); then
-      d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) not JSON: ${jerr:-unreadable}" "inspect $led; remove only after confirming no dispatch is in flight"
-      return 0
-    fi
-    prob=$(ledger_schema_problem "$led")
-    if [ -n "$prob" ]; then
-      d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json ($ffeat) schema incomplete: $prob" "inspect $led; restore the full §13 schema (feature/seq/commit/role/pane/command/delivery)"
-      return 0
-    fi
-    lfeat=$(jq -r '.feature // ""' "$led" 2>/dev/null)
-    if [ "$lfeat" != "$ffeat" ]; then
-      d_code LEDGER_CORRUPT "doctor:state:ledger" "$led" "ledger.json feature ($lfeat) != its directory name ($ffeat)" "move the ledger under <repo-key>/$lfeat/ or fix .feature"
-    else
-      d_ok "ledger.json valid ($ffeat: full §13 schema)"
-    fi
-  fi
-}
-
 # ---- status (read-only; design §12) -------------------------------------------
+# stdout contract: EXACTLY one human line + one compact JSON object
+# {"feature":<slug|null>}, nothing else. The machine-bindings block and any
+# coord_die output go to STDERR so stdout never gains extra lines.
 cmd_status() {
   validate_config || {
-    # Decode the SAME tab tuple validate_config now writes (CODE<TAB>input<TAB>reason)
+    # Decode the SAME tab tuple validate_config writes (CODE<TAB>input<TAB>reason)
     # so status surfaces a stable CONFIG_INVALID instead of the raw record. (finding:
     # §14 tuple — one encoding, decoded consistently everywhere.)
     local first="${CFG_V[0]:-}"
@@ -1048,106 +783,50 @@ cmd_status() {
       "${freason:-config validation failed}" "edit $CONF (coordinate.config.example documents each rule)"
   }
   # The machine-bindings block is human-readable observability: it goes to STDERR
-  # so stdout keeps its contract of exactly ONE human line + ONE JSON object
-  # (emit_status_json is untouched). Invalid optional fields print <invalid> and
-  # never abort this read-only summary.
+  # so stdout keeps its contract of exactly ONE human line + ONE JSON object.
+  # Invalid optional fields print <invalid> and never abort this read-only summary.
   print_machine_bindings >&2
-  local root rkey repodir feat="" cur
-  root=$(state_root)
-  rkey=$(repo_key_from "$OBSERVER_WORKDIR" 2>/dev/null) || rkey=""
-  repodir="$root/${rkey:-unknown}"
-  # Discover the active feature from the observer's LOCAL HEAD (no fetch — status
-  # never touches the network or mutates state). Best-effort.
+  # Discover the active feature from the observer's LOCAL HEAD ONLY (no fetch —
+  # status never touches the network or mutates state). Best-effort: a missing or
+  # unreadable current.json simply means idle.
+  local cur feat=""
   cur=$(git -C "$OBSERVER_WORKDIR" show "HEAD:.pipeline/current.json" 2>/dev/null) || cur=""
   if [ -n "$cur" ]; then feat=$(printf '%s' "$cur" | jq -r '.feature // empty' 2>/dev/null) || feat=""; fi
-  if [ -z "$feat" ] && [ -d "$repodir" ]; then
-    # fall back to the most recently modified feature subdir
-    feat=$(cd "$repodir" 2>/dev/null && ls -1dt */ 2>/dev/null | head -1); feat="${feat%/}"
-  fi
-  # The feature slug is UNTRUSTED (read from HEAD's current.json, or a state subdir
-  # name) and is concatenated into a state path — validate it BEFORE path use so a
-  # malicious slug ('..', with '/', whitespace, control chars) cannot traverse into
-  # another repo/feature state namespace (finding: feature slug).
+  # The feature slug is UNTRUSTED (read from HEAD's current.json) and is echoed in
+  # output — validate it BEFORE any use so a malicious slug ('..', '/', newline +
+  # forged text) can neither traverse nor inject. (finding: feature slug.)
   if [ -n "$feat" ] && ! valid_feature_slug "$feat"; then
     coord_die CONFIG_INVALID "status:feature" "<redacted-slug>" \
-      "feature slug from current.json is malformed or unsafe: must be a simple name ([A-Za-z0-9][A-Za-z0-9._-]*), got something containing '/', '..', or whitespace/control chars" \
+      "feature slug from current.json is malformed or unsafe (must be a simple name [A-Za-z0-9][A-Za-z0-9._-]*)" \
       "inspect .pipeline/current.json on HEAD in $OBSERVER_WORKDIR; do NOT pass the raw value to any path"
   fi
 
-  local state="idle" seq="" commit="" delivery="" halt_code="" lock_state="free"
-  if [ -z "$rkey" ] || [ ! -d "$repodir" ] || [ -z "$feat" ]; then
-    printf 'coordinate: idle (no state for %s%s)\n' "${rkey:+$rkey/}" "${feat:-}"
-    emit_status_json "$state" "$rkey" "$feat" "$seq" "$commit" "$delivery" "$halt_code" "$lock_state"
-    exit 0
+  if [ -n "$feat" ]; then
+    printf 'coordinate: feature=%s (from HEAD current.json)\n' "$feat"
+  else
+    printf 'coordinate: idle (no active feature)\n'
   fi
-
-  local featdir="$repodir/$feat"
-  if [ ! -d "$featdir" ]; then
-    printf 'coordinate: idle (no state yet for feature %s)\n' "$feat"
-    emit_status_json "$state" "$rkey" "$feat" "$seq" "$commit" "$delivery" "$halt_code" "$lock_state"
-    exit 0
-  fi
-
-  # ledger (last observed Git identifiers live here).
-  if [ -f "$featdir/ledger.json" ]; then
-    if ! jq -e . "$featdir/ledger.json" >/dev/null 2>&1; then
-      printf 'coordinate: LEDGER_CORRUPT (ledger for %s is not JSON)\n' "$feat"
-      jq -nc --arg repo_key "$rkey" --arg feature "$feat" \
-           '{state:"error", error_code:"LEDGER_CORRUPT", repo_key:$repo_key, feature:$feature}'
-      exit 1
-    fi
-    state="observed"
-    seq=$(jq -r '.journal_seq // empty'       "$featdir/ledger.json")
-    commit=$(jq -r '.journal_commit // empty' "$featdir/ledger.json")
-    delivery=$(jq -r '.delivery // empty'     "$featdir/ledger.json")
-  fi
-
-  if [ -f "$featdir/halt.json" ]; then
-    halt_code=$(jq -r '.code // "HALTED"' "$featdir/halt.json" 2>/dev/null || echo HALTED)
-    state="halted"
-  fi
-  if [ -d "$featdir/lock" ]; then lock_state="held"; fi
-
-  local short="${commit:0:12}"
-  printf 'coordinate: feature=%s state=%s seq=%s commit=%s delivery=%s%s%s\n' \
-    "$feat" "$state" "${seq:-<none>}" "${short:-<none>}" "${delivery:-<none>}" \
-    "${halt_code:+ halted=}$halt_code" "${lock_state:+ lock=}$lock_state"
-  emit_status_json "$state" "$rkey" "$feat" "$seq" "$commit" "$delivery" "$halt_code" "$lock_state"
-}
-
-emit_status_json() {  # <state> <rkey> <feat> <seq> <commit> <delivery> <halt> <lock>
-  # Compact (one-line) object. Empty strings coerce to null via n() — a bare
-  # `(x|select(length>0))` yields jq `empty`, and an object literal with ANY empty
-  # field is itself suppressed (emits nothing), which would drop the whole line.
-  jq -nc \
-    --arg state "$1" --arg repo_key "$2" --arg feature "$3" \
-    --arg seq "$4" --arg commit "$5" --arg delivery "$6" \
-    --arg halt "$7" --arg lock "$8" '
-    def n(e): if (e|length) > 0 then e else null end;
-    {state:$state, repo_key:$repo_key, feature:n($feature),
-     last_observed:{journal_seq:n($seq), journal_commit:n($commit), delivery:n($delivery)},
-     halt:n($halt), lock:$lock}'
+  # One compact JSON object — the ONLY other stdout line. n() coerces an empty
+  # slug to null, so an idle repo prints {"feature":null}.
+  jq -nc --arg feat "$feat" 'def n(e): if (e|length) > 0 then e else null end; {feature:n($feat)}'
 }
 
 # ---- arg dispatch --------------------------------------------------------------
 usage() {
   cat >&2 <<EOF
-usage: coordinate.sh <subcommand> --config <path> [--reason <text]
+usage: coordinate.sh <subcommand> --config <path>
 
 subcommands:
-  doctor   read-only full preflight (deps / config / remote / journal / panes / authority / state)
-  status   read-only local state summary (one human line + one JSON object)
-  watch    not implemented this phase — see coordinator-design.md
-  resume   not implemented this phase — see coordinator-design.md
+  doctor   read-only full preflight (deps / config / remote / journal / panes / authority)
+  status   read-only summary: active feature from HEAD current.json (one human line + one JSON object)
 EOF
 }
 
 SUBCMD="${1:-}"; shift || true
-CONF=""; REASON=""
+CONF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --config) [ $# -ge 2 ] || { echo "coordinate.sh: --config needs a path" >&2; exit 2; }; CONF=$2; shift 2 ;;
-    --reason) [ $# -ge 2 ] || { echo "coordinate.sh: --reason needs text" >&2; exit 2; }; REASON=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "coordinate.sh: unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -1157,7 +836,7 @@ case "$SUBCMD" in
   doctor)
     [ -n "$CONF" ] || { echo "coordinate.sh: doctor requires --config <path>" >&2; usage; exit 2; }
     [ -f "$CONF" ] || coord_die CONFIG_INVALID "doctor:arg-parse" "$CONF" "config file not found" "create it from coordinate.config.example"
-    # Global defaults first (optional), per-watcher config second — config wins.
+    # Global defaults first (optional), per-invocation config second — config wins.
     # Same path expression + precedence direction as drive.sh; any unrelated
     # variable the defaults file sets flows into validate_config unchanged.
     DEFAULTS="$(defaults_path)"
@@ -1170,21 +849,13 @@ case "$SUBCMD" in
   status)
     [ -n "$CONF" ] || { echo "coordinate.sh: status requires --config <path>" >&2; usage; exit 2; }
     [ -f "$CONF" ] || coord_die CONFIG_INVALID "status:arg-parse" "$CONF" "config file not found" "create it from coordinate.config.example"
-    # Global defaults first (optional), per-watcher config second — config wins.
+    # Global defaults first (optional), per-invocation config second — config wins.
     DEFAULTS="$(defaults_path)"
     # shellcheck disable=SC1090
     [ -f "$DEFAULTS" ] && . "$DEFAULTS"
     # shellcheck disable=SC1090
     . "$CONF" || coord_die CONFIG_INVALID "status:load_config" "$CONF" "config file failed to source (bash syntax error)" "fix the bash syntax in $CONF"
     cmd_status
-    ;;
-  watch)
-    echo "coordinate.sh watch: not implemented in this phase — see coordinator-design.md" >&2
-    exit 1
-    ;;
-  resume)
-    echo "coordinate.sh resume: not implemented in this phase — see coordinator-design.md" >&2
-    exit 1
     ;;
   "")
     usage; exit 2
