@@ -9,9 +9,6 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 COORD="$HERE/../coordinate.sh"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-# Physical temp base (macOS $TMPDIR sits behind the /var -> /private/var symlink;
-# the state-root parent-chain check correctly flags a symlinked parent, so the
-# suite must not construct its OWN state dirs behind one).
 TMP=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$(mktemp -d)"); trap 'rm -rf "$TMP"' EXIT
 export DRIVE_DEFAULTS="$TMP/.absent-drive-defaults"   # hermetic: never read the operator's real file
 pass=0 fail=0
@@ -44,15 +41,12 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
 }
 
 # run_doctor <root>: doctor output on stdout+stderr, restricted PATH (no herdr).
 run_doctor() {
-  STATE_DIR="$1/state" PATH=/usr/bin:/bin bash "$COORD" doctor --config "$1/cfg" 2>&1
+  PATH=/usr/bin:/bin bash "$COORD" doctor --config "$1/cfg" 2>&1
 }
 
 # assert_cfg_ok <label> <root>: valid -> "config valid" and zero config codes.
@@ -123,9 +117,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
 assert_code "four subdirs of one clone -> WORKDIR_INVALID" WORKDIR_INVALID "$T"
 
@@ -149,9 +140,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
 assert_code "worktrees of one clone -> WORKDIR_INVALID" WORKDIR_INVALID "$T"
 
@@ -181,70 +169,21 @@ fresh; seed_clones "$T"; write_cfg "$T"
 printf 'CC_PANE_ID="wA:p1\nsecond"\n' >> "$T/cfg"
 assert_code "CC_PANE_ID multi-line value" CONFIG_INVALID "$T"
 
-# ===== 9a. timeout not a positive integer =====
-fresh; seed_clones "$T"; write_cfg "$T"
-sed -i.bak 's#^POLL_SECS=.*#POLL_SECS=not-a-num#' "$T/cfg"; rm -f "$T/cfg.bak"
-assert_code "POLL_SECS not numeric" CONFIG_INVALID "$T"
-
-# ===== 9b. timeout zero (not positive) =====
-fresh; seed_clones "$T"; write_cfg "$T"
-sed -i.bak 's#^PANE_READY_TIMEOUT_MS=.*#PANE_READY_TIMEOUT_MS=0#' "$T/cfg"; rm -f "$T/cfg.bak"
-assert_code "PANE_READY_TIMEOUT_MS=0 (not positive)" CONFIG_INVALID "$T"
-
-# ===== 9c. timeout over documented upper bound =====
-fresh; seed_clones "$T"; write_cfg "$T"
-sed -i.bak 's#^STAGE_TIMEOUT_SECS=.*#STAGE_TIMEOUT_SECS=999999#' "$T/cfg"; rm -f "$T/cfg.bak"
-assert_code "STAGE_TIMEOUT_SECS over upper bound" CONFIG_INVALID "$T"
-
-# ===== 10a. ON_HALT_EXEC is a symlink (rejected even if the target is executable) =====
-fresh; seed_clones "$T"; write_cfg "$T"
-printf '#!/bin/sh\nexit 0\n' > "$T/realhook"; chmod +x "$T/realhook"
-ln -s "$T/realhook" "$T/hooklink"
-printf 'ON_HALT_EXEC=%s\n' "$T/hooklink" >> "$T/cfg"
-assert_code "ON_HALT_EXEC is a symlink" CONFIG_INVALID "$T"
-
-# ===== 10b. ON_HALT_EXEC not executable =====
-fresh; seed_clones "$T"; write_cfg "$T"
-printf '#!/bin/sh\nexit 0\n' > "$T/noex"; chmod 644 "$T/noex"
-printf 'ON_HALT_EXEC=%s\n' "$T/noex" >> "$T/cfg"
-assert_code "ON_HALT_EXEC not executable" CONFIG_INVALID "$T"
-
-# ===== 10c. ON_HALT_EXEC not absolute =====
-fresh; seed_clones "$T"; write_cfg "$T"
-printf 'ON_HALT_EXEC=./relative-hook\n' >> "$T/cfg"
-assert_code "ON_HALT_EXEC not absolute" CONFIG_INVALID "$T"
-
-# ===== 10d. ON_HALT_EXEC valid regular executable file -> passes =====
-fresh; seed_clones "$T"; write_cfg "$T"
-printf '#!/bin/sh\nexit 0\n' > "$T/goodhook"; chmod +x "$T/goodhook"
-printf 'ON_HALT_EXEC=%s\n' "$T/goodhook" >> "$T/cfg"
-assert_cfg_ok "ON_HALT_EXEC valid regular executable" "$T"
-
-# ===== 11a. STATE_DIR inside a clone (must be outside every clone) =====
-fresh; seed_clones "$T"; write_cfg "$T"
-printf 'STATE_DIR=%s/cc/state\n' "$T" >> "$T/cfg"
-assert_code "STATE_DIR inside CC clone" CONFIG_INVALID "$T"
-
-# ===== 11b. STATE_DIR outside clones -> passes =====
-fresh; seed_clones "$T"; write_cfg "$T"
-printf 'STATE_DIR=%s/state\n' "$T" >> "$T/cfg"
-assert_cfg_ok "STATE_DIR outside clones" "$T"
-
 # ===== (finding 10) every doctor miss carries the COMPLETE §14 tuple — where /
-#      input / next_action / resume_guard (resume_guard now UNCONDITIONAL) — not
-#      just [CODE] + prose. Must FAIL on the old head, which printed only [CODE] +
-#      a fix: line (no labeled tuple, no resume_guard). =====
+#      input / next_action — not just [CODE] + prose, and NEVER the dead dispatch
+#      guard field (the watch/resume half is gone). Must FAIL on the old head,
+#      which printed only [CODE] + a fix: line. =====
 fresh; seed_clones "$T"; write_cfg "$T"
-sed -i.bak 's#^POLL_SECS=.*#POLL_SECS=not-a-num#' "$T/cfg"; rm -f "$T/cfg.bak"
+sed -i.bak 's#^CC_ARCH_CMD=.*#CC_ARCH_CMD=#' "$T/cfg"; rm -f "$T/cfg.bak"
 tuple_out=$(run_doctor "$T")
-if printf '%s' "$tuple_out" | grep -q '\[CONFIG_INVALID\] reason: POLL_SECS not a positive integer' \
+if printf '%s' "$tuple_out" | grep -q '\[CONFIG_INVALID\] reason: CC_ARCH_CMD is unset' \
    && printf '%s' "$tuple_out" | grep -q 'where: doctor:config' \
-   && printf '%s' "$tuple_out" | grep -q 'input: POLL_SECS' \
+   && printf '%s' "$tuple_out" | grep -q 'input: CC_ARCH_CMD' \
    && printf '%s' "$tuple_out" | grep -q 'next_action: edit' \
-   && printf '%s' "$tuple_out" | grep -q 'resume_guard:'; then
-  ok "§14 tuple complete (where/input/next_action/resume_guard) on a config miss"
+   && ! printf '%s' "$tuple_out" | grep -q 'resume[_]guard'; then
+  ok "§14 tuple complete (where/input/next_action), no dead guard field on a config miss"
 else
-  bad "§14 tuple" "missing tuple fields; got: $(printf '%s' "$tuple_out" | grep -A1 CONFIG_INVALID | head -4)"
+  bad "§14 tuple" "missing tuple fields or stale guard field; got: $(printf '%s' "$tuple_out" | grep -A1 CONFIG_INVALID | head -4)"
 fi
 
 # ===== round-3 F6: an invalid workdir under bash >= 4 `set -u` must REPORT the
@@ -274,11 +213,8 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
-  out=$(STATE_DIR="$T/state" PATH=/usr/bin:/bin "$BASH5" "$COORD" doctor --config "$T/cfg" 2>&1); rc=$?
+  out=$(PATH=/usr/bin:/bin "$BASH5" "$COORD" doctor --config "$T/cfg" 2>&1); rc=$?
   if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[WORKDIR_INVALID\]' \
      && ! printf '%s' "$out" | grep -qi 'unbound variable'; then
     ok "bash>=4 ($BASH5) invalid workdir -> WORKDIR_INVALID, no unbound-variable crash"
