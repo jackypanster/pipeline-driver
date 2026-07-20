@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # coordinate.sh — the read-only preflight + summary companion to drive.sh for the
-# `pipeline` toolchain (coordinator-design.md v1.3).
+# `pipeline` toolchain (design v1.3).
 #
 # WHAT IT IS: `doctor` (read-only full preflight) and `status` (read-only
 # summary) are the COMPLETE surface — not a phase of something larger. The tool
@@ -11,7 +11,7 @@
 # cannot satisfy the design without breaking drive.sh's interactive trust gate.
 # PR #14 was closed unmerged: https://github.com/jackypanster/pipeline-driver/pull/14
 # The pivot to coordinated-mode dispatch (the CC-as-coordinator playbook) is
-# recorded in coordinator-design.md v1.3 §25, pinned at:
+# recorded in the design doc v1.3 §25, pinned at:
 # https://github.com/jackypanster/pipeline-driver/blob/19e8c954/coordinator-design.md
 # (PR #15 documented the pivot: https://github.com/jackypanster/pipeline-driver/pull/15).
 #
