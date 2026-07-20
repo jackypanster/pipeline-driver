@@ -71,9 +71,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
   cat > "$root/list.json" <<EOF
 {"result":{"panes":[
@@ -101,7 +98,7 @@ EOF
 # always pinned. run_status keeps stdout clean (the 2-line contract); run_status_err
 # merges stderr (where the human-readable bindings block goes).
 run_doctor() {
-  env STATE_DIR="$T/state" HERDR_STUB_LIST_JSON="$T/list.json" \
+  env HERDR_STUB_LIST_JSON="$T/list.json" \
       DRIVE_DEFAULTS="$DD" \
       HERDR_STUB_FOOTER="${HERDR_STUB_FOOTER:-}" \
       HERDR_STUB_READ_FAILS="${HERDR_STUB_READ_FAILS:-}" \
@@ -110,11 +107,11 @@ run_doctor() {
       bash "$COORD" doctor --config "$T/cfg" 2>&1
 }
 run_status() {
-  env STATE_DIR="$T/state" DRIVE_DEFAULTS="$DD" \
+  env DRIVE_DEFAULTS="$DD" \
       PATH=/usr/bin:/bin bash "$COORD" status --config "$T/cfg"
 }
 run_status_err() {
-  env STATE_DIR="$T/state" DRIVE_DEFAULTS="$DD" \
+  env DRIVE_DEFAULTS="$DD" \
       PATH=/usr/bin:/bin bash "$COORD" status --config "$T/cfg" 2>&1 >/dev/null
 }
 
@@ -124,7 +121,7 @@ fresh; seed "$T"; write_defaults "$T"
 out=$(run_status); rc=$?
 err=$(run_status_err)
 if [ "$rc" -eq 0 ] \
-   && printf '%s' "$out" | sed -n '1p' | grep -q 'idle' \
+   && printf '%s' "$out" | sed -n '1p' | grep -q 'feature=hello-cli' \
    && printf '%s' "$out" | sed -n '2p' | jq -e . >/dev/null 2>&1 \
    && [ "$(printf '%s' "$out" | sed -n '3p')" = "" ] \
    && printf '%s' "$err" | grep -q -- '--- machine bindings' \
@@ -214,7 +211,7 @@ if [ "$rc" -ne 0 ] \
    && printf '%s' "$out" | grep -q 'input: wB:p1' \
    && printf '%s' "$out" | grep -q "footer does not contain expected 'glm-5.2'" \
    && printf '%s' "$out" | grep -q 'next_action: open the intended TUI/model in this pane, or update \*_MODEL_EXPECT / coordinate.config' \
-   && printf '%s' "$out" | grep -q 'resume_guard:' \
+   && ! printf '%s' "$out" | grep -q 'resume[_]guard' \
    && printf '%s' "$out" | grep -q 'CC pane model: no \*_MODEL_EXPECT set — skipping footer check' \
    && ! printf '%s' "$out" | grep -q 'llama-9'; then
   ok "footer without expect -> five-field MODEL_MISMATCH (role/pane/expect/fix; raw footer never echoed)"

@@ -56,9 +56,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
   cat > "$root/list.json" <<EOF
 {"result":{"panes":[
@@ -89,7 +86,7 @@ S
   chmod +x "$1/bin/herdr"
 }
 run_doctor() {  # [env...] doctor on $T
-  env STATE_DIR="$T/state" HERDR_STUB_LIST_JSON="$T/list.json" \
+  env HERDR_STUB_LIST_JSON="$T/list.json" \
       PATH="$T/bin:/usr/bin:/bin" bash "$COORD" doctor --config "$T/cfg" 2>&1
 }
 
