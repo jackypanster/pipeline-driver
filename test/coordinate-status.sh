@@ -47,73 +47,82 @@ run_status() {
   PATH=/usr/bin:/bin bash "$COORD" status --config "$T/cfg"
 }
 
-# ===== 1. seeded feature -> human feature=... + JSON .feature, exactly 2 lines =====
+# ===== 1. seeded feature -> EXACT human line + EXACT JSON, exactly 2 stdout records =====
+# stdout contract is pinned by RECORD COUNT (wc -l on the file — a $(...) capture
+# eats trailing newlines, so "exactly two lines" was unverifiable) and EXACT line
+# strings (sed on the file — a grep substring would accept extra human text).
+# stderr is captured to a separate file.
 fresh; seed "$T"
-out=$(run_status); rc=$?
-human=$(printf '%s' "$out" | sed -n '1p')
-jsonv=$(printf '%s' "$out" | sed -n '2p')
+run_status >"$T/out" 2>"$T/err"; rc=$?
 if [ "$rc" -eq 0 ] \
-   && printf '%s' "$human" | grep -q 'feature=hello-cli' \
-   && printf '%s' "$jsonv" | jq -e '.feature == "hello-cli"' >/dev/null 2>&1 \
-   && [ "$(printf '%s' "$out" | sed -n '3p')" = "" ]; then   # exactly ONE human line + ONE JSON line
-  ok "seeded feature -> feature=hello-cli + one jq-valid JSON object (.feature set)"
+   && [ "$(wc -l < "$T/out")" -eq 2 ] \
+   && [ "$(sed -n 1p "$T/out")" = 'coordinate: feature=hello-cli (from HEAD current.json)' ] \
+   && [ "$(sed -n 2p "$T/out")" = '{"feature":"hello-cli"}' ]; then
+  ok "seeded feature -> exact human line + exact JSON, two stdout records"
 else
-  bad "seeded feature" "rc=$rc; human=$human; json=$jsonv; line3=[$(printf '%s' "$out" | sed -n '3p')]"; fi
+  bad "seeded feature" "rc=$rc; lines=$(wc -l < "$T/out"); L1=[$(sed -n 1p "$T/out")]; L2=[$(sed -n 2p "$T/out")]"
+fi
 
-# ===== 1b. idle: no current.json on HEAD -> human 'idle' + JSON .feature null =====
+# ===== 1b. idle: no current.json on HEAD -> EXACT idle line + EXACT null JSON =====
 fresh; seed "$T"
 ( cd "$T/obs"; git rm -q .pipeline/current.json && git commit -qm idle && git push -q origin main )
-out=$(run_status); rc=$?
-human=$(printf '%s' "$out" | sed -n '1p')
-jsonv=$(printf '%s' "$out" | sed -n '2p')
+run_status >"$T/out" 2>"$T/err"; rc=$?
 if [ "$rc" -eq 0 ] \
-   && printf '%s' "$human" | grep -q 'idle' \
-   && printf '%s' "$jsonv" | jq -e '.feature == null' >/dev/null 2>&1 \
-   && [ "$(printf '%s' "$out" | sed -n '3p')" = "" ]; then
-  ok "no current.json -> idle + JSON .feature null (exactly two stdout lines)"
+   && [ "$(wc -l < "$T/out")" -eq 2 ] \
+   && [ "$(sed -n 1p "$T/out")" = 'coordinate: idle (no active feature)' ] \
+   && [ "$(sed -n 2p "$T/out")" = '{"feature":null}' ]; then
+  ok "no current.json -> exact idle line + exact {\"feature\":null}, two stdout records"
 else
-  bad "idle (no current.json)" "rc=$rc; human=$human; json=$jsonv; line3=[$(printf '%s' "$out" | sed -n '3p')]"; fi
+  bad "idle (no current.json)" "rc=$rc; lines=$(wc -l < "$T/out"); L1=[$(sed -n 1p "$T/out")]; L2=[$(sed -n 2p "$T/out")]"
+fi
 
-# ===== 5. invalid config -> CONFIG_INVALID (coord_die), non-zero =====
+# ===== 5. invalid config -> ZERO stdout lines; CONFIG_INVALID on stderr only =====
 fresh; seed "$T"
 sed -i.bak 's#^BRANCH=.*##' "$T/cfg"; rm -f "$T/cfg.bak"   # BRANCH unset
-out=$(run_status 2>&1); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'CONFIG_INVALID'; then
-  ok "invalid config -> CONFIG_INVALID (status validates before reading state)"
+run_status >"$T/out" 2>"$T/err"; rc=$?
+if [ "$rc" -ne 0 ] \
+   && [ "$(wc -l < "$T/out")" -eq 0 ] \
+   && grep -q 'CONFIG_INVALID' "$T/err"; then
+  ok "invalid config -> zero stdout lines + CONFIG_INVALID on stderr"
 else
-  bad "invalid config" "rc=$rc; out=$(printf '%s' "$out" | head -8)"; fi
+  bad "invalid config" "rc=$rc; stdout_lines=$(wc -l < "$T/out"); err=$(grep -i config_invalid "$T/err" | head -1)"
+fi
 
 # ===== 7. (finding 10) status decodes the SAME tab tuple validate_config writes —
-#      a config violation surfaces a CLEAN code/input/reason via coord_die, not the
-#      raw tab record, and never the dead dispatch guard field. =====
+#      a config violation surfaces a CLEAN code/input/reason via coord_die on STDERR
+#      (stdout stays empty), not the raw tab record, and never the dead guard field. =====
 fresh; seed "$T"
 sed -i.bak 's#^CC_ARCH_CMD=.*#CC_ARCH_CMD=#' "$T/cfg"; rm -f "$T/cfg.bak"
-out=$(run_status 2>&1); rc=$?
+run_status >"$T/out" 2>"$T/err"; rc=$?
 if [ "$rc" -ne 0 ] \
-   && printf '%s' "$out" | grep -Eq '^code: +CONFIG_INVALID *$' \
-   && printf '%s' "$out" | grep -q '^input:.*CC_ARCH_CMD' \
-   && printf '%s' "$out" | grep -q '^reason:.*is unset' \
-   && ! printf '%s' "$out" | grep -q $'\t' \
-   && ! printf '%s' "$out" | grep -q 'resume[_]guard'; then
-  ok "status decodes the tab tuple (clean code/input/reason, no raw-record or guard-field leakage)"
+   && [ "$(wc -l < "$T/out")" -eq 0 ] \
+   && grep -Eq '^code: +CONFIG_INVALID *$' "$T/err" \
+   && grep -q '^input:.*CC_ARCH_CMD' "$T/err" \
+   && grep -q '^reason:.*is unset' "$T/err" \
+   && ! grep -q $'\t' "$T/err" \
+   && ! grep -q 'resume[_]guard' "$T/err"; then
+  ok "status decodes the tab tuple (clean code/input/reason on stderr, no raw-record or guard-field leakage)"
 else
-  bad "status tab decode" "rc=$rc; out=$(printf '%s' "$out" | head -6)"; fi
+  bad "status tab decode" "rc=$rc; stdout_lines=$(wc -l < "$T/out"); err: $(grep -E '^code:|^input:|^reason:' "$T/err" | head -3)"
+fi
 
 # ===== 6. (finding 11) malicious feature slug from current.json must NOT traverse.
-#      The feature is read from HEAD's current.json and echoed in output / used in
-#      a git-show path; a slug like '../..' must be rejected with CONFIG_INVALID
-#      instead of traversal or injection. =====
+#      The slug is read from HEAD's current.json and echoed in output / used in a
+#      git-show path; '../..' is rejected with ZERO stdout lines + CONFIG_INVALID on
+#      stderr, and the forged slug is never printed. =====
 fresh; seed "$T"
 ( cd "$T/obs"
   printf '{"feature":"../../etc","stage":"impl"}' > .pipeline/current.json
   git commit -aqm badfeat && git push -q origin main )
-out=$(run_status 2>&1); rc=$?
+run_status >"$T/out" 2>"$T/err"; rc=$?
 if [ "$rc" -ne 0 ] \
-   && printf '%s' "$out" | grep -q 'CONFIG_INVALID' \
-   && ! printf '%s' "$out" | grep -q 'etc/passwd'; then
-  ok "malicious feature slug -> CONFIG_INVALID (no traversal)"
+   && [ "$(wc -l < "$T/out")" -eq 0 ] \
+   && grep -q 'CONFIG_INVALID' "$T/err" \
+   && ! grep -q 'etc/passwd' "$T/err"; then
+  ok "malicious feature slug -> zero stdout + CONFIG_INVALID on stderr (no traversal)"
 else
-  bad "malicious feature slug" "rc=$rc; expected CONFIG_INVALID + no traversal; out=$(printf '%s' "$out" | head -8)"; fi
+  bad "malicious feature slug" "rc=$rc; stdout_lines=$(wc -l < "$T/out"); err=$(grep -iE 'config_invalid|etc/passwd' "$T/err" | head -3)"
+fi
 
 echo "----"
 echo "passed=$pass failed=$fail"

@@ -113,23 +113,23 @@ run_status_err() {
 }
 
 # ===== 1. status prints the bindings block sourced from the pinned defaults file
-#      (all six fields) — on STDERR, so stdout keeps the 2-line contract. =====
+#      (all six fields) — on STDERR, so stdout keeps the 2-record contract (pinned
+#      by wc -l on the file + exact line strings, not a substring/jq check). =====
 fresh; seed "$T"; write_defaults "$T"
-out=$(run_status); rc=$?
-err=$(run_status_err)
+run_status >"$T/out" 2>"$T/err"; rc=$?
 if [ "$rc" -eq 0 ] \
-   && printf '%s' "$out" | sed -n '1p' | grep -q 'feature=hello-cli' \
-   && printf '%s' "$out" | sed -n '2p' | jq -e . >/dev/null 2>&1 \
-   && [ "$(printf '%s' "$out" | sed -n '3p')" = "" ] \
-   && printf '%s' "$err" | grep -q -- '--- machine bindings' \
-   && printf '%s' "$err" | grep -q "defaults file: $T/defaults" \
-   && printf '%s' "$err" | grep -q '^prd/arch/task (CC pane): *agent=claude *expect=fable-5' \
-   && printf '%s' "$err" | grep -q '^impl .*(PI pane): *agent=pi *expect=glm-5.2' \
-   && printf '%s' "$err" | grep -q '^review .*(CODEX pane): *agent=codex *expect=gpt-5.6' \
-   && printf '%s' "$err" | grep -q 'impl transport: <unset> *yolo: <unset>'; then
-  ok "status: bindings block from pinned defaults (all six fields) on stderr, stdout contract intact"
+   && [ "$(wc -l < "$T/out")" -eq 2 ] \
+   && [ "$(sed -n 1p "$T/out")" = 'coordinate: feature=hello-cli (from HEAD current.json)' ] \
+   && [ "$(sed -n 2p "$T/out")" = '{"feature":"hello-cli"}' ] \
+   && grep -q -- '--- machine bindings' "$T/err" \
+   && grep -q "defaults file: $T/defaults" "$T/err" \
+   && grep -q '^prd/arch/task (CC pane): *agent=claude *expect=fable-5' "$T/err" \
+   && grep -q '^impl .*(PI pane): *agent=pi *expect=glm-5.2' "$T/err" \
+   && grep -q '^review .*(CODEX pane): *agent=codex *expect=gpt-5.6' "$T/err" \
+   && grep -q 'impl transport: <unset> *yolo: <unset>' "$T/err"; then
+  ok "status: bindings block from pinned defaults (all six fields) on stderr, stdout contract pinned"
 else
-  bad "status bindings block" "rc=$rc; stdout=$(printf '%s' "$out" | head -3); stderr: $(printf '%s' "$err" | head -8)"
+  bad "status bindings block" "rc=$rc; lines=$(wc -l < "$T/out"); L1=[$(sed -n 1p "$T/out")]; L2=[$(sed -n 2p "$T/out")]; err: $(grep -E 'machine bindings|defaults file|impl|review|prd' "$T/err" | head -6)"
 fi
 
 # ===== 2. coordinate.config override wins over the defaults value for the same field =====
