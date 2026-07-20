@@ -61,19 +61,25 @@ run_doctor() {
       bash "$COORD" doctor --config "$1/cfg" 2>&1
 }
 
-# ===== finding 5: a password containing the '!' sub-delim must NOT leak. The old
-#      whitelist sanitizer ([A-Za-z0-9._~%+-]) stopped at '!' and kept the secret. =====
+# ===== finding 5: a password containing the '!' sub-delim must NOT leak, AND the
+#      host/path must SURVIVE normalization (an over-stripping sanitizer that
+#      destroyed github.com/acme/x would pass a pure negative check). The observer
+#      carries the credential URL; codex points elsewhere -> REMOTE_MISMATCH surfaces
+#      the observer's normalized identity, which MUST retain github.com/acme/x while
+#      the userinfo (alice!:ghp_SECRET) never appears. The old whitelist sanitizer
+#      ([A-Za-z0-9._~%+-]) stopped at '!' and kept the secret. =====
 fresh; seed "$T"
 set_all_origins "$T" "https://alice!:ghp_SECRET@github.com/acme/x.git"
-out=$(run_doctor "$T")
-# doctor MUST have run remote-identity normalization over the credential URL
-# (config valid) while keeping the secret and username out of EVERY line.
-if printf '%s' "$out" | grep -q 'config valid' \
+git -C "$T/codex" remote set-url origin "https://example.com/different.git"
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
+   && printf '%s' "$out" | grep -q 'observer (net:[0-9]*:github.com/acme/x)' \
    && ! printf '%s' "$out" | grep -iq 'ghp_secret' \
    && ! printf '%s' "$out" | grep -q 'alice!'; then
-  ok "credential with '!' sub-delim stripped (no ghp_SECRET, no alice! in output)"
+  ok "credential '!' sub-delim: host/path retained in surfaced identity, userinfo stripped (no ghp_SECRET, no alice!)"
 else
-  bad "credential sanitize (!)" "secret leaked: $(printf '%s' "$out" | grep -iE 'ghp_secret|alice!' | head -3)"
+  bad "credential sanitize (!)" "rc=$rc; observer-id=[$(printf '%s' "$out" | grep -o 'observer ([^)]*)' | head -1)]; leaked: $(printf '%s' "$out" | grep -iE 'ghp_secret|alice!' | head -3)"
 fi
 
 # ===== finding 6: ssh://host:2222/path vs https://host/2222/path are DISTINCT —
@@ -118,17 +124,23 @@ else
   bad "absolute filesystem remote agreement" "$(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -4)"
 fi
 
-# ===== round-3 F5: query/fragment credentials never reach a key or diagnostic.
-#      The old head kept ?token=… in the percent-encoded key (repo_key=…%3Ftoken%3D…). =====
+# ===== round-3 F5: query/fragment credentials never reach a diagnostic, AND the
+#      host/path must SURVIVE normalization. The observer carries the ?token= URL;
+#      codex points elsewhere -> REMOTE_MISMATCH surfaces the observer's normalized
+#      identity, which MUST retain github.com/acme/x while the ?token=… secret never
+#      appears. =====
 fresh; seed "$T"
 set_all_origins "$T" "https://github.com/acme/x.git?token=ghp_QUERYSECRET"
-out=$(run_doctor "$T")
-if printf '%s' "$out" | grep -q 'config valid' \
+git -C "$T/codex" remote set-url origin "https://example.com/different.git"
+out=$(run_doctor "$T"); rc=$?
+if [ "$rc" -ne 0 ] \
+   && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
+   && printf '%s' "$out" | grep -q 'observer (net:[0-9]*:github.com/acme/x)' \
    && ! printf '%s' "$out" | grep -iq 'ghp_querysecret' \
    && ! printf '%s' "$out" | grep -iq 'token='; then
-  ok "query-string token stripped (no ghp_QUERYSECRET, no token= in any output)"
+  ok "query-string token: host/path retained in surfaced identity, ?token=… stripped (no ghp_QUERYSECRET, no token=)"
 else
-  bad "query/fragment credential" "leaked: $(printf '%s' "$out" | grep -iE 'ghp_querysecret|token=' | head -3)"
+  bad "query/fragment credential" "rc=$rc; observer-id=[$(printf '%s' "$out" | grep -o 'observer ([^)]*)' | head -1)]; leaked: $(printf '%s' "$out" | grep -iE 'ghp_querysecret|token=' | head -3)"
 fi
 
 # ===== round-4 F1: 'x@../shared' is a LITERAL LOCAL PATH — no colon, and a host
