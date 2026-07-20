@@ -104,7 +104,7 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "relative origin.git per clone -> REMOTE_MISMATCH (resolved per-clone, no shared key)"
 else
-  bad "relative filesystem remote" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -4)"
+  bad "relative filesystem remote" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -4)"
 fi
 
 # ===== round-3 F4 (positive): the SAME absolute filesystem remote in all four
@@ -141,7 +141,7 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "x@../shared classified as per-clone local path -> REMOTE_MISMATCH"
 else
-  bad "userinfo-lookalike local path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+  bad "userinfo-lookalike local path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
 fi
 
 # ===== round-4 F2: filesystem vs network identities are DISJOINT namespaces. On
@@ -154,7 +154,7 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "local path vs https://file…/… -> REMOTE_MISMATCH (typed namespaces disjoint)"
 else
-  bad "cross-kind namespace collision" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+  bad "cross-kind namespace collision" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
 fi
 
 # ===== round-4 F3: '#' (and '?') are legal FILENAME bytes in local paths — the old
@@ -167,7 +167,7 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "local one#secret vs one -> REMOTE_MISMATCH (no ?#-strip on filesystem paths)"
 else
-  bad "filesystem #-byte path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+  bad "filesystem #-byte path" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
 fi
 
 # ===== round-4 F4: two DISTINCT nonexistent top-level paths must not collapse into
@@ -180,16 +180,16 @@ out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "distinct nonexistent top-level paths -> REMOTE_MISMATCH (suffix preserved past /)"
 else
-  bad "nonexistent top-level resolution" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
+  bad "nonexistent top-level resolution" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
 fi
 
 # ===== round-5 F1: the typed identity is LOCALE-INVARIANT. Bash \${#v} counted
 #      characters under UTF-8 but bytes under C, so https://example.com/é.git keyed
-#      net:13: vs net:14: across shells. The typed key is now internal to remote
-#      agreement (doctor prints no "repo key" line), so the property is observed
-#      through the REMOTE_MISMATCH tuple: observer on the é remote, the other three
-#      on a different remote, surfaces observer(net:N:…) — and N MUST be byte-
-#      identical across locales. Skip-counted when no UTF-8 locale exists. =====
+#      net:13: vs net:14: across shells. The typed identity is internal to remote
+#      agreement, so the property is observed through the REMOTE_MISMATCH
+#      diagnostic: observer on the é remote, the other three on a different remote,
+#      surfaces observer(net:N:…) — and N MUST be byte-identical across locales.
+#      Skip-counted when no UTF-8 locale exists. =====
 fresh; seed "$T"
 git -C "$T/obs" remote set-url origin "https://example.com/é.git"
 for c in cc pi codex; do git -C "$T/$c" remote set-url origin "https://example.com/other.git"; done

@@ -4,7 +4,7 @@
 #
 # WHAT IT IS: `doctor` (read-only full preflight) and `status` (read-only
 # summary) are the COMPLETE surface — not a phase of something larger. The tool
-# holds ZERO local state and only reads the target repo's .pipeline/<feature>/
+# is stateless: it only reads the target repo's .pipeline/<feature>/
 # artifacts (and, for doctor, the role panes). drive.sh owns the impl card loop.
 #
 # The dispatch half (`watch`/`resume`) was deliberately rejected: bash dispatch
@@ -700,7 +700,7 @@ cmd_doctor() {
     fi
     fi   # herdr_reads_ok gate
   else
-    d_info "skipping remote/pane/state sections: one or more workdirs unusable (fix the config section above)"
+    d_info "skipping remote/pane sections: one or more workdirs unusable (fix the config section above)"
   fi
 
   printf -- '---------------------------------------------------------------------\n'
@@ -818,7 +818,7 @@ usage: coordinate.sh <subcommand> --config <path>
 
 subcommands:
   doctor   read-only full preflight (deps / config / remote / journal / panes / authority)
-  status   read-only local state summary (one human line + one JSON object)
+  status   read-only summary: active feature from HEAD current.json (one human line + one JSON object)
 EOF
 }
 

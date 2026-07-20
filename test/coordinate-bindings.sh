@@ -13,9 +13,6 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER
 # Hermetic: this test may itself run inside a Herdr pane (HERDR_* injected) — drop
 # them so coordinate.sh's COORD_SELF_PANE does not pick up the test runner's pane.
 unset HERDR_PANE_ID HERDR_PANE_CWD_MATCH HERDR_ENV HERDR_SOCKET_PATH HERDR_TAB_ID HERDR_WORKSPACE_ID 2>/dev/null || true
-# Physical temp base (macOS $TMPDIR sits behind the /var -> /private/var symlink;
-# the state-root parent-chain check correctly flags a symlinked parent, so the
-# suite must not construct its OWN state dirs behind one).
 TMP=$(perl -MCwd=abs_path -e 'print abs_path($ARGV[0])' "$(mktemp -d)"); trap 'rm -rf "$TMP"' EXIT
 pass=0 fail=0
 ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }

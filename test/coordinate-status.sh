@@ -16,8 +16,8 @@ ok()  { pass=$((pass+1)); printf 'ok   %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf 'FAIL %s\n     %s\n' "$1" "$2"; }
 N=0; fresh() { N=$((N+1)); T="$TMP/t$N"; }
 
-# seed <root>: 4 clones of one bare remote + current.json (so status can derive
-# the repo key + discover the feature locally via `git show HEAD:`). No herdr.
+# seed <root>: 4 clones of one bare remote + current.json (so status can discover
+# the feature via `git show HEAD:.pipeline/current.json`). No herdr.
 seed() {
   local root=$1 c
   rm -rf "$root"; mkdir -p "$root"
