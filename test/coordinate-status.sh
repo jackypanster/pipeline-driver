@@ -107,9 +107,10 @@ else
 fi
 
 # ===== 6. (finding 11) malicious feature slug from current.json must NOT traverse.
-#      The slug is read from HEAD's current.json and echoed in output / used in a
-#      git-show path; '../..' is rejected with ZERO stdout lines + CONFIG_INVALID on
-#      stderr, and the forged slug is never printed. =====
+#      Status reads the FIXED path HEAD:.pipeline/current.json; the slug would only be
+#      echoed in output (there is no git-show of the slug). '../../etc' is rejected
+#      before any use with ZERO stdout lines + CONFIG_INVALID on stderr, and the
+#      exact forged slug is never printed. =====
 fresh; seed "$T"
 ( cd "$T/obs"
   printf '{"feature":"../../etc","stage":"impl"}' > .pipeline/current.json
@@ -118,10 +119,10 @@ run_status >"$T/out" 2>"$T/err"; rc=$?
 if [ "$rc" -ne 0 ] \
    && [ "$(wc -l < "$T/out")" -eq 0 ] \
    && grep -q 'CONFIG_INVALID' "$T/err" \
-   && ! grep -q 'etc/passwd' "$T/err"; then
+   && ! grep -Fq -- '../../etc' "$T/err"; then
   ok "malicious feature slug -> zero stdout + CONFIG_INVALID on stderr (no traversal)"
 else
-  bad "malicious feature slug" "rc=$rc; stdout_lines=$(wc -l < "$T/out"); err=$(grep -iE 'config_invalid|etc/passwd' "$T/err" | head -3)"
+  bad "malicious feature slug" "rc=$rc; stdout_lines=$(wc -l < "$T/out"); err=$(grep -iE 'config_invalid|../../etc' "$T/err" | head -3)"
 fi
 
 echo "----"
