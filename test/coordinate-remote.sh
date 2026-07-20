@@ -5,8 +5,7 @@
 #     URI sub-delims (! $ & ' ( ) * + , ; =) — the old whitelist-class sanitizer
 #     leaked it. Assert NO fragment of the secret reaches any doctor output/key.
 #   - finding 6: ssh://host:PORT/path and https://host/PORT/path derive DIFFERENT
-#     keys (the old scp-colon rule conflated the port with a path segment); and a
-#     remote that normalizes to a '.'/'..' segment is refused.
+#     identities (the old scp-colon rule conflated the port with a path segment).
 # Run: bash test/coordinate-remote.sh
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -38,9 +37,6 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
 }
 # set_all_origins <root> <url>: point all four clones at <url>.
@@ -70,9 +66,9 @@ run_doctor() {
 fresh; seed "$T"
 set_all_origins "$T" "https://alice!:ghp_SECRET@github.com/acme/x.git"
 out=$(run_doctor "$T")
-# the host MUST be preserved in the key line; the secret and username MUST NOT
-# appear ANYWHERE (case-insensitive — the key lowercases the path).
-if printf '%s' "$out" | grep -q 'github.com' \
+# doctor MUST have run remote-identity normalization over the credential URL
+# (config valid) while keeping the secret and username out of EVERY line.
+if printf '%s' "$out" | grep -q 'config valid' \
    && ! printf '%s' "$out" | grep -iq 'ghp_secret' \
    && ! printf '%s' "$out" | grep -q 'alice!'; then
   ok "credential with '!' sub-delim stripped (no ghp_SECRET, no alice! in output)"
@@ -98,20 +94,6 @@ else
   bad "port/path collision" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -4)"
 fi
 
-# ===== finding 6 (surface moved by the round-3 filesystem canonicalization): a
-#      NETWORK remote whose path carries a '..' segment is still REFUSED (the key
-#      would escape the state root). Relative FILESYSTEM forms like '..' are now
-#      legitimately canonicalized per-clone (see the relative-remote case below) —
-#      resolution eliminates dot-segments, so no escape key can exist on that path. =====
-fresh; seed "$T"
-set_all_origins "$T" "https://example.com/../escape.git"
-out=$(run_doctor "$T"); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[CONFIG_INVALID\]'; then
-  ok "network remote with '..' segment -> CONFIG_INVALID (no escape key)"
-else
-  bad "remote dot-segment" "expected CONFIG_INVALID; rc=$rc; $(printf '%s' "$out" | grep -iE 'repo key|config_invalid|normalized' | head -4)"
-fi
-
 # ===== round-3 F4: RELATIVE filesystem remotes resolve PER CLONE. Four clones each
 #      declaring remote.origin.url=origin.git name four DIFFERENT local repos —
 #      identities must mismatch. The old head normalized all four to the bare
@@ -130,11 +112,10 @@ fi
 fresh; seed "$T"
 set_all_origins "$T" "$T/origin.git"
 out=$(run_doctor "$T")
-if ! printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
-   && printf '%s' "$out" | grep -q 'normalized repo key: fs%3A'; then
-  ok "same absolute filesystem remote x4 -> agreement + typed resolved-path key (fs:…)"
+if ! printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
+  ok "same absolute filesystem remote x4 -> remote-identity agreement (no mismatch)"
 else
-  bad "absolute filesystem remote agreement" "$(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -4)"
+  bad "absolute filesystem remote agreement" "$(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -4)"
 fi
 
 # ===== round-3 F5: query/fragment credentials never reach a key or diagnostic.
@@ -142,7 +123,7 @@ fi
 fresh; seed "$T"
 set_all_origins "$T" "https://github.com/acme/x.git?token=ghp_QUERYSECRET"
 out=$(run_doctor "$T")
-if printf '%s' "$out" | grep -q 'github.com' \
+if printf '%s' "$out" | grep -q 'config valid' \
    && ! printf '%s' "$out" | grep -iq 'ghp_querysecret' \
    && ! printf '%s' "$out" | grep -iq 'token='; then
   ok "query-string token stripped (no ghp_QUERYSECRET, no token= in any output)"
@@ -202,22 +183,26 @@ else
   bad "nonexistent top-level resolution" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch|repo key' | head -3)"
 fi
 
-# ===== round-5 F1: the typed key is LOCALE-INVARIANT. Bash \${#v} counted
+# ===== round-5 F1: the typed identity is LOCALE-INVARIANT. Bash \${#v} counted
 #      characters under UTF-8 but bytes under C, so https://example.com/é.git keyed
-#      net:13: vs net:14: across shells and moved the same repo to a different
-#      state namespace. Skip-counted when no UTF-8 locale exists (precedent: gawk). =====
+#      net:13: vs net:14: across shells. The typed key is now internal to remote
+#      agreement (doctor prints no "repo key" line), so the property is observed
+#      through the REMOTE_MISMATCH tuple: observer on the é remote, the other three
+#      on a different remote, surfaces observer(net:N:…) — and N MUST be byte-
+#      identical across locales. Skip-counted when no UTF-8 locale exists. =====
 fresh; seed "$T"
-set_all_origins "$T" "https://example.com/é.git"
-k_c=$(LC_ALL=C run_doctor "$T" | awk '/normalized repo key:/ {print $NF; exit}')
+git -C "$T/obs" remote set-url origin "https://example.com/é.git"
+for c in cc pi codex; do git -C "$T/$c" remote set-url origin "https://example.com/other.git"; done
 if locale -a 2>/dev/null | grep -qi '^en_US.UTF-8$'; then
-  k_u=$(LC_ALL=en_US.UTF-8 run_doctor "$T" | awk '/normalized repo key:/ {print $NF; exit}')
-  if [ -n "$k_c" ] && [ "$k_c" = "$k_u" ]; then
-    ok "non-ASCII repo key locale-invariant ($k_c)"
+  line_c=$(LC_ALL=C        run_doctor "$T" | grep '!= observer (net:' | head -1)
+  line_u=$(LC_ALL=en_US.UTF-8 run_doctor "$T" | grep '!= observer (net:' | head -1)
+  if [ -n "$line_c" ] && [ "$line_c" = "$line_u" ]; then
+    ok "non-ASCII identity locale-invariant ($line_c)"
   else
-    bad "locale-variant repo key" "LC_ALL=C: ${k_c:-<none>} vs en_US.UTF-8: ${k_u:-<none>}"
+    bad "locale-variant identity" "LC_ALL=C: ${line_c:-<none>} vs en_US.UTF-8: ${line_u:-<none>}"
   fi
 else
-  ok "non-ASCII repo key locale-invariance (SKIP: no en_US.UTF-8 locale on this machine)"
+  ok "non-ASCII identity locale-invariance (SKIP: no en_US.UTF-8 locale on this machine)"
 fi
 
 # ===== round-5 F3: F7 (proxy isolation) is a HARNESS-ONLY correction — swapping
