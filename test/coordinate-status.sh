@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Hermetic tests for `coordinate.sh status` (design §12): read-only local state
-# summary. Must print ONE concise human line + ONE jq-valid JSON object, never
-# touch the network or mutate state, and work sanely when the state dir does not
-# exist yet (idle / uninitialized). LEDGER_CORRUPT is the one fail-fast reachable
-# here. Run: bash test/coordinate-status.sh
+# Hermetic tests for `coordinate.sh status` (design §12): read-only summary. Must
+# print EXACTLY ONE human line + ONE jq-valid JSON object ({"feature":<slug|null>})
+# to stdout, with the machine-bindings block on stderr, and never touch the network
+# or mutate state. CONFIG_INVALID is the one fail-fast reachable here. Run: bash
+# test/coordinate-status.sh
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 COORD="$HERE/../coordinate.sh"
@@ -38,79 +38,41 @@ CC_TASK_CMD=/pipeline-task
 CC_HUNT_CMD=/pipeline-hunt
 PI_IMPL_CMD=/skill:pipeline-impl
 CODEX_REVIEW_CMD='\$pipeline-review'
-POLL_SECS=30
-PANE_READY_TIMEOUT_MS=60000
-STAGE_TIMEOUT_SECS=2700
 EOF
 }
 
 # run_status: reads $T (set by fresh/seed); writes human+JSON to stdout. stderr is
 # left flowing (coord_die for CONFIG_INVALID writes there).
 run_status() {
-  env STATE_DIR="$T/state" PATH=/usr/bin:/bin bash "$COORD" status --config "$T/cfg"
+  PATH=/usr/bin:/bin bash "$COORD" status --config "$T/cfg"
 }
 
-# rkey_of <root>: the repo key coordinate.sh derives, read from status's OWN JSON
-# output (no test hook, no formula drift — works on any head that emits repo_key).
-rkey_of() {
-  env STATE_DIR="$1/state" PATH=/usr/bin:/bin bash "$COORD" status --config "$1/cfg" 2>/dev/null \
-    | sed -n '2p' | jq -r '.repo_key // empty' 2>/dev/null
-}
-
-# ===== 1. no state dir at all -> idle + valid JSON (jq . round-trip) =====
+# ===== 1. seeded feature -> human feature=... + JSON .feature, exactly 2 lines =====
 fresh; seed "$T"
 out=$(run_status); rc=$?
 human=$(printf '%s' "$out" | sed -n '1p')
 jsonv=$(printf '%s' "$out" | sed -n '2p')
 if [ "$rc" -eq 0 ] \
-   && printf '%s' "$human" | grep -q 'idle' \
-   && printf '%s' "$jsonv" | jq -e . >/dev/null 2>&1 \
+   && printf '%s' "$human" | grep -q 'feature=hello-cli' \
+   && printf '%s' "$jsonv" | jq -e '.feature == "hello-cli"' >/dev/null 2>&1 \
    && [ "$(printf '%s' "$out" | sed -n '3p')" = "" ]; then   # exactly ONE human line + ONE JSON line
-  ok "no state dir -> idle + one jq-valid JSON object"
+  ok "seeded feature -> feature=hello-cli + one jq-valid JSON object (.feature set)"
 else
-  bad "no state dir" "rc=$rc; human=$human; json=$jsonv; line3=[$(printf '%s' "$out" | sed -n '3p')]"; fi
+  bad "seeded feature" "rc=$rc; human=$human; json=$jsonv; line3=[$(printf '%s' "$out" | sed -n '3p')]"; fi
 
-# ===== 2. ledger present -> 'observed' carries last-observed seq/commit/delivery =====
+# ===== 1b. idle: no current.json on HEAD -> human 'idle' + JSON .feature null =====
 fresh; seed "$T"
-rkey=$(rkey_of "$T")
-featdir="$T/state/$rkey/hello-cli"
-mkdir -p "$featdir"; chmod 700 "$featdir"
-cat > "$featdir/ledger.json" <<EOF
-{"feature":"hello-cli","journal_seq":7,"journal_commit":"abcdef1234567890abcdef1234567890abcdef12","target_role":"PI","delivery":"sent"}
-EOF
+( cd "$T/obs"; git rm -q .pipeline/current.json && git commit -qm idle && git push -q origin main )
 out=$(run_status); rc=$?
+human=$(printf '%s' "$out" | sed -n '1p')
+jsonv=$(printf '%s' "$out" | sed -n '2p')
 if [ "$rc" -eq 0 ] \
-   && printf '%s' "$out" | sed -n '1p' | grep -q 'feature=hello-cli' \
-   && printf '%s' "$out" | sed -n '1p' | grep -q 'seq=7' \
-   && printf '%s' "$out" | sed -n '2p' | jq -e '.state == "observed" and .last_observed.journal_seq == "7" and .last_observed.delivery == "sent"' >/dev/null 2>&1; then
-  ok "ledger present -> observed + last-observed seq/commit"
+   && printf '%s' "$human" | grep -q 'idle' \
+   && printf '%s' "$jsonv" | jq -e '.feature == null' >/dev/null 2>&1 \
+   && [ "$(printf '%s' "$out" | sed -n '3p')" = "" ]; then
+  ok "no current.json -> idle + JSON .feature null (exactly two stdout lines)"
 else
-  bad "ledger present" "rc=$rc; out=$(printf '%s' "$out" | head -2)"; fi
-
-# ===== 3. unresolved halt.json -> state=halted, code surfaced in the JSON =====
-fresh; seed "$T"
-rkey=$(rkey_of "$T")
-featdir="$T/state/$rkey/hello-cli"; mkdir -p "$featdir"; chmod 700 "$featdir"
-printf '{"code":"REMOTE_MISMATCH","where":"watch"}' > "$featdir/halt.json"
-out=$(run_status); rc=$?
-if [ "$rc" -eq 0 ] \
-   && printf '%s' "$out" | sed -n '2p' | jq -e '.state == "halted" and .halt == "REMOTE_MISMATCH"' >/dev/null 2>&1; then
-  ok "halt.json present -> state=halted + code surfaced"
-else
-  bad "halt.json present" "rc=$rc; out=$(printf '%s' "$out" | head -2)"; fi
-
-# ===== 4. corrupt ledger.json -> LEDGER_CORRUPT, non-zero, valid JSON error object =====
-fresh; seed "$T"
-rkey=$(rkey_of "$T")
-featdir="$T/state/$rkey/hello-cli"; mkdir -p "$featdir"; chmod 700 "$featdir"
-printf 'this is not { json' > "$featdir/ledger.json"
-out=$(run_status); rc=$?
-if [ "$rc" -ne 0 ] \
-   && printf '%s' "$out" | grep -q 'LEDGER_CORRUPT' \
-   && printf '%s' "$out" | sed -n '2p' | jq -e '.error_code == "LEDGER_CORRUPT"' >/dev/null 2>&1; then
-  ok "corrupt ledger -> LEDGER_CORRUPT (rc!=0) + valid JSON error object"
-else
-  bad "corrupt ledger" "rc=$rc; out=$(printf '%s' "$out" | head -2)"; fi
+  bad "idle (no current.json)" "rc=$rc; human=$human; json=$jsonv; line3=[$(printf '%s' "$out" | sed -n '3p')]"; fi
 
 # ===== 5. invalid config -> CONFIG_INVALID (coord_die), non-zero =====
 fresh; seed "$T"
@@ -122,24 +84,25 @@ else
   bad "invalid config" "rc=$rc; out=$(printf '%s' "$out" | head -8)"; fi
 
 # ===== 7. (finding 10) status decodes the SAME tab tuple validate_config writes —
-#      a config violation surfaces a CLEAN code/input/reason, not the raw tab
-#      record. The old head parsed CFG_V with the colon format and printed the whole
-#      tab-separated tuple as the code, so this MUST fail there. =====
+#      a config violation surfaces a CLEAN code/input/reason via coord_die, not the
+#      raw tab record, and never the dead dispatch guard field. =====
 fresh; seed "$T"
-sed -i.bak 's#^POLL_SECS=.*#POLL_SECS=not-a-num#' "$T/cfg"; rm -f "$T/cfg.bak"
+sed -i.bak 's#^CC_ARCH_CMD=.*#CC_ARCH_CMD=#' "$T/cfg"; rm -f "$T/cfg.bak"
 out=$(run_status 2>&1); rc=$?
 if [ "$rc" -ne 0 ] \
    && printf '%s' "$out" | grep -Eq '^code: +CONFIG_INVALID *$' \
-   && printf '%s' "$out" | grep -q '^input:.*POLL_SECS' \
-   && printf '%s' "$out" | grep -q '^reason:.*not a positive integer' \
-   && ! printf '%s' "$out" | grep -q $'\t'; then
-  ok "status decodes the tab tuple (clean code/input/reason, no raw-record leakage)"
+   && printf '%s' "$out" | grep -q '^input:.*CC_ARCH_CMD' \
+   && printf '%s' "$out" | grep -q '^reason:.*is unset' \
+   && ! printf '%s' "$out" | grep -q $'\t' \
+   && ! printf '%s' "$out" | grep -q 'resume[_]guard'; then
+  ok "status decodes the tab tuple (clean code/input/reason, no raw-record or guard-field leakage)"
 else
   bad "status tab decode" "rc=$rc; out=$(printf '%s' "$out" | head -6)"; fi
 
 # ===== 6. (finding 11) malicious feature slug from current.json must NOT traverse.
-#      The feature is read from HEAD and concatenated into a state path; a slug
-#      like '../..' must be rejected with CONFIG_INVALID instead of path traversal. =====
+#      The feature is read from HEAD's current.json and echoed in output / used in
+#      a git-show path; a slug like '../..' must be rejected with CONFIG_INVALID
+#      instead of traversal or injection. =====
 fresh; seed "$T"
 ( cd "$T/obs"
   printf '{"feature":"../../etc","stage":"impl"}' > .pipeline/current.json
