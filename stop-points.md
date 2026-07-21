@@ -9,8 +9,14 @@ driver's halt specification and a checklist for a human relaying by hand.
 ## The halt predicate (the whole brain)
 
 ```
-CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked  AND  FROM != review  AND  LIVE_SPEC_REV == CONFIRMED_SPEC_REV
+CONTINUE  ⟺  NEXT == impl  AND  STATUS != blocked
+             AND  (FROM != review  OR  the rejection seq was ACKed at the REJECTION GATE)
+             AND  LIVE_SPEC_REV == CONFIRMED_SPEC_REV
 ```
+
+`FROM == review` (a rejection) does not continue silently: the REJECTION GATE demands a typed
+read-ack (the rejection seq, after reading `reviews/*`) in the SAME invocation before the fix
+loop resumes; EOF/mismatch halts. The ack is per-invocation, in-process only.
 
 - `NEXT` — the stage named on the first non-empty line after the last `>>> NEXT`
   in the journal tail (`Run pipeline-<NEXT> ...`). Parsed by `parse-tail.awk`.
