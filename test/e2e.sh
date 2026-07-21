@@ -134,4 +134,24 @@ EOF
 seed_repo "$R" 2 "$RJ"; stub "$R" "$STUB_NOOP"
 out=$(run "$R"); echo "$out" | grep -q 'review rejected' && ok "review->impl rejection halts" || bad "review-reject halt"; rm -rf "$R" "$RJ"
 
+# 7) review->impl rejection + typed seq ack at the REJECTION GATE -> fix loop resumes
+R=$(mktemp -d); RJ=$(mktemp); cat > "$RJ" <<'EOF'
+## seq=8 · t · review→impl · failed · by=claude/opus
+done: review rejected card 02
+output: tasks/02.md, reviews/review-01.md
+--- handoff ---
+>>> NEXT
+Run pipeline-impl FRESH session (re-pick card 02).
+<<< END
+EOF
+seed_repo "$R" 2 "$RJ"; stub "$R" "$STUB_IMPL"
+out=$(printf 'AAA\n8\n' | DRIVE_DEFAULTS=/nonexistent PATH="$R/bin:$PATH" bash "$DRIVER/drive.sh" "$R/cfg" 2>&1)
+echo "$out" | grep -q 'REJECTION GATE' && echo "$out" | grep -q 'all cards in review' \
+  && ok "rejection ack resumes the fix loop to the review halt" || bad "rejection ack resume"
+# wrong ack must keep the historical halt
+R2=$(mktemp -d); seed_repo "$R2" 2 "$RJ"; stub "$R2" "$STUB_NOOP"
+out=$(printf 'AAA\n9\n' | DRIVE_DEFAULTS=/nonexistent PATH="$R2/bin:$PATH" bash "$DRIVER/drive.sh" "$R2/cfg" 2>&1)
+echo "$out" | grep -q 'review rejected' && ok "wrong rejection ack still halts" || bad "wrong-ack halt"
+rm -rf "$R" "$R2" "$RJ"
+
 echo "----"; echo "passed=$pass failed=$fail"; [ "$fail" -eq 0 ]
