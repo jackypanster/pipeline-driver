@@ -15,10 +15,13 @@
 #     HUMAN merge confirm (never delegated). The driver never merges.
 #
 # HALT PREDICATE (the whole brain — normative statement + halt table: stop-points.md):
-#     CONTINUE iff NEXT == impl AND STATUS != blocked AND FROM != review
+#     CONTINUE iff NEXT == impl AND STATUS != blocked
+#                  AND (FROM != review OR the rejection seq was ACKed at the REJECTION GATE)
 #                  AND LIVE_SPEC_REV == CONFIRMED_SPEC_REV
-# Anything else halts and tells you exactly what to run next. FROM != review halts a
-# review REJECTION (a human semantic decision) for a human read; the spec-rev clause
+# Anything else halts and tells you exactly what to run next. FROM == review is a
+# review REJECTION (a human semantic decision): the REJECTION GATE demands the same
+# read-then-bind ritual as GATE 1 (type the rejection seq after reading reviews/*) —
+# EOF/mismatch halts; the ack is per-invocation, in-process only. The spec-rev clause
 # both authorizes the first card AND auto-halts on any re-freeze (a new spec-rev the
 # human has not re-read), re-firing GATE 1.
 #
@@ -970,10 +973,27 @@ while : ; do
 
   # A review REJECTION routes review->impl with NEXT=impl and an unchanged spec-rev.
   # That is a human SEMANTIC decision (changes requested); the driver must not silently
-  # re-drive a card a reviewer just bounced — halt so the human sees the verdict first.
-  if [ "${FROM:-}" = "review" ] && [ "$NEXT" = "impl" ]; then
-    halt "review rejected a card and routed it back to impl (seq=$SEQ) — a human semantic decision" \
-         "read .pipeline/$FEATURE/reviews/*, then re-run drive.sh to resume the fix" 0
+  # re-drive a card a reviewer just bounced — the verdict must be READ first. Tail-only
+  # detection cannot distinguish a seen rejection from an unseen one (zero state, and the
+  # tail advances only after impl runs), so a plain halt here made its own remediation
+  # ("re-run to resume") loop back into the same halt forever. The exit is a read-then-bind
+  # ritual (structurally like GATE 1) that stays DIRECT-HUMAN: type the rejection seq to
+  # confirm the review was read, and the loop proceeds to dispatch the fix; EOF or a
+  # mismatch keeps the loop halted. The halt REASON is unchanged from the historical halt;
+  # only its remediation now names the ack step. A NEW rejection (different seq) re-fires
+  # the gate. NOTE: YOLO's standing grant is GATE-1-only by contract (README §YOLO — "it
+  # changes NOTHING else") and is deliberately NOT extended here; reading a rejection
+  # verdict is its own human checkpoint, so this ack is never delegated by YOLO.
+  if [ "${FROM:-}" = "review" ] && [ "$NEXT" = "impl" ] && [ "${ACKED_REJECTION_SEQ:-}" != "$SEQ" ]; then
+    note ""
+    note "REJECTION GATE — review bounced a card back to impl (seq=$SEQ)."
+    note "Read the verdict first: .pipeline/$FEATURE/reviews/*"
+    printf 'REJECTION GATE — type the rejection seq (%s) to confirm you read the review and resume the fix: ' "$SEQ" >&2
+    if ! read -r RACK || [ "$RACK" != "$SEQ" ]; then
+      halt "review rejected a card and routed it back to impl (seq=$SEQ) — a human semantic decision" \
+           "read .pipeline/$FEATURE/reviews/*, then re-run drive.sh and type $SEQ at the rejection gate" 0
+    fi
+    ACKED_REJECTION_SEQ="$SEQ"
   fi
 
   # --- HALT PREDICATE ---
