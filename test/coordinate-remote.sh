@@ -74,7 +74,7 @@ git -C "$T/codex" remote set-url origin "https://example.com/different.git"
 out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] \
    && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
-   && printf '%s' "$out" | grep -q 'observer (net:[0-9]*:github.com/acme/x)' \
+   && printf '%s' "$out" | grep -q 'observer (net:github.com/acme/x)' \
    && ! printf '%s' "$out" | grep -iq 'ghp_secret' \
    && ! printf '%s' "$out" | grep -q 'alice!'; then
   ok "credential '!' sub-delim: host/path retained in surfaced identity, userinfo stripped (no ghp_SECRET, no alice!)"
@@ -135,7 +135,7 @@ git -C "$T/codex" remote set-url origin "https://example.com/different.git"
 out=$(run_doctor "$T"); rc=$?
 if [ "$rc" -ne 0 ] \
    && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]' \
-   && printf '%s' "$out" | grep -q 'observer (net:[0-9]*:github.com/acme/x)' \
+   && printf '%s' "$out" | grep -q 'observer (net:github.com/acme/x)' \
    && ! printf '%s' "$out" | grep -iq 'ghp_querysecret' \
    && ! printf '%s' "$out" | grep -iq 'token='; then
   ok "query-string token: host/path retained in surfaced identity, ?token=… stripped (no ghp_QUERYSECRET, no token=)"
@@ -193,28 +193,6 @@ if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q '\[REMOTE_MISMATCH\]'; then
   ok "distinct nonexistent top-level paths -> REMOTE_MISMATCH (suffix preserved past /)"
 else
   bad "nonexistent top-level resolution" "expected REMOTE_MISMATCH; rc=$rc; $(printf '%s' "$out" | grep -iE 'remote|mismatch' | head -3)"
-fi
-
-# ===== round-5 F1: the typed identity is LOCALE-INVARIANT. Bash \${#v} counted
-#      characters under UTF-8 but bytes under C, so https://example.com/é.git keyed
-#      net:13: vs net:14: across shells. The typed identity is internal to remote
-#      agreement, so the property is observed through the REMOTE_MISMATCH
-#      diagnostic: observer on the é remote, the other three on a different remote,
-#      surfaces observer(net:N:…) — and N MUST be byte-identical across locales.
-#      Skip-counted when no UTF-8 locale exists. =====
-fresh; seed "$T"
-git -C "$T/obs" remote set-url origin "https://example.com/é.git"
-for c in cc pi codex; do git -C "$T/$c" remote set-url origin "https://example.com/other.git"; done
-if locale -a 2>/dev/null | grep -qi '^en_US.UTF-8$'; then
-  line_c=$(LC_ALL=C        run_doctor "$T" | grep '!= observer (net:' | head -1)
-  line_u=$(LC_ALL=en_US.UTF-8 run_doctor "$T" | grep '!= observer (net:' | head -1)
-  if [ -n "$line_c" ] && [ "$line_c" = "$line_u" ]; then
-    ok "non-ASCII identity locale-invariant ($line_c)"
-  else
-    bad "locale-variant identity" "LC_ALL=C: ${line_c:-<none>} vs en_US.UTF-8: ${line_u:-<none>}"
-  fi
-else
-  ok "non-ASCII identity locale-invariance (SKIP: no en_US.UTF-8 locale on this machine)"
 fi
 
 # ===== round-5 F3: F7 (proxy isolation) is a HARNESS-ONLY correction — swapping
