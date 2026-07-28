@@ -93,8 +93,8 @@ semantics, GATE 1/2, the spec-rev protocol and every guard are transport-indepen
   `herdr pane list` by pane `.cwd == WORKDIR` (or the `HERDR_PANE_CWD_MATCH`
   substring, e.g. a TUI opened in a subdir), targets only agent-bearing panes, and
   excludes the driver's own pane; pin with `HERDR_PANE_ID`. Needs `herdr` + `jq` +
-  `perl` (monotonic deadlines + process-group kills). Spec:
-  `.pipeline/herdr-transport/PRD.md`.
+  `perl` (monotonic deadlines + process-group kills). Design record (not current spec):
+  `.pipeline/herdr-transport/PRD.md` as landed at `f615f5c` — its `orca`-additive Non-goals predate the transport retirement on this branch and no longer match the tree.
 
 (An `orca` transport existed alongside `herdr` and was **retired** — Herdr replaced it
 as the driven-TUI substrate, so a stale `IMPL_TRANSPORT=orca` is now a blocking doctor

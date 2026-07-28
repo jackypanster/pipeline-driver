@@ -1,5 +1,11 @@
 # PRD — `IMPL_TRANSPORT=herdr`: drive the impl loop through a Herdr pane
 
+> **Superseded marker (added on `kill/retire-orca-transport`):** the `orca`-additive Non-goals
+> below (lines 100–101 — keep `run_impl_orca`, keep `review-drive.sh` on `orca terminal
+> wait/send`) were **superseded** by the orca transport retirement on this branch; `test/e2e-orca.sh`
+> and `test/review-drive.sh` are retired. The body below is the verbatim historical record of the
+> design as landed at `f615f5c`.
+
 Stage: prd · Feature: `herdr-transport` · Repo: `jackypanster/pipeline-driver` · Branch: `main`
 
 > Filed 2026-07-14 as a queued TODO feature (prd stage only). Scheduled 2026-07-15 into the

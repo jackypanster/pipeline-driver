@@ -1,5 +1,10 @@
 # arch — `drive.sh setup`
 
+> **Terminated-feature marker:** `drive-setup` was TERMINATED (`journal.md` seq=20, commit
+> `9bd42f5`). The `current.json.full-verify` command below is a **historical, unrunnable** record:
+> `test/setup.sh` never landed, and `test/e2e-orca.sh` / `test/board-relay.sh` /
+> `test/review-drive.sh` were retired. The body below is preserved verbatim as the archived record.
+
 Stage: arch · Feature: `drive-setup` · Reads: [PRD.md](PRD.md) · ADRs: [docs/adr](docs/adr)
 
 ## Chosen shape
