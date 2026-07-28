@@ -257,9 +257,11 @@ The event name arrives in `$1` (`gate1`|`card`|`halt`), context in `DRIVE_*` env
 (`DRIVE_EVENT`/`DRIVE_FEATURE`/`DRIVE_BRANCH`/`DRIVE_WORKDIR`/`DRIVE_TRANSPORT`/
 `DRIVE_SEQ`/`DRIVE_STATUS`/`DRIVE_NEXT`, plus `DRIVE_HALT_REASON` +
 `DRIVE_HALT_NEXT` on halts). Runtime failures warn once and never halt the loop.
-The canonical adapter is `pipeline-dispatch/notify.sh`, which forwards the events to
-Telegram via the local Hermes — the operator walks away and is called back only by
-the 🛑 halt ping. Strictly ONE-WAY by design: nothing flows from the notifier back
+The canonical adapter is `pipeline-dispatch/notify.sh` (public repo
+`github.com/jackypanster/pipeline-dispatch`, cloned as a sibling next to this repo
+like `pipeline` and `pipeline-dashboard`), which forwards the events to
+Telegram via the local Hermes — the operator walks away and is called back only
+by the 🛑 halt ping. Strictly ONE-WAY by design: nothing flows from the notifier back
 into the driver, and no gate moves — GATE 1/2 semantics are byte-identical with the
 hook on or off. (A human→driver remote-command lane is a separate future design,
 deliberately NOT this hook.)
