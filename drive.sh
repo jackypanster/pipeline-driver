@@ -38,13 +38,12 @@
 # wins. Override the path with $DRIVE_DEFAULTS (tests use this to stay hermetic).
 #
 # IMPL TRANSPORT: IMPL_TRANSPORT=claude (default) spawns a headless `claude` child
-# per card. IMPL_TRANSPORT=orca instead sends "$IMPL_SLASH_CMD …" into a live
-# Orca-managed TUI terminal (e.g. pi running GLM) and polls origin/<BRANCH> until
-# the journal seq advances (or CARD_TIMEOUT). IMPL_TRANSPORT=herdr does the same
-# through a Herdr pane: `herdr pane run` (atomic text+Enter), a read-first
-# {done,idle} status guard, and a fail-closed check that the pane's agent state
-# is authoritative (hook/manifest, never the always-idle fallback). Same halt
-# predicate, gates and guards every way — only the "run one card" primitive changes.
+# per card. IMPL_TRANSPORT=herdr instead sends "$IMPL_SLASH_CMD …" into a live coder
+# TUI (e.g. pi running GLM) in a Herdr pane and polls origin/<BRANCH> until the
+# journal seq advances (or CARD_TIMEOUT): `herdr pane run` (atomic text+Enter), a
+# read-first {done,idle} status guard, and a fail-closed check that the pane's agent
+# state is authoritative (hook/manifest, never the always-idle fallback). Same halt
+# predicate, gates and guards both ways — only the "run one card" primitive changes.
 
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -56,17 +55,13 @@ CONF="${1:-$HERE/drive.config}"
 if [ "$SUBCMD" != "doctor" ]; then
   [ -f "$CONF" ] || { echo "drive.sh: config not found: $CONF" >&2; exit 2; }
 fi
-# Orca injects ORCA_TERMINAL_HANDLE (among other ORCA_*) into EVERY terminal it
-# manages — including the one running this driver. Inheriting it would silently
-# point the impl dispatch at the driver's own terminal. Config-file-only: SAVE the
-# inherited value as "the terminal running THIS driver" so discovery can EXCLUDE it
-# (a driver launched inside the target worktree would otherwise be a discovery
-# candidate and type the stage command into itself), then drop it before sourcing.
-DRIVER_SELF_TERMINAL="${ORCA_TERMINAL_HANDLE:-}"
-unset ORCA_TERMINAL_HANDLE ORCA_TERMINAL_TITLE 2>/dev/null || true
-# Herdr does the same: HERDR_PANE_ID (among other HERDR_*) is injected into every
-# pane it manages. Same discipline: save it as "the pane running THIS driver" so
-# discovery can EXCLUDE it and a pinned target equal to it can be rejected, then drop.
+# Herdr injects HERDR_PANE_ID (among other HERDR_*) into EVERY pane it manages —
+# including the one running this driver. Inheriting it would silently point the impl
+# dispatch at the driver's own pane. Config-file-only: SAVE the inherited value as
+# "the pane running THIS driver" so discovery can EXCLUDE it (a driver launched
+# inside the target worktree would otherwise be a discovery candidate and type the
+# stage command into itself) and a pinned target equal to it can be rejected, then
+# drop it before sourcing.
 DRIVER_SELF_PANE="${HERDR_PANE_ID:-}"
 unset HERDR_PANE_ID 2>/dev/null || true
 # Global defaults first (optional), per-feature config second — drive.config wins.
@@ -86,19 +81,15 @@ IMPL_MODEL="${IMPL_MODEL:-haiku}"
 MAX_CONSEC_FAIL="${MAX_CONSEC_FAIL:-2}"
 RETRY_ON_FAIL="${RETRY_ON_FAIL:-1}"
 SETTINGS_TMPL="${SETTINGS:-$HERE/settings.driver.json}"
-IMPL_TRANSPORT="${IMPL_TRANSPORT:-claude}"          # claude | orca | herdr (see header)
-ORCA_TERMINAL_HANDLE="${ORCA_TERMINAL_HANDLE:-}"    # explicit term_… handle (wins over discovery)
-ORCA_TERMINAL_TITLE="${ORCA_TERMINAL_TITLE:-}"      # substring match on the tab title (disambiguator)
-ORCA_IDLE_TIMEOUT_MS="${ORCA_IDLE_TIMEOUT_MS:-60000}"
-ORCA_RESET_CMD="${ORCA_RESET_CMD:-}"                # optional per-card TUI reset (e.g. /new on pi); empty = off
+IMPL_TRANSPORT="${IMPL_TRANSPORT:-claude}"          # claude | herdr (see header)
 HERDR_PANE_ID="${HERDR_PANE_ID:-}"                  # explicit w1:p1 pane id (wins over discovery; never the driver's own pane)
 HERDR_PANE_CWD_MATCH="${HERDR_PANE_CWD_MATCH:-}"    # cwd substring filter REPLACING the ==WORKDIR match (e.g. TUI opened in a subdir)
 HERDR_IDLE_TIMEOUT_MS="${HERDR_IDLE_TIMEOUT_MS:-60000}"
 HERDR_RESET_CMD="${HERDR_RESET_CMD:-}"              # optional per-card TUI reset (e.g. /new on pi); empty = off
 HERDR_RESET_SETTLE_MS="${HERDR_RESET_SETTLE_MS:-2000}"  # post-reset window to observe the TUI taking the reset before re-guarding
 IMPL_SLASH_CMD="${IMPL_SLASH_CMD:-/pipeline-impl}"  # stage command typed into the TUI (pi registers skills as /skill:pipeline-impl)
-CARD_TIMEOUT="${CARD_TIMEOUT:-2700}"                # orca/herdr transports: max seconds to wait for one card
-POLL_SECS="${POLL_SECS:-30}"                        # orca/herdr transports: journal poll interval
+CARD_TIMEOUT="${CARD_TIMEOUT:-2700}"                # herdr transport: max seconds to wait for one card
+POLL_SECS="${POLL_SECS:-30}"                        # herdr transport: journal poll interval
 # YOLO=1 records the operator's STANDING ex-ante grant for LOW-RISK drive features
 # (README §YOLO): the coordinating agent may read the frozen spec and echo the
 # spec-rev at GATE 1 without a fresh chat authorization. It does NOT auto-start
@@ -109,7 +100,7 @@ YOLO="${YOLO:-0}"
 PIPELINE_REPO="${PIPELINE_REPO:-$HOME/workspace/pipeline}"
 DASHBOARD_REPO="${DASHBOARD_REPO:-$HOME/workspace/pipeline-dashboard}"
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
-# Where the TUI-transport agent (orca/herdr; e.g. pi) loads skills from — doctor
+# Where the TUI-transport agent (herdr; e.g. pi) loads skills from — doctor
 # checks the impl slot resolves THERE, since that is the runtime that runs the stage.
 TUI_SKILLS_DIR="${TUI_SKILLS_DIR:-$HOME/.pi/agent/skills}"
 # Board auto-refresh: non-empty BOARD_OUT re-renders the read-only dashboard there
@@ -119,7 +110,7 @@ BOARD_OUT="${BOARD_OUT:-}"
 # Walk-away notify hook: non-empty NOTIFY_EXEC names an ABSOLUTE-path executable
 # invoked best-effort at the same three moments as BOARD_OUT — after GATE 1, after
 # every advanced card, and on every halt — event name in $1 (gate1|card|halt),
-# context in DRIVE_* env (README §Board & review relay). Canonical adapter:
+# context in DRIVE_* env (README §Board & walk-away notify). Canonical adapter:
 # pipeline-dispatch/notify.sh (Hermes -> Telegram). Config is validated fail-loud
 # at preflight (the operator walks away trusting these pings, so a broken notifier
 # must stop the run BEFORE GATE 1, not silently never fire); runtime failures warn
@@ -139,13 +130,6 @@ NOTIFY_TIMEOUT_MS="${NOTIFY_TIMEOUT_MS:-5000}"
 # IMPL_AUTH_TOKEN_ENV) are NOT inherited. NOTIFY_ENV_ALLOW opts further names in.
 NOTIFY_ENV_ALLOW="${NOTIFY_ENV_ALLOW:-}"   # opt-in: space-separated NAMES forwarded to the notifier
 NOTIFY_READY=""                             # armed only after preflight validates path + timeout + perl
-# One-key review relay (README §Board & review relay): when the loop halts at
-# NEXT=review and a review terminal is configured, OFFER to type the review stage
-# command into it — the human reads the halt and presses y. Never automatic; the
-# GATE 2 merge confirm is untouched. Handle wins over title discovery.
-REVIEW_TERMINAL_HANDLE="${REVIEW_TERMINAL_HANDLE:-}"
-REVIEW_TERMINAL_TITLE="${REVIEW_TERMINAL_TITLE:-}"
-REVIEW_SLASH_CMD="${REVIEW_SLASH_CMD:-/pipeline-review}"
 JOURNAL=".pipeline/${FEATURE:-}/journal.md"
 TASKS=".pipeline/${FEATURE:-}/tasks"
 
@@ -264,7 +248,7 @@ show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path fr
 # MISS. Installs nothing, touches no network (freshness is pipeline-update's job).
 # MISS = blocks a drive run (exit 1). warn = degraded but drivable. info = context.
 doctor() {
-  local bad=0 warn=0 t slot terms js n
+  local bad=0 warn=0 slot
   d_ok()   { printf 'ok    %s\n' "$1"; }
   d_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; bad=$((bad+1)); }
   d_warn() { printf 'warn  %s\n      %s\n' "$1" "$2"; warn=$((warn+1)); }
@@ -274,11 +258,6 @@ doctor() {
   if command -v git >/dev/null 2>&1; then d_ok "git on PATH"
   else d_miss "git not on PATH" "install git (xcode-select --install / your package manager)"; fi
   case "$IMPL_TRANSPORT" in
-    orca)
-      if command -v orca >/dev/null 2>&1; then d_ok "orca on PATH (IMPL_TRANSPORT=orca)"
-      else d_miss "orca not on PATH but IMPL_TRANSPORT=orca" "install the Orca CLI, or set IMPL_TRANSPORT=claude"; fi
-      if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH (orca transport needs it)"
-      else d_miss "jq not on PATH but IMPL_TRANSPORT=orca" "brew install jq"; fi ;;
     herdr)
       if command -v herdr >/dev/null 2>&1; then d_ok "herdr on PATH (IMPL_TRANSPORT=herdr)"
       else d_miss "herdr not on PATH but IMPL_TRANSPORT=herdr" "install Herdr (https://herdr.dev), or set IMPL_TRANSPORT=claude"; fi
@@ -288,12 +267,12 @@ doctor() {
       else d_miss "perl not on PATH but IMPL_TRANSPORT=herdr" "install perl (base system package on macOS/Linux)"; fi ;;
     claude)
       if command -v claude >/dev/null 2>&1; then d_ok "claude on PATH (IMPL_TRANSPORT=claude)"
-      else d_miss "claude not on PATH but IMPL_TRANSPORT=claude" "install Claude Code, or set IMPL_TRANSPORT=orca"; fi
+      else d_miss "claude not on PATH but IMPL_TRANSPORT=claude" "install Claude Code, or set IMPL_TRANSPORT=herdr"; fi
       if command -v jq >/dev/null 2>&1; then d_ok "jq on PATH"
-      else d_warn "jq not on PATH" "needed only for the orca transport + terminal listing: brew install jq"; fi ;;
+      else d_warn "jq not on PATH" "needed only for the herdr transport: brew install jq"; fi ;;
     *)
       d_miss "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT' (drive.sh would halt on it)" \
-        "set IMPL_TRANSPORT=claude, orca, or herdr in $DEFAULTS / drive.config" ;;
+        "set IMPL_TRANSPORT=claude or herdr in $DEFAULTS / drive.config" ;;
   esac
   if command -v gh >/dev/null 2>&1; then d_ok "gh on PATH"
   else d_warn "gh not on PATH" "trunk-protection preflight + PR review degrade: brew install gh"; fi
@@ -361,7 +340,7 @@ doctor() {
           # by frontmatter `name:` (field-verified 2026-07-12: a symlinked dir name does
           # NOT register on Claude Code), so grep the name, not the directory.
           case "$IMPL_TRANSPORT" in
-            orca|herdr)
+            herdr)
               if grep -qs "^name: ${slot}\$" "$TUI_SKILLS_DIR"/*/SKILL.md 2>/dev/null; then
                 d_ok "impl slot '$slot' resolves in the TUI agent's skill dir ($TUI_SKILLS_DIR)"
               else
@@ -388,79 +367,11 @@ doctor() {
     fi
   fi
 
-  # Review-relay binding: verify the configured terminal is actually reachable NOW.
-  if [ -n "$REVIEW_TERMINAL_HANDLE$REVIEW_TERMINAL_TITLE" ] \
-     && command -v orca >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    js=$(orca terminal list --json 2>/dev/null || true)
-    if [ -n "${js:-}" ]; then
-      if [ -n "$REVIEW_TERMINAL_HANDLE" ]; then
-        n=$(printf '%s' "$js" | jq --arg h "$REVIEW_TERMINAL_HANDLE" \
-            '[.result.terminals[]? | select(.handle==$h and .connected and .writable)] | length' 2>/dev/null || true); n="${n:-0}"
-        if [ "$n" = "1" ]; then d_ok "review relay: pinned terminal $REVIEW_TERMINAL_HANDLE is live+writable"
-        else d_warn "review relay: pinned REVIEW_TERMINAL_HANDLE is not among live writable terminals (handles die on app restart)" \
-             "re-pin from the live list below"; fi
-      else
-        n=$(printf '%s' "$js" | jq --arg t "$REVIEW_TERMINAL_TITLE" \
-            '[.result.terminals[]? | select(.connected and .writable) | select((.title // "") | contains($t))] | length' 2>/dev/null || true); n="${n:-0}"
-        case "$n" in
-          1) d_ok "review relay: title ~ '$REVIEW_TERMINAL_TITLE' matches exactly one live terminal" ;;
-          0) d_warn "review relay: NO live terminal title contains '$REVIEW_TERMINAL_TITLE' (TUI agents rename their own tabs)" \
-             "retitle the review tab, or pin REVIEW_TERMINAL_HANDLE from the live list below" ;;
-          *) d_warn "review relay: $n terminals match title ~ '$REVIEW_TERMINAL_TITLE' — ambiguous" \
-             "pin REVIEW_TERMINAL_HANDLE" ;;
-        esac
-      fi
-    else
-      d_warn "review relay: configured (REVIEW_TERMINAL_HANDLE/TITLE) but 'orca terminal list' returned nothing — binding UNVERIFIED" \
-        "is the Orca runtime running? (orca status), then re-run doctor"
-    fi
-  fi
-
-  # Live Orca terminals (info only): where to pin ORCA_TERMINAL_HANDLE from.
-  if command -v orca >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    terms=$(orca terminal list --json 2>/dev/null \
-      | jq -r '.result.terminals[]? | "\(.handle)\t\(.title)\t\(.worktreePath)"' 2>/dev/null || true)
-    if [ -n "${terms:-}" ]; then
-      d_info "live Orca terminals (pin ORCA_TERMINAL_HANDLE from here; handles die on app restart):"
-      printf '%s\n' "$terms" | sed 's/^/      /'
-    fi
-  fi
-
   printf -- '---------------------------------------------------------------------\n'
   printf 'doctor: %d blocking, %d warning(s)\n' "$bad" "$warn"
   [ "$bad" -eq 0 ]
 }
 if [ "$SUBCMD" = "doctor" ]; then doctor; exit $?; fi
-
-# ---- orca transport helpers -----------------------------------------------------
-# Resolve the impl terminal: explicit handle > (worktree==WORKDIR + connected+writable,
-# optionally narrowed by a title substring). Exactly ONE match required — the driver
-# must never type into an ambiguous terminal.
-resolve_orca_terminal() {
-  if [ -n "$ORCA_TERMINAL_HANDLE" ]; then
-    # A pinned handle must never be the driver's own terminal (config error).
-    if [ -n "${DRIVER_SELF_TERMINAL:-}" ] && [ "$ORCA_TERMINAL_HANDLE" = "$DRIVER_SELF_TERMINAL" ]; then
-      note "orca: ORCA_TERMINAL_HANDLE equals the terminal running drive.sh — the driver cannot type into itself"
-      return 1
-    fi
-    printf '%s\n' "$ORCA_TERMINAL_HANDLE"; return 0
-  fi
-  local js n
-  js=$(orca terminal list --json 2>/dev/null) \
-    || { note "orca: 'terminal list' failed — is the Orca runtime running? (orca status)"; return 1; }
-  # Exclude the driver's own terminal: when drive.sh runs inside an Orca terminal in
-  # the target worktree, it would otherwise match its own discovery filter.
-  js=$(printf '%s' "$js" | jq --arg wd "$WORKDIR" --arg t "$ORCA_TERMINAL_TITLE" --arg self "${DRIVER_SELF_TERMINAL:-}" \
-        '[.result.terminals[]? | select(.worktreePath==$wd and .connected and .writable)
-          | select(.handle != $self)
-          | select(($t=="") or ((.title // "") | contains($t)))]') || return 1
-  n=$(printf '%s' "$js" | jq 'length')
-  case "$n" in
-    1) printf '%s' "$js" | jq -r '.[0].handle' ;;
-    0) note "orca: no connected writable terminal for worktree $WORKDIR${ORCA_TERMINAL_TITLE:+ with title ~ '$ORCA_TERMINAL_TITLE'} (the driver's own terminal is excluded)"; return 1 ;;
-    *) note "orca: $n terminals match in $WORKDIR — rename the impl tab and set ORCA_TERMINAL_TITLE, or set ORCA_TERMINAL_HANDLE"; return 1 ;;
-  esac
-}
 
 # ---- herdr transport helpers ------------------------------------------------------
 # Resolve the impl pane: explicit HERDR_PANE_ID > discovery (agent-bearing pane whose
@@ -635,58 +546,6 @@ remote_seq() {   # seq of the LAST journal entry on origin/<BRANCH>; empty outpu
   printf '%s' "$J" | awk -f "$AWK" | sed -n 's/^SEQ=\([0-9][0-9]*\);.*/\1/p'
 }
 
-# ---- one-key review relay ---------------------------------------------------------
-# Resolve the REVIEW terminal: pinned handle > title-substring discovery (title is
-# REQUIRED for discovery here — the review TUI usually sits in a different worktree,
-# so the impl transport's worktree filter does not apply). Exactly ONE match.
-resolve_review_terminal() {
-  if [ -n "$REVIEW_TERMINAL_HANDLE" ]; then
-    if [ -n "${DRIVER_SELF_TERMINAL:-}" ] && [ "$REVIEW_TERMINAL_HANDLE" = "$DRIVER_SELF_TERMINAL" ]; then
-      note "review relay: REVIEW_TERMINAL_HANDLE is the terminal running drive.sh itself"
-      return 1
-    fi
-    printf '%s\n' "$REVIEW_TERMINAL_HANDLE"; return 0
-  fi
-  [ -n "$REVIEW_TERMINAL_TITLE" ] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  local js n
-  js=$(orca terminal list --json 2>/dev/null) || return 1
-  js=$(printf '%s' "$js" | jq --arg t "$REVIEW_TERMINAL_TITLE" --arg self "${DRIVER_SELF_TERMINAL:-}" \
-        '[.result.terminals[]? | select(.connected and .writable)
-          | select(.handle != $self)
-          | select((.title // "") | contains($t))]') || return 1
-  n=$(printf '%s' "$js" | jq 'length')
-  [ "$n" = "1" ] || { note "review relay: $n terminals match title ~ '$REVIEW_TERMINAL_TITLE' — pin REVIEW_TERMINAL_HANDLE"; return 1; }
-  printf '%s' "$js" | jq -r '.[0].handle'
-}
-
-# At the NEXT=review halt: OFFER to type the review stage command into the review
-# terminal (e.g. codex). The human reads the halt and answers y — this automates the
-# TYPING of the relay, not the decision (README §Board & review relay; the pipeline's
-# review stage itself, incl. the human merge confirm, is unchanged). Skipped silently
-# when unconfigured; every failure degrades to relay-by-hand.
-offer_review_relay() {
-  [ -n "$REVIEW_TERMINAL_HANDLE$REVIEW_TERMINAL_TITLE" ] || return 0
-  command -v orca >/dev/null 2>&1 || { note "review relay: orca not on PATH — relay by hand"; return 0; }
-  local h a
-  h=$(resolve_review_terminal) || { note "review relay: cannot resolve the review terminal — relay by hand"; return 0; }
-  printf 'review relay — send "%s repo=%s branch=%s" to terminal %s? [y/N] ' \
-    "$REVIEW_SLASH_CMD" "$WORKDIR" "$BRANCH" "$h" >&2
-  read -r a || { note "review relay: no answer — relay by hand"; return 0; }
-  case "$a" in
-    y|Y)
-      orca terminal wait --terminal "$h" --for tui-idle --timeout-ms "$ORCA_IDLE_TIMEOUT_MS" >/dev/null 2>&1 \
-        || { note "review relay: terminal $h not idle within ${ORCA_IDLE_TIMEOUT_MS}ms — relay by hand"; return 0; }
-      if orca terminal send --terminal "$h" --text "$REVIEW_SLASH_CMD repo=$WORKDIR branch=$BRANCH" --enter >/dev/null 2>&1; then
-        note "review relay: sent — GATE 2 ahead (semantic review + HUMAN merge confirm; the driver never merges)"
-      else
-        note "review relay: 'terminal send' failed for $h — relay by hand"
-      fi ;;
-    *) note "review relay: skipped — relay by hand" ;;
-  esac
-  return 0
-}
-
 # ---- preflight ----------------------------------------------------------------
 # NOTIFY_EXEC (if set): every operator knob the hook consumes is validated and ARMED
 # here, before ANY other preflight halt. This ordering is load-bearing: the
@@ -739,14 +598,11 @@ NOTIFY_READY=1
 case "$IMPL_TRANSPORT" in
   claude)
     command -v claude >/dev/null 2>&1 || halt "claude CLI not on PATH" "install Claude Code, then re-run" 2 ;;
-  orca)
-    command -v orca >/dev/null 2>&1 || halt "orca CLI not on PATH (IMPL_TRANSPORT=orca)" "install the Orca CLI, then re-run" 2
-    command -v jq   >/dev/null 2>&1 || halt "jq not on PATH (IMPL_TRANSPORT=orca needs it)" "install jq, then re-run" 2 ;;
   herdr)
     command -v herdr >/dev/null 2>&1 || halt "herdr CLI not on PATH (IMPL_TRANSPORT=herdr)" "install Herdr (https://herdr.dev), then re-run" 2
     command -v jq    >/dev/null 2>&1 || halt "jq not on PATH (IMPL_TRANSPORT=herdr needs it)" "install jq, then re-run" 2
     command -v perl  >/dev/null 2>&1 || halt "perl not on PATH (IMPL_TRANSPORT=herdr needs it: monotonic deadlines + process-group kills)" "install perl, then re-run" 2 ;;
-  *) halt "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT'" "set IMPL_TRANSPORT=claude, orca, or herdr in drive.config" 2 ;;
+  *) halt "unknown IMPL_TRANSPORT '$IMPL_TRANSPORT'" "set IMPL_TRANSPORT=claude or herdr in drive.config" 2 ;;
 esac
 git_q rev-parse --git-dir >/dev/null 2>&1 || halt "WORKDIR is not a git repo: $WORKDIR" "clone the target repo there" 2
 
@@ -787,15 +643,7 @@ case "$remote_url" in
     fi ;;
 esac
 
-# Orca transport: resolve the impl terminal NOW so a bad setup halts before GATE 1.
-# (run_impl_orca re-resolves per card — handles churn when tabs close/reopen.)
-if [ "$IMPL_TRANSPORT" = "orca" ]; then
-  _h=$(resolve_orca_terminal) || halt "cannot resolve the impl terminal in Orca (worktree: $WORKDIR)" \
-      "open the coder TUI in an Orca terminal for that worktree; disambiguate with ORCA_TERMINAL_TITLE or ORCA_TERMINAL_HANDLE" 2
-  note "orca transport: impl terminal = $_h"
-fi
-
-# Herdr transport: same early bind — a bad setup halts before GATE 1.
+# Herdr transport: resolve the impl pane NOW so a bad setup halts before GATE 1.
 # (run_impl_herdr re-resolves per card — handles churn when panes close/reopen.)
 if [ "$IMPL_TRANSPORT" = "herdr" ]; then
   _p=$(resolve_herdr_pane) || halt "cannot resolve the impl pane in Herdr (cwd: $WORKDIR)" \
@@ -833,40 +681,11 @@ run_impl_claude() {
   )
 }
 
-# Orca transport: type the stage command into the live TUI terminal, then treat the
+# Herdr transport: type the stage command into a live coder TUI pane, then treat the
 # REMOTE journal as the only completion signal — poll origin until seq advances or
 # CARD_TIMEOUT. No exit code exists here; the deny-merge --settings hook does NOT
 # travel into the TUI agent (the durable gates — halt-before-review + human merge +
-# trunk rules — hold regardless).
-run_impl_orca() {
-  local handle start s
-  handle=$(resolve_orca_terminal) || return 1
-  if [ -n "$ORCA_RESET_CMD" ]; then
-    # The idle guard is as load-bearing here as for the real send: typing the reset
-    # into a BUSY TUI could corrupt an in-flight card. A wait timeout is fatal.
-    orca terminal wait --terminal "$handle" --for tui-idle --timeout-ms "$ORCA_IDLE_TIMEOUT_MS" >/dev/null 2>&1 \
-      || { note "orca: terminal $handle not idle within ${ORCA_IDLE_TIMEOUT_MS}ms (before reset)"; return 1; }
-    orca terminal send --terminal "$handle" --text "$ORCA_RESET_CMD" --enter >/dev/null 2>&1 \
-      || { note "orca: reset send failed for $handle"; return 1; }
-  fi
-  orca terminal wait --terminal "$handle" --for tui-idle --timeout-ms "$ORCA_IDLE_TIMEOUT_MS" >/dev/null 2>&1 \
-    || { note "orca: terminal $handle not idle within ${ORCA_IDLE_TIMEOUT_MS}ms"; return 1; }
-  orca terminal send --terminal "$handle" --text "$IMPL_SLASH_CMD repo=$WORKDIR branch=$BRANCH" --enter >/dev/null 2>&1 \
-    || { note "orca: 'terminal send' failed for $handle"; return 1; }
-  start=$SECONDS
-  while [ $((SECONDS - start)) -lt "$CARD_TIMEOUT" ]; do
-    sleep "$POLL_SECS"
-    git_q fetch origin --quiet || true          # transient fetch error: keep polling
-    s=$(remote_seq) || s=""
-    if [ -n "$s" ] && [ "$s" -gt "$prev_seq" ]; then return 0; fi
-  done
-  note "orca transport: no journal progress within ${CARD_TIMEOUT}s — impl terminal tail:"
-  orca terminal read --terminal "$handle" 2>/dev/null | tail -20 >&2 || true
-  return 1
-}
-
-# Herdr transport: same shape as orca — type the stage command into a live coder TUI
-# pane, then poll the REMOTE journal as the only completion signal. Herdr deltas
+# trunk rules — hold regardless). Herdr specifics
 # (PRD .pipeline/herdr-transport/PRD.md): send is `herdr pane run` (atomic
 # text+Enter, officially preferred over send-text + send-keys enter); the pre-send
 # guard validates readiness AND detection authority from the SAME explain sample on
@@ -904,9 +723,8 @@ run_impl_herdr() {
 
 run_impl() {
   case "$IMPL_TRANSPORT" in
-    orca) run_impl_orca ;;
     herdr) run_impl_herdr ;;
-    *)    run_impl_claude ;;
+    *)     run_impl_claude ;;
   esac
 }
 
@@ -935,8 +753,8 @@ stranded_in_progress() { # echoes a card path if any card is status: in-progress
 CONFIRMED_SPEC_REV=$(live_spec_rev) || halt "no task cards under origin/$BRANCH:$TASKS — feature not decomposed yet" "run pipeline-task (human, frontier)" 2
 [ -n "$CONFIRMED_SPEC_REV" ] || halt "cards carry no spec-rev — task did not freeze a spec" "run pipeline-task (human, frontier)" 2
 
-if [ "$IMPL_TRANSPORT" = "orca" ] || [ "$IMPL_TRANSPORT" = "herdr" ]; then
-  note "Feature : $FEATURE   (trunk=$BRANCH)   impl transport=$IMPL_TRANSPORT (live TUI terminal)"
+if [ "$IMPL_TRANSPORT" = "herdr" ]; then
+  note "Feature : $FEATURE   (trunk=$BRANCH)   impl transport=$IMPL_TRANSPORT (live TUI pane)"
 else
   note "Feature : $FEATURE   (trunk=$BRANCH)   impl model=$IMPL_MODEL"
 fi
@@ -999,14 +817,8 @@ while : ; do
   # --- HALT PREDICATE ---
   if [ "$NEXT" != "impl" ] || [ "${STATUS}" = "blocked" ]; then
     case "$NEXT" in
-      review) # banner FIRST — the operator must read the halt before answering the relay
-              # prompt; the notify ping fires even earlier, because the relay prompt can
-              # block forever on a walked-away operator and the ping is what calls them back
-              render_board
-              notify_hook halt "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" "pipeline-review (frontier, semantic review + merge confirm)"
-              halt_banner "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" "pipeline-review (frontier, semantic review + merge confirm)"
-              offer_review_relay
-              exit 0 ;;
+      review) halt "all cards in review (seq=$SEQ) — feature complete, human merge gate ahead" \
+                   "pipeline-review (frontier, semantic review + merge confirm)" 0 ;;
       hunt)   halt "card blocked / integration incident (seq=$SEQ, status=$STATUS)" "pipeline-hunt (frontier, root-cause)" 0 ;;
       "")     halt "terminal/awaiting entry, no next command (seq=$SEQ)" "read $JOURNAL tail — likely awaiting your merge 'go', or feature done" 0 ;;
       *)      halt "tail routes to pipeline-$NEXT (seq=$SEQ, status=$STATUS) — outside the impl loop" "pipeline-$NEXT (human)" 0 ;;
@@ -1029,13 +841,7 @@ while : ; do
   # --- run ONE impl stage as a fresh cold node ---
   prev_seq=$SEQ
   note ""
-  if [ "$IMPL_TRANSPORT" = "orca" ]; then
-    note ">>> impl dispatch via orca terminal (after seq=$prev_seq) ..."
-    if ! run_impl; then
-      halt "the driven pipeline-impl made no journal progress after seq=$prev_seq (terminal error or card timeout)" \
-           "inspect the impl terminal in Orca; pipeline-impl (manual) or pipeline-hunt" 1
-    fi
-  elif [ "$IMPL_TRANSPORT" = "herdr" ]; then
+  if [ "$IMPL_TRANSPORT" = "herdr" ]; then
     note ">>> impl dispatch via herdr pane (after seq=$prev_seq) ..."
     if ! run_impl; then
       halt "the driven pipeline-impl made no journal progress after seq=$prev_seq (pane error or card timeout)" \

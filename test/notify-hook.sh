@@ -156,7 +156,7 @@ rm -rf "$R"
 
 # --- 9. stdin from /dev/null: notifier sees EOF, cannot steal later operator input ---
 # Finding 3: the notifier used to inherit the driver's stdin, so it could consume
-# the sentinel meant for the review-relay prompt (or block on read). run_notify now
+# the sentinel meant for an interactive gate prompt (or block on read). run_notify now
 # redirects the notifier's stdin from /dev/null -> immediate EOF.
 R=$(mktemp -d); seed "$R" 2
 cat > "$R/notify.sh" <<EOF

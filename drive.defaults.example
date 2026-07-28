@@ -3,7 +3,7 @@
 #   mkdir -p ~/.config/pipeline-driver && cp drive.defaults.example ~/.config/pipeline-driver/drive.defaults
 # Sourced by bash BEFORE the per-feature drive.config, so anything here is a
 # default and drive.config always wins. Keep per-feature facts (WORKDIR, BRANCH,
-# FEATURE, the per-run ORCA_TERMINAL_HANDLE) OUT of this file.
+# FEATURE, the per-run HERDR_PANE_ID) OUT of this file.
 #
 # Slot bindings on this machine — machine-readable: `coordinate.sh doctor|status`
 # print these, and doctor verifies each *_MODEL_EXPECT against the live pane
@@ -20,15 +20,13 @@ REVIEW_AGENT=codex
 REVIEW_MODEL_EXPECT=gpt-5.6
 
 # --- impl transport + model (stable across features) ---------------------------
-# claude: spawn a headless `claude` child per card. orca: type IMPL_SLASH_CMD into a
-# live Orca-managed TUI (e.g. pi) and poll the remote journal (use when the impl
-# model's plan only allows interactive coding tools). herdr: same driven-TUI shape
-# through a Herdr pane (`herdr pane run`; read-first {done,idle} guard; fails closed
-# unless Herdr's agent detection is hook/manifest-authoritative).
-IMPL_TRANSPORT=orca
+# claude: spawn a headless `claude` child per card. herdr: type IMPL_SLASH_CMD into a
+# live coder TUI in a Herdr pane and poll the remote journal (use when the impl
+# model's plan only allows interactive coding tools) — `herdr pane run`, read-first
+# {done,idle} guard, fails closed unless Herdr's agent detection is
+# hook/manifest-authoritative.
+IMPL_TRANSPORT=herdr
 IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
-# ORCA_RESET_CMD=/new                 # per-card TUI reset; empty = off
-# ORCA_TERMINAL_TITLE=impl            # title fallback only — pin the HANDLE per run in drive.config
 # HERDR_RESET_CMD=/new                # herdr: per-card TUI reset (both sides guarded); empty = off
 # HERDR_PANE_CWD_MATCH=               # herdr: cwd SUBSTRING replacing the ==WORKDIR pane filter (TUI in a subdir)
 # TUI_SKILLS_DIR=$HOME/.pi/agent/skills   # where the TUI agent loads skills; doctor checks the impl slot resolves THERE
@@ -39,9 +37,8 @@ IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
 # IMPL_AUTH_TOKEN_ENV=
 
 # --- loop tuning ----------------------------------------------------------------
-# CARD_TIMEOUT=2700          # orca/herdr transports: max seconds to wait for one card
-# POLL_SECS=30               # orca/herdr transports: journal poll interval
-# ORCA_IDLE_TIMEOUT_MS=60000 # orca: wait-for-tui-idle budget before each send
+# CARD_TIMEOUT=2700          # herdr transport: max seconds to wait for one card
+# POLL_SECS=30               # herdr transport: journal poll interval
 # HERDR_IDLE_TIMEOUT_MS=60000 # herdr: status-guard budget before each send
 # HERDR_RESET_SETTLE_MS=2000  # herdr: post-reset window to observe the TUI taking the reset
 # MAX_CONSEC_FAIL=2          # circuit breaker: consecutive failed impl runs
@@ -67,7 +64,7 @@ YOLO=0
 # browser and refresh whenever you glance over.
 # BOARD_OUT=/tmp/pipeline-board.html
 
-# --- walk-away notify hook (README §Board & review relay) ----------------------------
+# --- walk-away notify hook (README §Board & walk-away notify) ------------------------
 # Non-empty = invoke this ABSOLUTE-path executable (best-effort) at the same three
 # moments as BOARD_OUT — after GATE 1, after every advanced card, and on every halt.
 # Event in $1 (gate1|card|halt); context in DRIVE_* env (DRIVE_FEATURE / DRIVE_BRANCH /
@@ -83,7 +80,7 @@ YOLO=0
 #     TERM-immune send is killed — its WHOLE process group, via perl setpgrp (TERM
 #     then KILL; perl is REQUIRED when NOTIFY_EXEC is set) — and degrades to one warn.
 #   * the notifier's stdin is /dev/null (immediate EOF) — it cannot consume the
-#     review-relay prompt or later operator input.
+#     GATE 1 / rejection-gate prompt or later operator input.
 #   * the notifier launches under `env -i` with an explicit allowlist — it receives
 #     ONLY PATH/HOME + the DRIVE_* context + the NAMES in NOTIFY_ENV_ALLOW. Ambient
 #     EXPORTED variables (GH_TOKEN / ANTHROPIC_* / the var named by IMPL_AUTH_TOKEN_ENV)
@@ -94,31 +91,7 @@ YOLO=0
 # Canonical adapter (Hermes -> Telegram):
 # NOTIFY_EXEC=$HOME/workspace/pipeline-dispatch/notify.sh
 
-# --- review-drive.sh: the meta-PR review<->fix loop (README §review-drive) ----------
-# Drives ONE toolchain-repo PR between the reviewer TUI (REVIEW_TERMINAL_* below)
-# and a fixer TUI until 'verdict: approved', a cap, or a no-progress halt. The
-# merge stays yours. Pin FIX_TERMINAL_HANDLE per run in review-drive.config —
-# only stable tuning belongs here.
-# FIX_TERMINAL_TITLE=pi        # title fallback only — pin the HANDLE per run
-# REVIEW_REPO=jackypanster/pipeline   # repo for bare-number PR arguments
-# REVIEW_REPO_RE='^jackypanster/pipeline(-driver|-dashboard|-dispatch)?$'  # ENFORCED scope
-# PROTOCOL_AUTHOR=             # protocol-comment identity; default: the gh-authenticated login
-# REVIEW_SLASH_CMD is shared with the one-key relay (below) and REQUIRED non-empty by
-# review-drive (default /pipeline-review): the relayed review must BE pipeline-review.
-# MAX_ROUNDS=5                 # hard cap on review rounds (PR #39 took 8 WITH a human curating)
-# HUNT_AFTER=3                 # fix dispatch >= this switches to the root-cause template
-# REVIEW_TIMEOUT=2700          # max seconds to wait for one verdict comment
-# FIX_TIMEOUT=2700             # max seconds to wait for one pushed fix + evidence
-
-# --- one-key review relay (README §Board & review relay) ----------------------------
-# When the loop halts at NEXT=review, OFFER to type "$REVIEW_SLASH_CMD repo=… branch=…"
-# into the review terminal (e.g. codex) — you read the halt, you press y. Never
-# automatic; GATE 2 (semantic review + HUMAN merge confirm) is untouched.
-# Pin the HANDLE per run (orca terminal list --json; handles die on app restart), or
-# give a unique title substring for discovery.
-# REVIEW_TERMINAL_HANDLE=term_...
-# REVIEW_TERMINAL_TITLE=codex
-# REVIEW_SLASH_CMD='$pipeline-review'   # codex >=0.144 invokes skills with a $-prefix from
-#                                       # ~/.codex/skills — SINGLE-QUOTE the value (unquoted,
-#                                       # bash would expand $pipeline to empty). /pipeline-review
-#                                       # is the claude-style default.
+# The meta-PR review<->fix relay is NOT a driver span. It lives in the
+# `pipeline-coordinate` playbook (Profile A): a CC session dispatches the fixer and
+# reviewer panes over Herdr and reads verdicts off the PR. The driver's own
+# review-drive.sh + one-key relay were retired with the orca transport.

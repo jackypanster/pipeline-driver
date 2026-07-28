@@ -19,11 +19,6 @@ BRANCH=main
 # The .pipeline/<feature> directory name.
 FEATURE=my-feature
 
-# Orca transport only: pin the impl terminal PER RUN — handles are runtime-issued
-# and die on app restart; titles are unreliable (field-tested: the coder TUI renamed
-# its own tab mid-setup). Get it from `orca terminal list --json` right before the run.
-# ORCA_TERMINAL_HANDLE=term_...
-
 # Herdr transport only: pin the impl pane PER RUN (pane ids die with the pane).
 # Get it from `herdr pane list` right before the run. NEVER the pane running
 # drive.sh itself — the driver rejects that (it cannot type into itself).
