@@ -101,7 +101,7 @@ _remote_kind() {
 
 # redact_remote <url>: safe-to-print form. NETWORK forms are stripped of userinfo
 # and query/fragment so https://alice:ghp_SECRET@host/... can never reach
-# stderr/stdout or a derived key (§14 sanitized-input / §19). FILESYSTEM paths are
+# stderr/stdout or a redacted diagnostic string (§14 sanitized-input / §19). FILESYSTEM paths are
 # printed as-is: they are local paths, not credential carriers, and '@'/'?'/'#'
 # are legal filename bytes there (finding: no ?#/userinfo stripping on paths).
 redact_remote() {
@@ -114,20 +114,19 @@ redact_remote() {
 # normalize_remote_for <workdir> <url>: ONE canonical identity per REAL remote, in
 # DISJOINT TYPED NAMESPACES (finding: a bare 'file' prefix collided with a literal
 # hostname 'file' — https://file/…/shared.git aliased a local /…/shared):
-#   network:    net:<len>:<host[:port]/path>   userinfo + query/fragment + .git
+#   network:    net:<host[:port]/path>         userinfo + query/fragment + .git
 #               stripped, host lowercased. https/ssh/scp forms of one remote agree;
 #               an ssh:// port host:2222 stays distinct from a /2222 path segment.
-#   filesystem: fs:<len>:<physical path>       the value is preserved EXACTLY (no
+#   filesystem: fs:<physical path>             the value is preserved EXACTLY (no
 #               userinfo/query/fragment/.git stripping — '@', '?', '#' are legal
 #               filename bytes; /srv/x and /srv/x.git are different repos) and
 #               resolved against the DECLARING clone: `origin.git` in four clones
 #               names four different repositories.
-# <len> is the value's BYTE length, computed locale-invariantly (finding: Bash
-# ${#v} counts characters under a UTF-8 locale but bytes under LC_ALL=C, so the
-# SAME remote keyed net:13: vs net:14: across shells and moved to a different
-# state namespace). The kind tag is chosen by classification, never taken from
-# input. Classification runs on the RAW value BEFORE any stripping (finding:
-# 'x@../shared' is a literal local path, not userinfo).
+# Contract: this canonical form is used ONLY for equality comparison — never a key,
+# path segment, or concatenated with another value. If that ever changes, reintroduce
+# a length prefix (or an explicit unambiguous encoding) FIRST. The kind tag is chosen
+# by classification, never taken from input. Classification runs on the RAW value
+# BEFORE any stripping (finding: 'x@../shared' is a literal local path, not userinfo).
 _byte_len() { printf '%s' "$1" | wc -c | awk '{print $1}'; }   # wc -c = bytes, always
 normalize_remote_for() {
   local wd=$1 raw=$2 kind u v
@@ -138,19 +137,19 @@ normalize_remote_for() {
       case "$v" in file://*) v=${v#file://} ;; esac
       case "$v" in /*) ;; *) v="$wd/$v" ;; esac
       v=$(resolve_path "$v")
-      printf 'fs:%d:%s' "$(_byte_len "$v")" "$v"
+      printf 'fs:%s' "$v"
       ;;
     net-scheme)
       u=$(strip_userinfo "$raw"); u=${u#*://}; u=${u%.git}
       v=$(printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }')
-      printf 'net:%d:%s' "$(_byte_len "$v")" "$v"
+      printf 'net:%s' "$v"
       ;;
     net-scp)
       u=$(strip_userinfo "$raw")
       u=$(printf '%s' "$u" | sed -E 's#([^/]*):#\1/#')   # scp host:path -> host/path
       u=${u%.git}
       v=$(printf '%s' "$u" | awk -F/ 'BEGIN{OFS="/"} { $1=tolower($1); print }')
-      printf 'net:%d:%s' "$(_byte_len "$v")" "$v"
+      printf 'net:%s' "$v"
       ;;
   esac
 }
@@ -168,7 +167,7 @@ resolve_path() {
   if [ "$base" = "/" ]; then
     # Nothing below / exists and / itself is never a symlink: the path IS its own
     # physical form — return it WHOLE. Truncating to '/' collapsed every distinct
-    # nonexistent top-level path into one identity/key (finding: preserve the
+    # nonexistent top-level path into one comparison identity (finding: preserve the
     # unresolved suffix when / is the longest existing ancestor).
     printf '%s' "$p"; return 0
   fi
