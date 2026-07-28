@@ -2,7 +2,7 @@
 # Hermetic tests for the global-defaults layer + `drive.sh doctor`.
 # No network, no real HOME/XDG reads (DRIVE_DEFAULTS pins the defaults path),
 # stripped PATH plays "dep not installed" (macOS keeps git/awk/sed in /usr/bin;
-# everything brew-installed — jq/gh/node/claude/orca — disappears).
+# everything brew-installed — jq/gh/node/claude/herdr — disappears).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 DRIVE="$HERE/../drive.sh"
@@ -53,7 +53,7 @@ else bad "doctor bare machine (rc=$rc)" "$out"; fi
 # --- 5. doctor on a healthy (stubbed) machine: exit 0, warnings only allowed
 mkdir -p "$TMP/skills/pipeline-impl" "$TMP/pipeline/.git" "$TMP/dashboard/.git" "$TMP/dashboard/dist" "$TMP/bin"
 : > "$TMP/dashboard/dist/cli.js"
-for t in claude jq gh node orca; do printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/$t"; chmod +x "$TMP/bin/$t"; done
+for t in claude jq gh node herdr; do printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/$t"; chmod +x "$TMP/bin/$t"; done
 cat > "$TMP/defaults3" <<EOF
 PIPELINE_REPO=$TMP/pipeline
 DASHBOARD_REPO=$TMP/dashboard
@@ -109,31 +109,22 @@ if [ "$rc" -eq 0 ] && grep -q "no .pipeline/roles.yaml" <<<"$out" && grep -q "do
   ok "doctor: missing roles.yaml -> warn + full summary (no early exit)"
 else bad "doctor missing roles.yaml (rc=$rc)" "$out"; fi
 
-# --- 11-14. binding checks: TUI slot resolution + review-relay terminal ---
-ln -sf "$(command -v jq)" "$TMP/bin/jq"   # these checks pipe stub-orca JSON through REAL jq
-cat > "$TMP/bin/orca" <<'ORC'
-#!/bin/sh
-case "$2" in
-  list) printf '{"result":{"terminals":[{"handle":"term_a","title":"pipeline","worktreePath":"/x","connected":true,"writable":true},{"handle":"term_b","title":null,"worktreePath":"/y","connected":true,"writable":true}]}}\n' ;;
-esac
-exit 0
-ORC
-chmod +x "$TMP/bin/orca"
+# --- 11-13. binding checks: TUI slot resolution on the herdr transport ---
 printf 'impl:   goal-x   # test slot\n' > "$TMP/target/.pipeline/roles.yaml"
 mkdir -p "$TMP/tui"
 cat > "$TMP/defaults5" <<EOF
 PIPELINE_REPO=$TMP/pipeline
 DASHBOARD_REPO=$TMP/dashboard
 SKILLS_DIR=$TMP/skills
-IMPL_TRANSPORT=orca
+IMPL_TRANSPORT=herdr
 TUI_SKILLS_DIR=$TMP/tui
 EOF
 
-# 11: orca transport, slot NOT in the TUI dir -> blocking MISS with the ln -s fix
+# 11: herdr transport, slot NOT in the TUI dir -> blocking MISS with the ln -s fix
 out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
 if [ "$rc" -eq 1 ] && grep -q "not registered under $TMP/tui" <<<"$out" && grep -q "fix: ln -s" <<<"$out"; then
-  ok "doctor: orca slot missing in TUI dir -> MISS + ln -s fix"
-else bad "doctor orca TUI slot MISS (rc=$rc)" "$out"; fi
+  ok "doctor: herdr slot missing in TUI dir -> MISS + ln -s fix"
+else bad "doctor herdr TUI slot MISS (rc=$rc)" "$out"; fi
 
 # 12: slot registered (frontmatter name, dir name irrelevant) -> ok, rc=0
 mkdir -p "$TMP/tui/whatever-dir" && printf -- '---\nname: goal-x\n---\n' > "$TMP/tui/whatever-dir/SKILL.md"
@@ -142,27 +133,16 @@ if [ "$rc" -eq 0 ] && grep -q "resolves in the TUI agent's skill dir" <<<"$out";
   ok "doctor: slot resolves by frontmatter name (dir name irrelevant)"
 else bad "doctor TUI slot ok (rc=$rc)" "$out"; fi
 
-# 13: REVIEW_TERMINAL_TITLE matches NO live terminal -> warn, non-blocking
-printf 'REVIEW_TERMINAL_TITLE=codex\n' >> "$TMP/defaults5"
+# 13: the RETIRED orca transport must fail LOUD, never fall through to claude.
+# A stale drive.defaults left over from before the orca retirement is the exact
+# case this guards: an unknown transport is a blocking MISS naming both survivors.
+grep -v '^IMPL_TRANSPORT=' "$TMP/defaults5" > "$TMP/defaults5.new" && mv "$TMP/defaults5.new" "$TMP/defaults5"
+printf 'IMPL_TRANSPORT=orca\n' >> "$TMP/defaults5"
 out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "NO live terminal title contains 'codex'" <<<"$out"; then
-  ok "doctor: unmatched review title -> warn (agents rename tabs)"
-else bad "doctor review title unmatched (rc=$rc)" "$out"; fi
-
-# 14: title matching exactly one live terminal -> ok
-grep -v '^REVIEW_TERMINAL_TITLE=' "$TMP/defaults5" > "$TMP/defaults5.new" && mv "$TMP/defaults5.new" "$TMP/defaults5"
-printf 'REVIEW_TERMINAL_TITLE=pipeline\n' >> "$TMP/defaults5"
-out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "matches exactly one live terminal" <<<"$out"; then
-  ok "doctor: unique review-title match -> ok"
-else bad "doctor review title unique (rc=$rc)" "$out"; fi
-
-# --- 15. review relay configured but `orca terminal list` empty -> warn, never silent
-printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/orca"; chmod +x "$TMP/bin/orca"   # list outputs nothing
-out=$(DRIVE_DEFAULTS="$TMP/defaults5" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/target.config" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && grep -q "binding UNVERIFIED" <<<"$out"; then
-  ok "doctor: empty terminal list -> explicit UNVERIFIED warn (no false green)"
-else bad "doctor empty terminal list (rc=$rc)" "$out"; fi
+if [ "$rc" -eq 1 ] && grep -q "unknown IMPL_TRANSPORT 'orca'" <<<"$out" \
+   && grep -q "set IMPL_TRANSPORT=claude or herdr" <<<"$out"; then
+  ok "doctor: retired orca transport -> blocking MISS (no silent fallback)"
+else bad "doctor retired orca transport (rc=$rc)" "$out"; fi
 
 echo "----"
 echo "passed=$pass failed=$fail"

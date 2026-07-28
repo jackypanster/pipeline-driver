@@ -26,20 +26,20 @@ You are an agent in or around a `pipeline`-driven repo. When to reach for this d
   a cheap model and stops.
 - **Do NOT use it — or invent another scheduler — for anything else.** `prd`/`arch`/`task`/`review`/`hunt`
   are interview/semantic stages that stay human-relayed by design. The pipeline deliberately has **no
-  scheduler** (see the pipeline `DESIGN.md` rationale); this repo carries the only two sanctioned
-  exceptions, each a bounded span with a human read at both ends: `drive.sh` (the `impl` multi-card
-  loop) and `review-drive.sh` (the review↔fix rounds of a TOOLCHAIN-repo PR — operator policy
-  2026-07-12, see §review-drive). If you are tempted to orchestrate the whole pipeline, don't — that was
-  evaluated and rejected because semantic errors compound silently between auto-advanced stages with no
-  human read. The meta-PR loop is different in kind, not an exemption from that rationale: it is
-  ADVERSARIAL (the reviewer's job each round is to catch the fixer's errors, so nothing advances
-  unchecked), its failure mode is non-convergence, and that is bounded by the round cap, the
-  no-progress halt, and the human merge gate. It never drives the feature pipeline's `review` stage.
+  scheduler** (see the pipeline `DESIGN.md` rationale); this repo carries exactly ONE sanctioned
+  exception, a bounded span with a human read at both ends: `drive.sh`, the `impl` multi-card loop.
+  If you are tempted to orchestrate the whole pipeline, don't — that was evaluated and rejected
+  because semantic errors compound silently between auto-advanced stages with no human read.
+  The other span DESIGN.md authorizes — the review↔fix relay of a toolchain-repo meta-PR — is
+  **not a driver script**: it is the `pipeline-coordinate` playbook's Profile A, where a CC session
+  dispatches the fixer and reviewer panes over Herdr and reads verdicts off the PR. The
+  `review-drive.sh` implementation of that span was retired with the orca transport (one span, one
+  implementation).
 - **GATE 1 is a read-then-bind gate; who reads is the operator's risk-tier call.** Default: a human
   at a terminal reads the frozen red test and echoes its `spec-rev`. Operator policy (2026-07-08):
   choosing the drive paradigm for a LOW-RISK feature (read-only/ergonomics) is itself the ex-ante
   trust grant, so the coordinating agent MAY type the spec-rev after reading the spec it froze
-  (e.g. via `orca terminal send` into the driver's terminal). DANGEROUS features (trading
+  (e.g. via `herdr pane run` into the driver's pane). DANGEROUS features (trading
   write-path) never use the driver at all — they run the normal human-relayed pipeline. The
   sha-binding stays load-bearing either way: a mid-loop re-freeze still auto-halts. Record that
   standing grant machine-readably with `YOLO=1` in the global defaults file (§Defaults & YOLO) so
@@ -72,49 +72,48 @@ semantics, GATE 1/2, the spec-rev protocol and every guard are transport-indepen
 
 - **claude (default)** — a fresh headless `claude -p` cold child per card (no `--bare`: it would skip skill loading and OAuth on current Claude Code),
   model per `IMPL_MODEL` (optionally via an Anthropic-compatible gateway).
-- **orca** — types the impl stage command (`IMPL_SLASH_CMD`, default `/pipeline-impl`)
-  into a live Orca-managed TUI terminal (e.g. pi running GLM) with `orca terminal
-  send`, then polls `origin/<BRANCH>` until the journal seq advances or
-  `CARD_TIMEOUT`. The command syntax is the TUI agent's: pi registers skills as
-  `/skill:<name>`, so set `IMPL_SLASH_CMD=/skill:pipeline-impl` there.
-  For coding-plan models whose gateway rejects
-  headless Claude Code (observed: bigmodel.cn answers a fake-529 to the
+- **herdr** — types the impl stage command (`IMPL_SLASH_CMD`, default `/pipeline-impl`)
+  into a coder TUI running in a [Herdr](https://herdr.dev) pane with `herdr pane run`
+  (atomic text+Enter, the officially preferred submit), then polls `origin/<BRANCH>`
+  until the journal seq advances or `CARD_TIMEOUT`. The command syntax is the TUI
+  agent's: pi registers skills as `/skill:<name>`, so set
+  `IMPL_SLASH_CMD=/skill:pipeline-impl` there. For coding-plan models whose gateway
+  rejects headless Claude Code (observed: bigmodel.cn answers a fake-529 to the
   `cc_entrypoint=sdk-cli` billing marker), the interactive TUI is the compliant
   channel — the driver only automates the typing a human would do into it.
-- **herdr** — the same driven-TUI shape on a lightweight substrate: submits the stage
-  command into a coder TUI running in a [Herdr](https://herdr.dev) pane with
-  `herdr pane run` (atomic text+Enter, the officially preferred submit), then polls
-  `origin/<BRANCH>` identically. Deltas vs orca: the pre-send guard READS
-  `agent_status` and proceeds on `done`/`idle` (Herdr's `done` = finished-unviewed
-  never re-fires on an already-idle pane, so the driver never bare-waits on `done`),
-  halts fast on `blocked`, and validates readiness AND detection authority from the
-  SAME `agent explain` sample on every poll (lifecycle hook / MATCHED manifest rule,
-  no fallback — a merely loaded manifest on an unrecognized screen is the always-idle
-  fallback) — otherwise the transport **fails closed** instead of typing into a pane
-  whose always-idle fallback cannot see a busy TUI. A reset is followed by a settle
-  window (`HERDR_RESET_SETTLE_MS`) before the second guard, since `pane run` only
-  acknowledges enqueueing. Pane discovery filters `herdr pane list` by pane `.cwd == WORKDIR`
-  (or the `HERDR_PANE_CWD_MATCH` substring, e.g. a TUI opened in a subdir),
-  targets only agent-bearing panes, and excludes the driver's own pane; pin with
-  `HERDR_PANE_ID`. Needs `herdr` + `jq` + `perl` (monotonic deadlines +
-  process-group kills). Spec: `.pipeline/herdr-transport/PRD.md`.
+  The pre-send guard READS `agent_status` and proceeds on `done`/`idle` (Herdr's
+  `done` = finished-unviewed never re-fires on an already-idle pane, so the driver
+  never bare-waits on `done`), halts fast on `blocked`, and validates readiness AND
+  detection authority from the SAME `agent explain` sample on every poll (lifecycle
+  hook / MATCHED manifest rule, no fallback — a merely loaded manifest on an
+  unrecognized screen is the always-idle fallback) — otherwise the transport **fails
+  closed** instead of typing into a pane whose always-idle fallback cannot see a busy
+  TUI. A reset is followed by a settle window (`HERDR_RESET_SETTLE_MS`) before the
+  second guard, since `pane run` only acknowledges enqueueing. Pane discovery filters
+  `herdr pane list` by pane `.cwd == WORKDIR` (or the `HERDR_PANE_CWD_MATCH`
+  substring, e.g. a TUI opened in a subdir), targets only agent-bearing panes, and
+  excludes the driver's own pane; pin with `HERDR_PANE_ID`. Needs `herdr` + `jq` +
+  `perl` (monotonic deadlines + process-group kills). Design record (not current spec):
+  `.pipeline/herdr-transport/PRD.md` as landed at `f615f5c` — its `orca`-additive Non-goals predate the transport retirement on this branch and no longer match the tree.
 
-Driven-TUI (orca/herdr) deltas to know: there is **no child exit code** — the only
+(An `orca` transport existed alongside `herdr` and was **retired** — Herdr replaced it
+as the driven-TUI substrate, so a stale `IMPL_TRANSPORT=orca` is now a blocking doctor
+MISS rather than a silent fallback.)
+
+Driven-TUI (herdr) deltas to know: there is **no child exit code** — the only
 completion signal is the remote journal (a stuck TUI = `CARD_TIMEOUT` halt, with the
-terminal/pane tail printed); the deny-merge `--settings` hook does **not** travel into
+pane tail printed); the deny-merge `--settings` hook does **not** travel into
 the TUI agent (the durable gates — halt-before-review, human merge, trunk rules — hold
 regardless); the TUI is a **long session**, not a cold node per card
-(`ORCA_RESET_CMD` / `HERDR_RESET_CMD` approximate cold starts — both sides of the reset
-are guarded); it needs `jq`, the substrate's runtime, and a TUI agent that has the
+(`HERDR_RESET_CMD` approximates a cold start — both sides of the reset
+are guarded); it needs `jq`, `perl`, the substrate's runtime, and a TUI agent that has the
 `pipeline-impl` shim + the roles.yaml impl skill installed with permissions to finish a
 card unattended. While a driven loop runs, keep other agents out of that worktree.
-Terminal discovery: **pin `ORCA_TERMINAL_HANDLE`** — TUI agents rename their own tab on
-startup, so title matching goes stale (field-tested on the first trial run); the driver
-also unsets any INHERITED `ORCA_TERMINAL_HANDLE` before reading config, because Orca
-injects it into every terminal it manages — including the one running the driver.
-Herdr injects `HERDR_PANE_ID` the same way; the driver applies the same capture/unset
-discipline, excludes its own pane from discovery, and rejects a pinned target equal
-to it.
+Pane discovery: **pin `HERDR_PANE_ID`** per run — pane ids die with the pane, and TUI
+agents rename their own tab on startup so title matching goes stale (field-tested on
+the first trial run). Herdr injects `HERDR_PANE_ID` into every pane it manages —
+including the one running the driver — so the driver captures and unsets the inherited
+value, excludes its own pane from discovery, and rejects a pinned target equal to it.
 
 ## Merge safety (read this before trusting it)
 
@@ -161,8 +160,6 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | file | purpose |
 |------|---------|
 | `drive.sh` | the deterministic impl loop + the two-gate predicate |
-| `review-drive.sh` | the deterministic meta-PR review↔fix loop (§review-drive) |
-| `review-drive.config.example` | per-run config for it: the two terminal handles + tuning |
 | `parse-tail.awk` | journal-tail parser (ASCII-anchored; ignores the Unicode `·`/`→` separators) |
 | `settings.driver.json` | `--settings` for each driven run: merge `deny` rules + the PreToolUse hook |
 | `deny-merge.sh` | best-effort merge speed-bump (PreToolUse hook); parses the Bash command, denies direct/wrapped merge + trunk-clobber. NOT a boundary — see *Merge safety* |
@@ -174,12 +171,10 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `test/hook.sh` | merge-gate tests incl. the wrapper/refspec bypass cases |
 | `test/e2e.sh` | hermetic end-to-end loop tests (stub `claude`) + every safety halt |
 | `test/notify-hook.sh` | hermetic tests for the `NOTIFY_EXEC` walk-away hook (events, env, preflight validation, degradation) |
-| `test/e2e-orca.sh` | hermetic e2e for the orca transport (stub `orca` plays the TUI coder) |
 | `test/e2e-herdr.sh` | hermetic e2e for the herdr transport (stub `herdr`; guards, self-pane, fail-closed) |
 | `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
 | `test/defaults-doctor.sh` | hermetic tests for the defaults layer + `drive.sh doctor` |
-| `test/board-relay.sh` | hermetic tests for `BOARD_OUT` auto-refresh + the one-key review relay |
-| `test/review-drive.sh` | hermetic e2e for the meta-PR loop (stub `gh` + stub `orca` play GitHub/codex/pi) |
+| `test/board.sh` | hermetic tests for `BOARD_OUT` auto-refresh + the review halt shape |
 | `coordinate.sh` | read-only `doctor` + `status` — the COMPLETE surface (the `watch`/`resume` dispatch half was rejected: PR #14 closed; pivot in design v1.3 §25); the cross-stage sibling of `drive.sh`, see §coordinate.sh |
 | `coordinate.config.example` | per-repo config for it (copy to `coordinate.config`): observer + CC/Pi/Codex clones, command prefixes |
 | `test/coordinate-*.sh` | hermetic suites for the coordinator: parse-tail, config validation, doctor, status, remote-identity, bounded-exec watchdog |
@@ -189,21 +184,20 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 1. Clone next to `pipeline/` as a read-only consumer:
    `git clone <this> ~/workspace/pipeline-driver`. The driver runs in place — no install step.
 2. Ensure the `pipeline-*` shims + the impl-slot skill resolve on the runtime that runs
-   impl (claude transport: Claude Code's skill dir; orca/herdr transports: the TUI
+   impl (claude transport: Claude Code's skill dir; herdr transport: the TUI
    agent's skill dir). Follow the pipeline repo README §Install → *Canonical multi-runtime layout* —
    one shared physical copy (`~/.agents/skills`), each runtime attached by symlink/wrapper.
 3. **A1 — drive impl on Claude (claude transport only):** repoint the target repo's
    `.pipeline/roles.yaml` `impl` slot to a **Claude-installed** coder skill. The default
    `goal-driven-implementation` is Hermes-only and will STOP under `claude`; the
-   driver pre-flights this and warns. (The orca/herdr transports drive the TUI agent's
+   driver pre-flights this and warns. (The herdr transport drives the TUI agent's
    own runtime, where its native impl skill resolves — no repoint needed there.)
 4. One-time: `mkdir -p ~/.config/pipeline-driver && cp drive.defaults.example
    ~/.config/pipeline-driver/drive.defaults`, then set your stable preferences there
    (transport, `IMPL_MODEL` floor `haiku` / gateway via `IMPL_BASE_URL` +
    `IMPL_AUTH_TOKEN_ENV`, tuning, `YOLO`). Per feature: `cp drive.config.example
    drive.config` and set just `WORKDIR`, `BRANCH`, `FEATURE` (+ the per-run
-   `ORCA_TERMINAL_HANDLE` on the orca transport / `HERDR_PANE_ID` on the herdr
-   transport) — drive.config wins on conflict.
+   `HERDR_PANE_ID` on the herdr transport) — drive.config wins on conflict.
 5. **Protect the target's trunk against force-push / deletion (server-side).** This is
    compatible with the pipeline (metadata fast-forwards + the squash-merge still work).
    Replace `OWNER/REPO` and `<trunk>`:
@@ -218,10 +212,10 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-orca.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board-relay.sh && bash test/notify-hook.sh && bash test/review-drive.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-watchdog.sh && bash test/coordinate-bindings.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board.sh && bash test/notify-hook.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-watchdog.sh && bash test/coordinate-bindings.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
-   (deps, sibling repos, dashboard build, skills attachment, config files, live Orca terminals
-   to pin handles from). Every MISS prints the exact remediation command; it installs nothing
+   (deps, sibling repos, dashboard build, skills attachment, config files). Every MISS
+   prints the exact remediation command; it installs nothing
    and touches no network. Re-run until `0 blocking`.
 
 ## Per-feature flow
@@ -236,7 +230,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 
 Observe progress any time with the read-only dashboard:
 `node ~/workspace/pipeline-dashboard/dist/cli.js <WORKDIR> --out board.html` — or set
-`BOARD_OUT` and the driver keeps that file fresh for you (§Board & review relay).
+`BOARD_OUT` and the driver keeps that file fresh for you (§Board & walk-away notify).
 
 ## Defaults & YOLO
 
@@ -252,7 +246,7 @@ frozen spec and echo the `spec-rev` — no per-run chat authorization. It change
 starting `./drive.sh` stays an explicit per-feature act (drive is never the default mode), the
 merge confirm stays human (frozen invariant), and DANGEROUS features never use the driver.
 
-## Board & review relay
+## Board & walk-away notify
 
 **Walk-away notify hook.** Non-empty `NOTIFY_EXEC` (an absolute path to an executable
 regular file; validated and ARMED at the very top of preflight, before any other
@@ -280,7 +274,7 @@ measures limit accidental damage and accidental credential leakage:
   TERM-immune send degrades to a single warn and cannot suppress GATE 1, card
   progress, or the halt banner);
 - stdin redirected from `/dev/null` (immediate EOF), so the hook cannot consume the
-  review-relay prompt or later operator input;
+  GATE 1 / rejection-gate prompt or later operator input;
 - and a **reduced environment** launched via `env -i`: the hook receives ONLY
   `PATH`/`HOME` + the `DRIVE_*` context, plus any names you list in
   `NOTIFY_ENV_ALLOW`. This means ambient *exported variables* — `GH_TOKEN`,
@@ -296,131 +290,12 @@ dashboard (needs `node` + a built `DASHBOARD_REPO`) after GATE 1, after every ad
 card, and on every halt — keep it open in a browser and the board is always current.
 Best-effort side effect: a render failure warns once and never halts the loop.
 
-**One-key review relay.** With `REVIEW_TERMINAL_HANDLE` (preferred; pin per run) or a
-unique `REVIEW_TERMINAL_TITLE` configured, the `NEXT=review` halt prints its banner
-first, then OFFERS:
-`review relay — send "/pipeline-review repo=… branch=…" to terminal …? [y/N]`. You read
-the halt, you press `y`, `orca terminal send` does the typing into the review TUI (e.g.
-codex; the review shim rebuilds all state from the journal tail per the CONTRACT). This
-automates the TYPING of the hand-relay, not the decision: default is N, unconfigured =
-silent no-op, and it is NOT a review scheduler — the halt still fires, the review stage
-and the GATE 2 human merge confirm are untouched.
-
-## review-drive.sh — the meta-PR review↔fix loop
-
-The 8-round review of pipeline PR #39 was relayed by hand: each codex verdict pasted to
-the fixer, each fix pasted back for re-review. `review-drive.sh` automates exactly that
-shuttle for **toolchain-repo PRs** and nothing else — enforced in code, not just
-documented: the PR's repo must match `REVIEW_REPO_RE` (default: `jackypanster/pipeline`
-and the `-driver`/`-dashboard`/`-dispatch` siblings) and fork (cross-repository) PRs are
-refused at preflight. The lane it serves is the **canonical meta-PR gate**
-(pipeline CONTRACT.md §Self-improvement): `pipeline-improve` opens the PR,
-**`pipeline-review` in meta-PR mode** reviews it — semantic only: real improvement, no
-weakening, every hard rule and frozen invariant preserved — and the merge is the
-**human-confirm + reviewer-only squash-merge**; the proposer never merges. The siblings
-run the same convention for their own PRs (this repo's entire PR history included). The
-loop automates the TYPING between verdicts, never a review judgment and never the
-merge: the review dispatch invokes that meta-PR-mode review (set `REVIEW_SLASH_CMD`,
-e.g. codex `$pipeline-review`, to prefix it with your runtime's skill command), the
-verdict lands on the PR, and `approved` halts for the human-confirm. It never drives
-the feature pipeline's `review` stage (that is the 5-stage state machine inside a
-target repo, untouched here). The authorization for this second bounded span lives in
-the **canonical design itself** — pipeline PR #40, which amends `DESIGN.md`
-§Constraints AND extends `CONTRACT.md` §Self-improvement + the `pipeline-review`
-meta-PR predicate, so the lane is mechanically REACHABLE for sibling-repo and
-doc-only proposals — not unilaterally in this repo; this PR's merge follows that one.
-
-```
-            ┌──────────────────────────────┐
-            │   the GitHub PR (state bus)  │
-            │  head SHA · comments · state │
-            └───────▲──────────▲───────────┘
-      gh read+post  │          │  gh read · push · evidence comment
-        ┌───────────┴──┐    ┌──┴───────────┐
-        │ reviewer TUI │    │  fixer TUI   │
-        │   (codex)    │    │    (pi)      │
-        └───────▲──────┘    └──────▲───────┘
-   orca send    │                  │   orca send
-   "review PR#N │                  │  "PR#N head X rejected —
-    at head X"  └ review-drive.sh ─┘   read the review via gh, fix"
-                 (deterministic bash: polls gh, types one-line
-                  dispatches, counts rounds — never forwards text)
-```
-
-Same iron rules as `drive.sh`: deterministic bash, forbidden to be smart, zero local
-state, and TUI screen text is never a completion signal. The two TUIs never talk to
-each other and the driver never forwards review TEXT — each side reads the PR itself
-via `gh`; orca only types a one-line dispatch (a pointer: PR URL + head SHA + comment
-URL), and the review dispatch's **first token is the canonical skill invocation**
-(`REVIEW_SLASH_CMD`, required non-empty, default `/pipeline-review`; codex ≥0.144
-wants `$pipeline-review`) — the relayed review must BE `pipeline-review` in meta-PR
-mode, never generic prose. Verdicts travel as machine-readable protocol lines in
-plain PR comments — `verdict:` / `reviewed-head:` / `reviewed-base:` / `findings:` /
-`review-nonce:` from the reviewer, `fixed:` / `fix-nonce:` from the fixer — because
-both sides share one GitHub account, which cannot approve/request-changes on its own
-PR. Protocol comments are **authenticated twice over**: only comments authored by the
-gh-authenticated login (override: `PROTOCOL_AUTHOR`) parse at all — a drive-by
-`verdict: approved` is inert text — and within the shared account the ROLES are
-separated by per-dispatch **nonces**, typed only into that role's terminal and echoed
-back in the comment: the fixer never sees the review nonce so it cannot forge a
-verdict, the reviewer never sees the fix nonce so it cannot forge a fix, and no stale
-comment steers the LIVE loop. SHA echoes bind **exactly** — full 40 characters,
-string equality, never a prefix: a verdict must name BOTH the head and the base tip
-it reviewed (`reviewed-base:` mismatch halts like a head mismatch), and a fix is
-accepted only when its echoed sha IS the live head. Each review round additionally
-pins the live **base OID** at dispatch: a base that moves mid-review halts the round.
-
-Kill+restart **resumes fail-closed**: a prior session's nonces are unknowable, so
-same-author verdict history is folded ONLY into quantities a forged or nonce-less
-comment can **tighten** — the round budget, the no-progress streak, and the digest —
-and never into approval or phase. A restart therefore always **re-reviews** the live
-head/base with a fresh nonce: a historical `approved` (any head, with or without a
-nonce) cannot terminate a new session, and an unfixed rejection is re-stated by a
-fresh review rather than trusted as a fix instruction. And because the fixer is the
-terminal that receives WRITE-and-push instructions, its identity is **proven, not
-assumed**: both pinned handles must be live+writable in the current orca listing, and
-the fixer's `worktreePath` must be a git checkout whose `origin` IS the PR's repo —
-re-proven before EVERY fix dispatch to be sitting on the PR's topic branch, **clean**
-(no uncommitted or untracked state to leak into pushed commits), and with `HEAD`
-**equal to the round's live PR head** (a stale checkout would build the fix on the
-wrong base). Anything unprovable fails closed before a single character is typed.
-
-Per round: dispatch the review → poll `gh` until a verdict comment lands on the CURRENT
-head (new comments are detected by a comment-INDEX baseline, immune to local↔GitHub
-clock skew) → `approved` halts for YOUR merge → otherwise dispatch the fix → poll until
-the head advances **fast-forward** (a diverged compare = force-push/rebase = halt) AND a
-`fixed:` evidence comment lands → next round. Convergence guards, all deterministic:
-
-- `MAX_ROUNDS=5` — pipeline PR #39 needed 8 rounds WITH a human curating each one and a
-  mid-course strategy pivot; an unattended loop past ~5 is more likely ping-pong or
-  reviewer scope-growth than progress, and a PR that genuinely needs more deserves a
-  human read mid-way. Early halt is information, not friction.
-- no-progress halt — `findings:` failed to **provably** decrease for 2 consecutive
-  reviews. A decrease is proven only between two LIVE nonce-bound verdicts: a
-  missing or unparseable count, and any comparison against an unauthenticated
-  historical value, count as no progress — so neither protocol drift nor forged
-  history can smuggle convergence (history can only GROW the streak, never reset
-  it). Biased fail-closed on purpose: a genuinely-deepening review (PR #39 rounds
-  7→8) also trips it, and that too is a moment a human should look.
-- `HUNT_AFTER=3` — from that fix dispatch on, the fix prompt switches to root-cause
-  mode (reproduce + confirm cause + state the restored invariant before patching): the
-  move that actually closed PR #39.
-
-Every halt prints a per-round digest (verdict, findings count, head, comment URL) — the
-PR thread is the only memory, so the human enters with full context. The full halt
-table lives in stop-points.md §review-drive.
-
-**Merge safety, precisely** (same posture as §Merge safety above): the durable gate is
-control flow — the loop contains no merge call, `approved` halts for the operator, and
-a PR merged/closed behind its back halts on detection. The dispatch prompts forbid
-merging, but a prompt is a speed-bump, not a boundary: the TUI agents run under the
-operator's own `gh` auth, so the hard lines remain the trunk rulesets (§Setup step 5)
-and the operator reading the PR before performing the merge.
-
-Run: pin the two handles in `review-drive.config` (copy the example; the reviewer
-terminal shares `REVIEW_TERMINAL_HANDLE` with the one-key relay), then
-`./review-drive.sh <pr-number-or-url>` and type the PR number at the start gate.
-Deps: `gh` (authed), `jq`, `orca`, both TUIs live in Orca terminals.
+**Meta-PR review relay — not here.** The review↔fix shuttle for a toolchain-repo PR
+lives in the `pipeline-coordinate` playbook (Profile A): a CC session dispatches the
+fixer and reviewer panes over Herdr and reads verdicts off the PR itself. The driver
+carries no second implementation of it — `review-drive.sh` and the one-key relay were
+retired with the orca transport. At the `NEXT=review` halt the driver just prints its
+banner and exits; the coordinator (or you) dispatches `pipeline-review` from there.
 
 ## coordinate.sh — cross-stage preflight + summary
 
@@ -480,7 +355,7 @@ becomes a machine check instead of an eyeball of the pane footer.
 
 ## Failure / resume / rollback
 
-**drive.sh** (journal/card machinery — does NOT apply to review-drive):
+**drive.sh** (journal/card machinery):
 
 - **Zero state → kill+restart is safe.** Restart `./drive.sh`; it re-folds the
   journal tail from `origin/<BRANCH>` and resumes the live position.
@@ -493,22 +368,6 @@ becomes a machine check instead of an eyeball of the pane footer.
   force-/delete-pushes best-effort (a wrapped command can bypass string matching — see
   *Merge safety*). On the normal forge path the worst a runaway driver does is push code
   commits to `feat/<feature>` — revertable.
-
-**review-drive.sh** (no journal, no cards, no frozen spec, no `deny-merge.sh` — its
-state bus and guards are the PR itself):
-
-- **Zero state → kill+restart RESUMES fail-closed.** Same-author verdict history is
-  folded only into the round budget, no-progress streak and digest (quantities a
-  forged comment can only tighten); approval and phase are never taken from history —
-  the restart re-reviews the live head/base with a fresh nonce (§review-drive).
-- **Mid-round kill** leaves at most a dispatched TUI still working; on restart the
-  resume scan either counts its verdict (budget) or the fresh review supersedes it.
-  Nothing is stranded — the PR is the only memory.
-- **Blast radius:** worst case is commits on the PR topic branch plus PR comments —
-  both revertable; trunk is never touched. The loop contains no merge call; a merge
-  behind its back halts on detection; the durable lines are the protocol
-  authentication, the trunk rulesets, and the human-confirm before the reviewer's
-  squash-merge (§review-drive *Merge safety, precisely*).
 
 ## Relationship to the contract
 

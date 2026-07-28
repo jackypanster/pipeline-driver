@@ -14,7 +14,7 @@ pass=0 fail=0
 ok()   { pass=$((pass+1)); echo "ok   $1"; }
 bad()  { fail=$((fail+1)); echo "FAIL $1"; }
 
-# seed_repo <root> <ncards>  — same journal/card fixtures as test/e2e-orca.sh, herdr cfg
+# seed_repo <root> <ncards>  — journal/card fixtures + a herdr-transport drive.config
 seed_repo() {
   local ROOT=$1 ncards=$2
   git init -q --bare "$ROOT/origin.git"
@@ -267,8 +267,7 @@ echo "$out" | grep -q 'NOT authoritative' && [ ! -s "$R/runs.log" ] \
 rm -rf "$R"
 
 # 14) doctor: IMPL_TRANSPORT=herdr -> herdr checked on PATH (ok with stub, MISS without).
-#     PATH is RESTRICTED both times: doctor's info sections shell the real `orca`
-#     when present, which hangs without a running Orca app — keep it hermetic.
+#     PATH is RESTRICTED both times so the probe only ever sees the stubs.
 R=$(mktemp -d); seed_repo "$R" 1; stub_herdr "$R"
 out=$(DRIVE_DEFAULTS=/nonexistent PATH="$R/bin:/usr/bin:/bin" bash "$DRIVER/drive.sh" doctor "$R/cfg" 2>&1)
 echo "$out" | grep -q 'ok    herdr on PATH (IMPL_TRANSPORT=herdr)' || bad "doctor herdr ok: $out"
