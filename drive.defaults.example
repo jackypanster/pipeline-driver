@@ -57,6 +57,19 @@ YOLO=0
 # PIPELINE_REPO=$HOME/workspace/pipeline
 # DASHBOARD_REPO=$HOME/workspace/pipeline-dashboard
 # SKILLS_DIR=$HOME/.agents/skills
+# SKILL_MOUNTS — space-separated RUNTIME skill dirs that `drive.sh doctor` sweeps
+# for stale pipeline-* mounts (bash default IFS: space/tab/newline). For every
+# pipeline-* entry E in each listed dir M, doctor verifies E agrees with
+# $SKILLS_DIR/<name>: a symlink must resolve to it (physical path via cd+pwd -P,
+# so an absolute and a relative link to the same target compare EQUAL — do not
+# match on readlink's raw string), and a real dir must match `diff -rq`. A wrong-
+# target/dangling symlink or a drifted real dir is BLOCKING — that drift is the
+# "codex ran a stale pipeline-review" incident doctor used to miss (it only checked
+# the two hard-coded dirs below). A skill merely ABSENT from a mount is not flagged
+# (a runtime need not carry every skill — ~/.pi/agent/skills only has pipeline-impl).
+# Empty/unset = info-skip, NEVER blocking, so existing installs upgrade cleanly.
+# Example value is THIS machine's canonical multi-runtime layout:
+# SKILL_MOUNTS="$HOME/.codex/skills $HOME/.claude/skills $HOME/.pi/agent/skills"
 
 # --- board auto-refresh -------------------------------------------------------------
 # Non-empty = re-render the read-only dashboard here after GATE 1, after every

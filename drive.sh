@@ -103,6 +103,10 @@ SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
 # Where the TUI-transport agent (herdr; e.g. pi) loads skills from — doctor
 # checks the impl slot resolves THERE, since that is the runtime that runs the stage.
 TUI_SKILLS_DIR="${TUI_SKILLS_DIR:-$HOME/.pi/agent/skills}"
+# Runtime skill dirs (space-separated) that `drive.sh doctor` sweeps for stale
+# pipeline-* mounts — each entry must resolve to / match $SKILLS_DIR/<name>. Empty
+# = info-skip (never blocking). See drive.defaults.example for the full semantics.
+SKILL_MOUNTS="${SKILL_MOUNTS:-}"
 # Board auto-refresh: non-empty BOARD_OUT re-renders the read-only dashboard there
 # after GATE 1, after every advanced card, and on halt. Best-effort side effect —
 # a render failure never halts the loop.
@@ -285,7 +289,25 @@ doctor() {
        "git clone https://github.com/jackypanster/pipeline.git $PIPELINE_REPO   # or set PIPELINE_REPO in $DEFAULTS"; fi
   if [ -d "$DASHBOARD_REPO/.git" ]; then
     d_ok "dashboard repo at $DASHBOARD_REPO"
-    if [ -f "$DASHBOARD_REPO/dist/cli.js" ]; then d_ok "dashboard built (dist/cli.js)"
+    if [ -f "$DASHBOARD_REPO/dist/cli.js" ]; then
+      d_ok "dashboard built (dist/cli.js)"
+      # Freshness: dist/cli.js must not predate the tracked sources. Catches the real
+      # "git pull'd new sources, forgot `npm run build`" case — dashboard is the one
+      # sibling whose deploy step is NOT just `git pull` (build = tsc && chmod +x).
+      # KNOWN LIMITATION (exactly why this is a WARN, not blocking): a fresh clone has
+      # every file at checkout mtime, so dist/cli.js is never older and this silently
+      # passes — it is not a constructively-correct freshness proof. Do NOT substitute
+      # HEAD commit time: `git pull` only bumps mtimes on CHANGED files, so a commit-
+      # time comparison would false-report in several normal cases. `find -newer` is
+      # POSIX and `-print -quit` stops at the first hit; no `stat -f %m`/`stat -c %Y`
+      # branching is opened (the repo has zero `stat` calls and we keep it that way).
+      if find "$DASHBOARD_REPO/src" "$DASHBOARD_REPO/package.json" "$DASHBOARD_REPO/tsconfig.json" \
+             -newer "$DASHBOARD_REPO/dist/cli.js" -print -quit 2>/dev/null | grep -q .; then
+        d_warn "dashboard dist/cli.js is stale (a tracked source is newer)" \
+          "(cd $DASHBOARD_REPO && npm run build)"
+      else
+        d_ok "dashboard dist/cli.js is up to date"
+      fi
     else d_miss "dashboard not built (no dist/cli.js)" "(cd $DASHBOARD_REPO && npm install && npm run build)"; fi
   else
     d_miss "dashboard repo not found at $DASHBOARD_REPO" \
@@ -297,6 +319,89 @@ doctor() {
   if [ -d "$SKILLS_DIR/pipeline-impl" ]; then d_ok "pipeline-impl shim in $SKILLS_DIR"
   else d_miss "pipeline-impl shim not in $SKILLS_DIR" \
        "cp -r $PIPELINE_REPO/skills/pipeline-* $SKILLS_DIR/   # then attach each runtime (pipeline README §Install)"; fi
+
+  # Sweep every DECLARED runtime mount (SKILL_MOUNTS, space-separated): each
+  # pipeline-* entry in each listed dir is checked against $SKILLS_DIR/<name>. This
+  # is the check that catches the incident doctor used to miss — a review runtime
+  # ran a stale pipeline-review (a real dir whose content had drifted from
+  # canonical) while doctor reported 0 blocking, because that runtime's skill dir
+  # was not among the two hard-coded ones above. Classification mirrors
+  # pipeline-update's update.sh: physical-path equality for symlinks (cd + pwd -P,
+  # NOT readlink's raw string — an absolute and a relative link to the same target
+  # must compare equal), diff -rq for real dirs, and a skill merely ABSENT from a
+  # mount is not flagged (a runtime need not carry every skill). Empty SKILL_MOUNTS
+  # = info-skip, never blocking — existing installs must not go red on upgrade.
+  # sweep_skill_mount <mount-dir> <canon-phys>  (nested so it sees d_ok/d_miss/...)
+  sweep_skill_mount() {
+    local M="$1" canon_phys="$2" E name canon_entry src_phys tgt diff_out diff_rc
+    for E in "$M"/pipeline-*; do
+      [ -e "$E" ] || [ -L "$E" ] || continue   # glob didn't expand / no pipeline-* -> next
+      name=$(basename "$E")
+      canon_entry="$SKILLS_DIR/$name"
+      src_phys=$(cd "$canon_entry" 2>/dev/null && pwd -P || true)
+      if [ -z "$src_phys" ]; then
+        d_info "$name in $M has no canonical $canon_entry to compare"
+        continue
+      fi
+      if [ -L "$E" ]; then
+        # cd fails = dangling (target gone). readlink's stored target is printed for
+        # the human even when dangling, so they can see what it pointed at.
+        tgt=$(cd "$E" 2>/dev/null && pwd -P || true)
+        if [ -z "$tgt" ]; then
+          d_miss "dangling symlink: $E -> $(readlink "$E" 2>/dev/null || printf '?')" \
+            "rm $E && ln -s $canon_entry $E"
+        elif [ "$tgt" = "$src_phys" ]; then
+          d_ok "$name in $M -> $src_phys"
+        else
+          d_miss "$name in $M -> $tgt (expected $src_phys)" \
+            "rm $E && ln -s $canon_entry $E"
+        fi
+      elif [ -d "$E" ]; then
+        # diff -rq: rc 0 = identical, 1 = differs, >=2 = error. ANY stderr voids
+        # trust (BSD diff can warn and still exit 0 — reproduced in update.sh).
+        diff_out=$(diff -rq "$canon_entry" "$E" 2>&1 >/dev/null) && diff_rc=0 || diff_rc=$?
+        if [ -n "$diff_out" ] || [ "$diff_rc" -ge 2 ]; then
+          d_warn "cannot trust diff for $name in $M (rc=$diff_rc)" \
+            "check the paths/permissions, then re-run doctor"
+        elif [ "$diff_rc" = 0 ]; then
+          d_ok "$name in $M matches $canon_entry"
+        else
+          d_miss "$name in $M differs from $canon_entry (stale copy)" \
+            "rm -rf $E && ln -s $canon_entry $E"
+        fi
+      else
+        d_miss "$name in $M is neither a dir nor a symlink" \
+          "rm $E && ln -s $canon_entry $E"
+      fi
+    done
+  }
+  if [ -z "${SKILL_MOUNTS:-}" ]; then
+    d_info "SKILL_MOUNTS unset — runtime mount sweep skipped (the two hard-coded dirs above are still checked). To enable, set SKILL_MOUNTS in $DEFAULTS to the space-separated runtime skill dirs (e.g. \$HOME/.codex/skills \$HOME/.claude/skills \$HOME/.pi/agent/skills)"
+  elif [ ! -d "$SKILLS_DIR" ]; then
+    d_info "SKILL_MOUNTS set but SKILLS_DIR $SKILLS_DIR is not a dir — mount sweep skipped (fix canonical first)"
+  else
+    canon_phys=$(cd "$SKILLS_DIR" && pwd -P)
+    for M in $SKILL_MOUNTS; do
+      # A declared mount that is itself a dangling symlink is an active breakage.
+      if [ -L "$M" ] && [ ! -e "$M" ]; then
+        d_miss "declared SKILL_MOUNTS entry is a dangling symlink: $M -> $(readlink "$M" 2>/dev/null || printf '?')" \
+          "fix or remove the link, or drop $M from SKILL_MOUNTS in $DEFAULTS"
+        continue
+      fi
+      # A declared mount that simply isn't there: warn (not blocking) — the operator
+      # may have listed a runtime they have not installed; the sweep's job is stale
+      # ENTRIES, and absence is not a stale entry.
+      if [ ! -d "$M" ]; then
+        d_warn "declared SKILL_MOUNTS dir not found: $M" \
+          "create it, or drop $M from SKILL_MOUNTS in $DEFAULTS"
+        continue
+      fi
+      # Skip self: the canonical dir IS the reference, not a subject.
+      m_phys=$(cd "$M" && pwd -P 2>/dev/null || true)
+      [ -n "$m_phys" ] && [ "$m_phys" = "$canon_phys" ] && continue
+      sweep_skill_mount "$M" "$canon_phys"
+    done
+  fi
 
   printf -- '--- config ----------------------------------------------------------\n'
   if [ -f "$DEFAULTS" ]; then d_ok "global defaults: $DEFAULTS"

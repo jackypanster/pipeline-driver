@@ -174,6 +174,7 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
 | `test/e2e-herdr.sh` | hermetic e2e for the herdr transport (stub `herdr`; guards, self-pane, fail-closed) |
 | `test/preflight.sh` | regression tests for `clobber-guard.sh` (both / only-one / empty) |
 | `test/defaults-doctor.sh` | hermetic tests for the defaults layer + `drive.sh doctor` |
+| `test/doctor-mounts.sh` | hermetic tests for the `SKILL_MOUNTS` sweep + dashboard freshness (`drive.sh doctor`) |
 | `test/board.sh` | hermetic tests for `BOARD_OUT` auto-refresh + the review halt shape |
 | `coordinate.sh` | read-only `doctor` + `status` — the COMPLETE surface (the `watch`/`resume` dispatch half was rejected: PR #14 closed; pivot in design v1.3 §25); the cross-stage sibling of `drive.sh`, see §coordinate.sh |
 | `coordinate.config.example` | per-repo config for it (copy to `coordinate.config`): observer + CC/Pi/Codex clones, command prefixes |
@@ -212,11 +213,12 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    403 (then trunk-clobber protection is unavailable; rely on the driver's never-force-push
    discipline). This does **not** gate the feature-PR merge — see *Merge safety* for why the
    merge gate is control-flow (solo) or a bot identity (team), not a `require-PR` rule.
-6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/board.sh && bash test/notify-hook.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-watchdog.sh && bash test/coordinate-bindings.sh` — all must pass.
+6. `bash test/run.sh && bash test/hook.sh && bash test/preflight.sh && bash test/e2e.sh && bash test/e2e-herdr.sh && bash test/defaults-doctor.sh && bash test/doctor-mounts.sh && bash test/board.sh && bash test/notify-hook.sh && bash test/coordinate-parse.sh && bash test/coordinate-config.sh && bash test/coordinate-doctor.sh && bash test/coordinate-status.sh && bash test/coordinate-remote.sh && bash test/coordinate-watchdog.sh && bash test/coordinate-bindings.sh` — all must pass.
 7. `./drive.sh doctor` — install/config diagnosis for the pipeline + dashboard + driver trio
-   (deps, sibling repos, dashboard build, skills attachment, config files). Every MISS
-   prints the exact remediation command; it installs nothing
-   and touches no network. Re-run until `0 blocking`.
+   (deps, sibling repos, dashboard build AND freshness, skills attachment, declared
+   runtime skill mounts via `SKILL_MOUNTS`, config files). Every MISS prints the
+   exact remediation command; it installs nothing and touches no network. Re-run
+   until `0 blocking`.
 
 ## Per-feature flow
 
