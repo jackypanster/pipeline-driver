@@ -103,6 +103,12 @@ SKILLS_DIR="${SKILLS_DIR:-$HOME/.agents/skills}"
 # Where the TUI-transport agent (herdr; e.g. pi) loads skills from — doctor
 # checks the impl slot resolves THERE, since that is the runtime that runs the stage.
 TUI_SKILLS_DIR="${TUI_SKILLS_DIR:-$HOME/.pi/agent/skills}"
+# Runtime skill dirs (whitespace-separated) that `drive.sh doctor` sweeps for
+# stale pipeline-* mounts — each entry must resolve to / match $SKILLS_DIR/<name>.
+# REQUIRED: unset/empty is BLOCKING (an undeclared inventory is a dead check); the
+# literal opt-out is SKILL_MOUNTS=none. Entries must be ABSOLUTE. See
+# drive.defaults.example for the full semantics.
+SKILL_MOUNTS="${SKILL_MOUNTS:-}"
 # Board auto-refresh: non-empty BOARD_OUT re-renders the read-only dashboard there
 # after GATE 1, after every advanced card, and on halt. Best-effort side effect —
 # a render failure never halts the loop.
@@ -248,7 +254,7 @@ show_origin() { git_q show "origin/$BRANCH:$1" 2>/dev/null; }   # read a path fr
 # MISS. Installs nothing, touches no network (freshness is pipeline-update's job).
 # MISS = blocks a drive run (exit 1). warn = degraded but drivable. info = context.
 doctor() {
-  local bad=0 warn=0 slot
+  local bad=0 warn=0 slot canon_phys M m_phys
   d_ok()   { printf 'ok    %s\n' "$1"; }
   d_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; bad=$((bad+1)); }
   d_warn() { printf 'warn  %s\n      %s\n' "$1" "$2"; warn=$((warn+1)); }
@@ -285,7 +291,25 @@ doctor() {
        "git clone https://github.com/jackypanster/pipeline.git $PIPELINE_REPO   # or set PIPELINE_REPO in $DEFAULTS"; fi
   if [ -d "$DASHBOARD_REPO/.git" ]; then
     d_ok "dashboard repo at $DASHBOARD_REPO"
-    if [ -f "$DASHBOARD_REPO/dist/cli.js" ]; then d_ok "dashboard built (dist/cli.js)"
+    if [ -f "$DASHBOARD_REPO/dist/cli.js" ]; then
+      d_ok "dashboard built (dist/cli.js)"
+      # Freshness: dist/cli.js must not predate the tracked sources. Catches the real
+      # "git pull'd new sources, forgot `npm run build`" case — dashboard is the one
+      # sibling whose deploy step is NOT just `git pull` (build = tsc && chmod +x).
+      # KNOWN LIMITATION (exactly why this is a WARN, not blocking): a fresh clone has
+      # every file at checkout mtime, so dist/cli.js is never older and this silently
+      # passes — it is not a constructively-correct freshness proof. Do NOT substitute
+      # HEAD commit time: `git pull` only bumps mtimes on CHANGED files, so a commit-
+      # time comparison would false-report in several normal cases. `find -newer` is
+      # POSIX and `-print -quit` stops at the first hit; no `stat -f %m`/`stat -c %Y`
+      # branching is opened (the repo has zero `stat` calls and we keep it that way).
+      if find "$DASHBOARD_REPO/src" "$DASHBOARD_REPO/package.json" "$DASHBOARD_REPO/tsconfig.json" \
+             -newer "$DASHBOARD_REPO/dist/cli.js" -print -quit 2>/dev/null | grep -q .; then
+        d_warn "dashboard dist/cli.js is stale (a tracked source is newer)" \
+          "(cd $DASHBOARD_REPO && npm run build)"
+      else
+        d_ok "dashboard dist/cli.js is up to date"
+      fi
     else d_miss "dashboard not built (no dist/cli.js)" "(cd $DASHBOARD_REPO && npm install && npm run build)"; fi
   else
     d_miss "dashboard repo not found at $DASHBOARD_REPO" \
@@ -297,6 +321,152 @@ doctor() {
   if [ -d "$SKILLS_DIR/pipeline-impl" ]; then d_ok "pipeline-impl shim in $SKILLS_DIR"
   else d_miss "pipeline-impl shim not in $SKILLS_DIR" \
        "cp -r $PIPELINE_REPO/skills/pipeline-* $SKILLS_DIR/   # then attach each runtime (pipeline README §Install)"; fi
+
+  # Sweep every DECLARED runtime mount (SKILL_MOUNTS). Each pipeline-* entry in
+  # each declared mount is checked against $SKILLS_DIR/<name> — this is the check
+  # that catches the incident doctor used to miss (a review runtime ran a stale
+  # pipeline-review whose content had drifted, while doctor reported 0 blocking,
+  # because that runtime's skill dir was not among the two hard-coded ones above).
+  # Classification mirrors pipeline-update's update.sh: physical-path equality for
+  # symlinks (cd + pwd -P, NOT readlink's raw string — an absolute and a relative
+  # link to the same target must compare equal), and diff -rq for real dirs.
+  #
+  # INVENTORY IS REQUIRED (review F1): SKILL_MOUNTS unset/empty is BLOCKING, not
+  # info-skip. An undeclared inventory is structurally unable to fail (the check is
+  # dead), and the "smooth-upgrade" info-skip bought exactly that silent hole. Two
+  # ways to clear it: declare the real mounts, or the literal opt-out `none`. To
+  # keep `none` unambiguous, entries MUST be ABSOLUTE — a relative one is blocking.
+  # This is the only choice where no install can reach 0 blocking without first
+  # answering the inventory question, while the drive.sh logic layer carries zero
+  # runtime brand names (auto-discovery / candidate-list alternatives rejected —
+  # both hard-code brand names AND still miss a future 5th runtime silently).
+  #
+  # FAIL CLOSED (review F2): every "cannot verify" state is a MISS, never silent.
+  # An untrusted diff (F2.1), an entry with no canonical counterpart (F2.2), or a
+  # mount that cannot be enumerated (F2.3) all block. (A skill merely ABSENT from
+  # a READABLE mount is still not flagged — a runtime need not carry every skill;
+  # that is the normal ~/.pi/agent/skills = pipeline-impl-only form, and it is a
+  # DIFFERENT event from "present in the mount but no canonical base".)
+  #
+  # sweep_skill_mount <mount-dir> <canon-phys>  (nested so it sees d_ok/d_miss/...)
+  sweep_skill_mount() {
+    local M="$1" canon_phys="$2" E name canon_entry src_phys tgt diff_out diff_rc
+    # Unreadable / non-searchable mount: the glob below would leave its literal
+    # pattern, `[ -e ]` would be false, and the body would `continue` — doctor
+    # exits 0 without ever enumerating. A declared mount we cannot list is NOT
+    # verified, so fail closed up front (review F2.3).
+    if [ ! -r "$M" ] || [ ! -x "$M" ]; then
+      d_miss "declared mount not searchable: $M (cannot enumerate pipeline-* entries)" \
+        "chmod +rx $M   # or drop $M from SKILL_MOUNTS in $DEFAULTS"
+      return
+    fi
+    for E in "$M"/pipeline-*; do
+      [ -e "$E" ] || [ -L "$E" ] || continue   # glob didn't expand / no pipeline-* -> next
+      name=$(basename "$E")
+      canon_entry="$SKILLS_DIR/$name"
+      src_phys=$(cd "$canon_entry" 2>/dev/null && pwd -P || true)
+      # Entry present in the mount but no canonical base to compare against = cannot
+      # verify = MISS (review F2.2). NOT the same as "skill absent from this mount"
+      # (this loop never visits an absent skill) — present-but-no-base is the miss.
+      if [ -z "$src_phys" ]; then
+        d_miss "$name in $M has no canonical $canon_entry to compare against" \
+          "add $name to $SKILLS_DIR (pipeline-update), or drop $name from $M"
+        continue
+      fi
+      if [ -L "$E" ]; then
+        # cd fails = dangling (target gone). readlink's stored target is printed for
+        # the human even when dangling, so they can see what it pointed at.
+        tgt=$(cd "$E" 2>/dev/null && pwd -P || true)
+        if [ -z "$tgt" ]; then
+          d_miss "dangling symlink: $E -> $(readlink "$E" 2>/dev/null || printf '?')" \
+            "rm $E && ln -s $canon_entry $E"
+        elif [ "$tgt" = "$src_phys" ]; then
+          d_ok "$name in $M -> $src_phys"
+        else
+          d_miss "$name in $M -> $tgt (expected $src_phys)" \
+            "rm $E && ln -s $canon_entry $E"
+        fi
+      elif [ -d "$E" ]; then
+        # diff -rq: rc 0 = identical, 1 = differs, >=2 = error. ANY stderr voids
+        # trust (BSD diff can warn and still exit 0 — reproduced in update.sh), and
+        # an untrusted comparison is NOT a pass -> MISS (review F2.1).
+        diff_out=$(diff -rq "$canon_entry" "$E" 2>&1 >/dev/null) && diff_rc=0 || diff_rc=$?
+        if [ -n "$diff_out" ] || [ "$diff_rc" -ge 2 ]; then
+          d_miss "cannot trust diff for $name in $M (rc=$diff_rc) — unverifiable is not verified" \
+            "check the paths/permissions under $canon_entry and $E, then re-run doctor"
+        elif [ "$diff_rc" = 0 ]; then
+          d_ok "$name in $M matches $canon_entry"
+        else
+          d_miss "$name in $M differs from $canon_entry (stale copy)" \
+            "rm -rf $E && ln -s $canon_entry $E"
+        fi
+      else
+        d_miss "$name in $M is neither a dir nor a symlink" \
+          "rm $E && ln -s $canon_entry $E"
+      fi
+    done
+  }
+  if [ -z "${SKILL_MOUNTS:-}" ]; then
+    d_miss "SKILL_MOUNTS unset — doctor cannot verify runtime skill mounts without the inventory" \
+      "declare them in $DEFAULTS: SKILL_MOUNTS=\"\$HOME/.codex/skills \$HOME/.claude/skills \$HOME/.pi/agent/skills\"   # or, if this machine has no other mounts: SKILL_MOUNTS=none"
+  elif [ "$SKILL_MOUNTS" = "none" ]; then
+    d_info "SKILL_MOUNTS=none — explicit opt-out: this machine declares no runtime mounts beyond the two checked above"
+  elif [ ! -d "$SKILLS_DIR" ]; then
+    d_info "SKILL_MOUNTS set but SKILLS_DIR $SKILLS_DIR is not a dir — mount sweep skipped (fix canonical first)"
+  else
+    canon_phys=$(cd "$SKILLS_DIR" && pwd -P)
+    # Parser (F3 + F4): bind a LOCAL whitespace IFS — drive.defaults is sourced
+    # (`. `), so a hostile IFS=_ there would split a valid path containing `_` into
+    # two bogus entries, the real (stale) mount is never scanned, and doctor exits
+    # 0 (review F3). NORMALIZE tabs/newlines to spaces BEFORE `read -ra`: read
+    # stops at the first newline, so a multi-line value would silently drop every
+    # token past line 1 (review F4.1). The parameter expansions are IFS-independent
+    # and the value stays quoted throughout, so pathname expansion never happens
+    # (no `set -f` save/restore) and the ambient IFS cannot corrupt the split.
+    # bash 3.2-safe; `local IFS` is restored on return.
+    local IFS=$' \t\n'
+    local _norm=${SKILL_MOUNTS//$'\t'/ }
+    _norm=${_norm//$'\n'/ }
+    local -a mounts=()
+    read -ra mounts <<< "$_norm"
+    # F4.2: raw value non-empty (and not the `none` sentinel, handled above) but
+    # parsed to zero entries (whitespace only) = declared nothing verifiable =
+    # fail closed. Sibling to the for-loop: on empty it records the MISS, then the
+    # loop iterates zero times; on non-empty it is a no-op and the loop sweeps.
+    if [ "${#mounts[@]}" -eq 0 ]; then
+      d_miss "SKILL_MOUNTS set but parsed to no entries (whitespace only) — cannot verify" \
+        "declare an absolute mount path, or set SKILL_MOUNTS=none in $DEFAULTS"
+    fi
+    for M in ${mounts[@]+"${mounts[@]}"}; do
+      # Absolute-path enforcement: a non-`/`-leading entry is ambiguous. The whole-
+      # list `none` sentinel was handled above, so any other relative entry here is
+      # a config error. This also closes a second fail-open (a relative path silently
+      # warned "missing" instead of naming the real mistake).
+      case $M in
+        /*) ;;
+        *) d_miss "SKILL_MOUNTS entry must be an absolute path: $M" \
+             "fix or remove $M in $DEFAULTS, or set SKILL_MOUNTS=none"; continue ;;
+      esac
+      # A declared mount that is itself a dangling symlink is an active breakage.
+      if [ -L "$M" ] && [ ! -e "$M" ]; then
+        d_miss "declared SKILL_MOUNTS entry is a dangling symlink: $M -> $(readlink "$M" 2>/dev/null || printf '?')" \
+          "fix or remove the link, or drop $M from SKILL_MOUNTS in $DEFAULTS"
+        continue
+      fi
+      # A declared mount that simply isn't there: warn (not blocking) — the operator
+      # may have listed a runtime they have not installed; the sweep's job is stale
+      # ENTRIES, and absence is not a stale entry.
+      if [ ! -d "$M" ]; then
+        d_warn "declared SKILL_MOUNTS dir not found: $M" \
+          "create it, or drop $M from SKILL_MOUNTS in $DEFAULTS"
+        continue
+      fi
+      # Skip self: the canonical dir IS the reference, not a subject.
+      m_phys=$(cd "$M" && pwd -P 2>/dev/null || true)
+      [ -n "$m_phys" ] && [ "$m_phys" = "$canon_phys" ] && continue
+      sweep_skill_mount "$M" "$canon_phys"
+    done
+  fi
 
   printf -- '--- config ----------------------------------------------------------\n'
   if [ -f "$DEFAULTS" ]; then d_ok "global defaults: $DEFAULTS"

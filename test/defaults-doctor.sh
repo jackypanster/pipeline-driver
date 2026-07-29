@@ -58,6 +58,7 @@ cat > "$TMP/defaults3" <<EOF
 PIPELINE_REPO=$TMP/pipeline
 DASHBOARD_REPO=$TMP/dashboard
 SKILLS_DIR=$TMP/skills
+SKILL_MOUNTS=none
 YOLO=1
 EOF
 out=$(DRIVE_DEFAULTS="$TMP/defaults3" PATH="$TMP/bin:/usr/bin:/bin" bash "$DRIVE" doctor "$TMP/no-such.config" 2>&1); rc=$?
@@ -116,6 +117,7 @@ cat > "$TMP/defaults5" <<EOF
 PIPELINE_REPO=$TMP/pipeline
 DASHBOARD_REPO=$TMP/dashboard
 SKILLS_DIR=$TMP/skills
+SKILL_MOUNTS=none
 IMPL_TRANSPORT=herdr
 TUI_SKILLS_DIR=$TMP/tui
 EOF
