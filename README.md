@@ -220,6 +220,30 @@ you performing the merge; the hook and trunk-clobber ruleset are hardening, not 
    exact remediation command; it installs nothing and touches no network. Re-run
    until `0 blocking`.
 
+## Update
+
+The driver is a read-only consumer clone with no build step — refreshing it is one guarded pull.
+Preflight first: tracked files must be clean (untracked files such as your `drive.config` are normal
+and allowed). `--ff-only` refuses a diverged history; on any refusal inspect by hand —
+**never reset, never stash blindly.**
+
+```bash
+git -C ~/workspace/pipeline-driver status --porcelain --untracked-files=no | grep -q . \
+  && { echo "local edits to tracked files — inspect before updating" >&2; exit 1; }
+git -C ~/workspace/pipeline-driver pull --ff-only
+```
+
+Then re-verify: `./drive.sh doctor drive.config` (expect `0 blocking`) plus the full suite in
+§Setup step 6.
+
+The other two update on their own tracks. `pipeline-*` shims: the pipeline repo's `pipeline-update`,
+run against the **canonical** skills dir (pipeline README §Update). `pipeline-dashboard`:
+`git pull --ff-only` **plus `npm run build`** — the only sibling where a pull is not enough,
+since `dist/cli.js` is a build artifact. doctor warns when it goes stale (a tracked source is newer)
+rather than blocking: the mtime check reliably catches a forgotten post-pull build, but a fresh clone
+has every file at checkout mtime, so it is a "forgot to build" signal, not a constructive freshness
+proof.
+
 ## Per-feature flow
 
 ```
