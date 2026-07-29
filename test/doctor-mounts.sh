@@ -187,6 +187,34 @@ if [ "$rc" -eq 1 ] && grep -q "pipeline-review in $M_US differs from $CANON/pipe
   ok "F3: IFS=_ cannot split an underscored stale mount (was 0 blocking on 50a2b04)"
 else bad "F3 IFS=_ (rc=$rc)" "$out"; fi
 
+# === F4: the F3 parser's own holes =============================================
+# F4.1: multi-line value — read -ra used to stop at the first newline, so a healthy
+# first mount + a genuinely STALE second mount silently dropped line 2 -> 0 blocking.
+# Every whitespace-separated token, on any line, must now reach the sweep.
+M_HLTH="$TMP/m_hlth"; mkdir -p "$M_HLTH"; ln -s "$CANON/pipeline-impl" "$M_HLTH/pipeline-impl"
+M_STL2="$TMP/m_stale2"; mkdir -p "$M_STL2/pipeline-review"; printf 'STALE\n' > "$M_STL2/pipeline-review/SKILL.md"
+cat > "$TMP/f41.defaults" <<EOF
+$(cat "$TMP/base.defaults")
+SKILL_MOUNTS="$M_HLTH
+$M_STL2"
+EOF
+out=$(run "$TMP/f41.defaults"); rc=$?
+if [ "$rc" -eq 1 ] && grep -q "pipeline-impl in $M_HLTH -> " <<<"$out" \
+   && grep -q "pipeline-review in $M_STL2 differs from $CANON/pipeline-review (stale copy)" <<<"$out"; then
+  ok "F4.1: multi-line value — stale 2nd mount IS scanned (was dropped on bb5e575)"
+else bad "F4.1 multi-line (rc=$rc)" "$out"; fi
+
+# F4.2: non-empty but whitespace-only value bypassed the raw -z check, parsed to
+# zero entries, and exited 0 without using the `none` sentinel. Must now block.
+cat "$TMP/base.defaults" > "$TMP/f42.defaults"
+cat >> "$TMP/f42.defaults" <<'LINE'
+SKILL_MOUNTS=$' \t '
+LINE
+out=$(run "$TMP/f42.defaults"); rc=$?
+if [ "$rc" -eq 1 ] && grep -q "SKILL_MOUNTS set but parsed to no entries (whitespace only)" <<<"$out"; then
+  ok "F4.2: whitespace-only value -> blocking (was 0 on bb5e575)"
+else bad "F4.2 whitespace-only (rc=$rc)" "$out"; fi
+
 # --- declared mount not found = warn (not blocking); dangling mount = blocking ----
 MN="$TMP/nope-missing"
 out=$(run "$(cfg "SKILL_MOUNTS=$MN")"); rc=$?

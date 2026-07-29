@@ -415,18 +415,28 @@ doctor() {
     d_info "SKILL_MOUNTS set but SKILLS_DIR $SKILLS_DIR is not a dir — mount sweep skipped (fix canonical first)"
   else
     canon_phys=$(cd "$SKILLS_DIR" && pwd -P)
-    # Bind a LOCAL whitespace IFS to parse the list — drive.defaults is sourced
+    # Parser (F3 + F4): bind a LOCAL whitespace IFS — drive.defaults is sourced
     # (`. `), so a hostile IFS=_ there would split a valid path containing `_` into
     # two bogus entries, the real (stale) mount is never scanned, and doctor exits
-    # 0 (review F3 reproduction). `local IFS` is bash-3.2-safe and restored on
-    # return. read -ra + the QUOTED array iteration also sidestep pathname expansion
-    # (no `set -f` save/restore needed): $SKILL_MOUNTS is expanded inside a quoted
-    # herestring, and the array is iterated quoted — a literal `*` in a path stays
-    # literal. (Newline separators collapse via source backslash-newline joining,
-    # same as every other assignment in a sourced config.)
+    # 0 (review F3). NORMALIZE tabs/newlines to spaces BEFORE `read -ra`: read
+    # stops at the first newline, so a multi-line value would silently drop every
+    # token past line 1 (review F4.1). The parameter expansions are IFS-independent
+    # and the value stays quoted throughout, so pathname expansion never happens
+    # (no `set -f` save/restore) and the ambient IFS cannot corrupt the split.
+    # bash 3.2-safe; `local IFS` is restored on return.
     local IFS=$' \t\n'
+    local _norm=${SKILL_MOUNTS//$'\t'/ }
+    _norm=${_norm//$'\n'/ }
     local -a mounts=()
-    read -ra mounts <<< "$SKILL_MOUNTS"
+    read -ra mounts <<< "$_norm"
+    # F4.2: raw value non-empty (and not the `none` sentinel, handled above) but
+    # parsed to zero entries (whitespace only) = declared nothing verifiable =
+    # fail closed. Sibling to the for-loop: on empty it records the MISS, then the
+    # loop iterates zero times; on non-empty it is a no-op and the loop sweeps.
+    if [ "${#mounts[@]}" -eq 0 ]; then
+      d_miss "SKILL_MOUNTS set but parsed to no entries (whitespace only) — cannot verify" \
+        "declare an absolute mount path, or set SKILL_MOUNTS=none in $DEFAULTS"
+    fi
     for M in ${mounts[@]+"${mounts[@]}"}; do
       # Absolute-path enforcement: a non-`/`-leading entry is ambiguous. The whole-
       # list `none` sentinel was handled above, so any other relative entry here is
