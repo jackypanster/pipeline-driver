@@ -25,6 +25,11 @@ REVIEW_MODEL_EXPECT=gpt-5.6
 # model's plan only allows interactive coding tools) — `herdr pane run`, read-first
 # {done,idle} guard, fails closed unless Herdr's agent detection is
 # hook/manifest-authoritative.
+# Transport choice is a recorded per-CLI decision, not a mood: run the qualification
+# probe (README §Impl transports -> "Choosing the impl transport"), then note the
+# outcome here so it survives operator memory, e.g.:
+#   pi via zai/glm: headless FAIL (plan rejects cc_entrypoint) -> herdr
+#   claude direct:  headless PASS 2026-08-02 (stdin closed ok, rc faithful) -> claude
 IMPL_TRANSPORT=herdr
 IMPL_SLASH_CMD=/skill:pipeline-impl   # pi registers skills as /skill:<name>
 # HERDR_RESET_CMD=/new                # herdr: per-card TUI reset (both sides guarded); empty = off
