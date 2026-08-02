@@ -115,6 +115,26 @@ the first trial run). Herdr injects `HERDR_PANE_ID` into every pane it manages �
 including the one running the driver — so the driver captures and unsets the inherited
 value, excludes its own pane from discovery, and rejects a pinned target equal to it.
 
+### Choosing the impl transport (decision rule, 2026-08-02)
+
+**Default: qualify each impl CLI once with a ~10-minute headless probe; `claude` (headless) when it passes and the run is unattended; `herdr` otherwise.** The axis is completion-signal strength + channel compliance, not an intrinsic safety ranking: headless yields TWO completion signals (child exit code + the remote journal) and the deny-merge `--settings` hook travels with it; the herdr transport has ONE signal (journal polling — no child exit code) plus the guard machinery documented above, and is the compliant channel where a gateway rejects headless billing markers.
+
+The qualification probe (all three must pass):
+
+1. **stdin discipline** — with stdin explicitly closed (`< /dev/null`), the CLI runs a trivial prompt to completion and exits. No stdin-read hang (field cases: `codex exec` shows `Reading additional input from stdin...` and hangs without it; `pi -p` hangs when spawned with a piped stdin).
+2. **exit-code fidelity** — rc=0 on success, non-zero on failure. An always-zero CLI leaves the journal as the only truth, halving the signal advantage of going headless.
+3. **gateway compliance** — the billing gateway accepts the CLI's headless entrypoint (counter-example recorded above: bigmodel.cn answers a fake-529 to the `cc_entrypoint=sdk-cli` marker). Synthetic errors on headless markers ⇒ the TUI pane is the compliant channel.
+
+| situation | transport |
+|---|---|
+| probe passed + walk-away/unattended run | `claude` (headless) — two signals, hook travels, pairs with `NOTIFY_EXEC` |
+| gateway rejects the headless marker | `herdr` — the reason this transport exists |
+| probe failed (stdin hang / exit-code lies) | `herdr` — its journal-only completion detection assumes nothing about the child |
+| operator attended, wants to watch/intervene | `herdr` — panes are the attended surface (coordinated-mode SOP) |
+| no transport qualifies (headless probe fails AND the pane lacks herdr detection authority) | fix the channel first (add the herdr manifest rule, or pick another CLI) — never drive blind. Field case 2026-08-02: the Kimi Code TUI reports only the always-idle fallback; that pane is not drivable until Herdr grows a rule for it |
+
+Record each CLI's probe outcome as a comment next to `IMPL_TRANSPORT` in `~/.config/pipeline-driver/drive.defaults` so the choice survives operator memory. Scope: this table governs the impl slot that `drive.sh` runs. Cross-stage panes (the coordinated-mode CC/impl/review trio) belong to the `pipeline-coordinate` playbook, not to `drive.config`.
+
 ## Merge safety (read this before trusting it)
 
 The driver must never let the autonomous loop merge the feature PR or clobber trunk.
