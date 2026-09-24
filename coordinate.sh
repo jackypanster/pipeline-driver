@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# coordinate.sh — the read-only preflight + summary companion to drive.sh for the
+# coordinate.sh — the read-only preflight + summary tool for coordinated mode in the
 # `pipeline` toolchain (design v1.3).
 #
 # WHAT IT IS: `doctor` (read-only full preflight) and `status` (read-only
 # summary) are the COMPLETE surface — not a phase of something larger. The tool
 # is stateless: it only reads the target repo's .pipeline/<feature>/
-# artifacts (and, for doctor, the role panes). drive.sh owns the impl card loop.
+# artifacts (and, for doctor, the role panes). Dispatch belongs to the
+# `pipeline-coordinate` playbook (a CC session driving the role panes), not here.
 #
 # The dispatch half (`watch`/`resume`) was deliberately rejected: bash dispatch
-# cannot satisfy the design without breaking drive.sh's interactive trust gate.
+# cannot satisfy the design without breaking the (then-live) drive.sh interactive
+# trust gate — drive.sh is now retired, full tree at tag archive/drive-final.
 # PR #14 was closed unmerged: https://github.com/jackypanster/pipeline-driver/pull/14
 # The pivot to coordinated-mode dispatch (the CC-as-coordinator playbook) is
 # recorded in the design doc v1.3 §25, pinned at:
@@ -32,7 +34,8 @@ AWK="$HERE/parse-tail.awk"
 # The coordinator may itself run inside a Herdr pane (HERDR_PANE_ID injected into
 # every managed pane). Capture it as "the pane running coordinate.sh" so pane
 # resolution can EXCLUDE it and reject a pinned self — then drop it before
-# sourcing config, exactly as drive.sh does. A driver launched inside a role
+# sourcing config (pattern originally from the retired drive.sh, tag
+# archive/drive-final). A tool launched inside a role
 # worktree would otherwise match its own cwd and type into itself.
 COORD_SELF_PANE="${HERDR_PANE_ID:-}"
 unset HERDR_PANE_ID 2>/dev/null || true
@@ -46,7 +49,7 @@ AUTH_TIMEOUT_MS="${COORD_AUTH_TIMEOUT_MS:-5000}"
 # Herdr daemon would hang the whole pane section. Same bounded guard as agent explain.
 PANE_LIST_TIMEOUT_MS="${COORD_PANE_LIST_TIMEOUT_MS:-5000}"
 
-# ---- error model (design §14; drive.sh's where/input/reason/next_action) --------
+# ---- error model (design §14; where/input/reason/next_action) -------------------
 # coord_die <code> <where> <input> <reason> <next_action>  — hard abort, exit 1.
 coord_die() {
   printf '\n=== COORDINATOR FATAL ===\n'        >&2
@@ -204,12 +207,13 @@ valid_feature_slug() {
 
 # ---- machine bindings (optional CC/IMPL/REVIEW _AGENT + _MODEL_EXPECT fields) ---
 # Six OPTIONAL fields, set in the global defaults file, overridable per-config in
-# coordinate.config (config wins — same precedence direction as drive.sh). All of
+# coordinate.config (config wins). All of
 # this is ADDITIVE: an install with none of the fields behaves exactly as before
 # (every field <unset>, zero new MISS).
 
-# defaults_path — the global defaults file location, verbatim from drive.sh
-# ($DRIVE_DEFAULTS overrides; the test harness pins it).
+# defaults_path — the global defaults file location (path + name inherited from the
+# retired drive.sh, tag archive/drive-final; kept so existing installs keep working).
+# $DRIVE_DEFAULTS overrides; the test harness pins it.
 defaults_path() { printf '%s' "${DRIVE_DEFAULTS:-${XDG_CONFIG_HOME:-$HOME/.config}/pipeline-driver/drive.defaults}"; }
 
 # valid_agent <value> — [A-Za-z0-9][A-Za-z0-9._-]*, ≤32 BYTES. Byte-exact and
@@ -300,8 +304,8 @@ print_machine_bindings() {
 #      would block on the descendant (an immortal child hangs forever; the reviewer
 #      measured 2.04s for a 100ms budget). So on normal exit we KILL the group too,
 #      then drain it: the command substitution can NEVER outlive the deadline.
-# (drive.sh run_with_timeout_ms documents the same process-group kill discipline;
-# reimplemented here, never sourced.)
+# (Same process-group kill discipline as run_with_timeout_ms in the retired drive.sh,
+# tag archive/drive-final.)
 bounded_run_ms() {
   local ms=$1; shift
   # NEVER launch with a non-positive/invalid budget: ualarm(0) DISABLES the
@@ -344,8 +348,8 @@ bounded_run_ms() {
 
 # authority_of <pane> <timeout_ms> — echoes "1" (authoritative) / "0" (not, incl.
 # unreadable). The SAME single `herdr agent explain` read yields both the state
-# and the authority flag (drive.sh herdr_agent_sample pattern, reimplemented here
-# for multi-role use; never sourced from drive.sh). Authoritative = a lifecycle
+# and the authority flag (herdr_agent_sample pattern originally from the retired
+# drive.sh, tag archive/drive-final; multi-role here). Authoritative = a lifecycle
 # hook OR a MATCHED manifest rule, with NO always-idle fallback in effect.
 authority_of() {
   local pane=$1 ms=$2 json
@@ -504,7 +508,7 @@ cmd_doctor() {
   d_info() { printf 'info  %s\n' "$1"; }
   d_warn() { printf 'warn  %s\n      %s\n' "$1" "$2"; warn=$((warn+1)); }
   d_miss() { printf 'MISS  %s\n      fix: %s\n' "$1" "$2"; bad=$((bad+1)); }
-  # d_code <CODE> <where> <input> <reason> <next_action> — drive.sh d_miss shape
+  # d_code <CODE> <where> <input> <reason> <next_action> — d_miss shape
   # with the FULL §14 tuple (code/where/input/reason/next_action) so every MISS
   # stays locatable. (finding: §14 tuple.)
   d_code() {
@@ -836,7 +840,7 @@ case "$SUBCMD" in
     [ -n "$CONF" ] || { echo "coordinate.sh: doctor requires --config <path>" >&2; usage; exit 2; }
     [ -f "$CONF" ] || coord_die CONFIG_INVALID "doctor:arg-parse" "$CONF" "config file not found" "create it from coordinate.config.example"
     # Global defaults first (optional), per-invocation config second — config wins.
-    # Same path expression + precedence direction as drive.sh; any unrelated
+    # Defaults first, config wins; any unrelated
     # variable the defaults file sets flows into validate_config unchanged.
     DEFAULTS="$(defaults_path)"
     # shellcheck disable=SC1090

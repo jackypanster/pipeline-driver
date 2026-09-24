@@ -1,2 +1,3 @@
-drive.config
 coordinate.config
+# retired drive.sh per-feature config (tag archive/drive-final) — still ignored so a stale local copy is never committed
+drive.config

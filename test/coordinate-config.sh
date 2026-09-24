@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Hermetic tests for coordinate.sh config validation (design §11). Each §11 rule
 # is broken one at a time and the matching §14 code must surface in `doctor`
-# output (drive.sh d_miss shape) with a non-zero exit. The valid baseline prints
+# output (d_miss shape) with a non-zero exit. The valid baseline prints
 # "config valid" and NONE of the config codes. Panes/remote are intentionally not
 # stubbed here — the config section is what is under test, and a pane MISS is fine.
 # Run: bash test/coordinate-config.sh
